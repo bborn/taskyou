@@ -130,3 +130,35 @@ checks suppressed in this microbenchmark). UI/DB/parity/server tests and focused
 race tests passed. This does **not** measure or fix pane reattachment/cleanup:
 those lifecycle operations still need coordination outside the input loop, along
 with the outstanding daemon-maintenance work.
+
+## Pane handoff follow-up
+
+Back and previous/next task transitions now detach the detail model immediately
+and clean up its panes in a background command. Registered pane workers finish
+before cleanup; a new detail attachment waits for the handoff. Worker results
+carry their originating model, so a late result cannot modify the next task.
+Back cancels pending task loads. Periodic pane-health checks use private snapshots
+and schedule tracked attachment work when recovery is needed.
+
+A temporary tmux stub that fails every command after 30 ms measured **0.066 ms**
+for the Back handler and **907.812 ms** for background cleanup. This proves the
+command boundary, not terminal rendering latency. Focused race tests cover worker
+ordering, immediate board return, cancellation, stale probes and destination
+recovery. UI/DB/parity/server suites passed.
+
+Real private-tmux QA used a harmless sleep process in task #10000 over ten
+attach/detach cycles. The first check exposed an existing bug: moving the last
+pane out of a daemon session removes the session; failed destination creation
+then killed the executor. Cleanup now recreates the missing destination. If
+recovery still fails, it preserves the pane and returns to its detail view,
+preventing a new task from replacing it. The corrected ten-cycle run preserved
+the same sleep process throughout and restored the full layout every time.
+
+Measured Escape-to-board **141.085 ms median / 227.65 ms worst**, with full layout
+restoration **212.195 / 262.25 ms**. Raw results are in
+`/private/tmp/ty-qa-scroll/pane-handoff.json`. This is improved input-loop isolation,
+not evidence of an instant terminal transition. Escape timing is 10 ms in the QA
+server; a proposed q comparison was invalid because q is not a detail Back key.
+The remaining terminal-visible delay needs further profiling. The QA server was
+stopped after checks. Other action-specific cleanup paths and daemon maintenance
+remain part of the active audit.

@@ -414,6 +414,9 @@ type AppModel struct {
 	detailView   *DetailModel
 	// Prevent rapid arrow key navigation from causing duplicate panes
 	taskTransitionInProgress bool
+	detailCleanupInFlight    bool
+	pendingDetailLoad        *taskLoadedMsg
+	taskLoadRevision         uint64
 	// Grace period after task transition to prevent focus flashing
 	taskTransitionGraceUntil time.Time
 
@@ -735,7 +738,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -1096,6 +1099,35 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.refreshAllPRs())
 		}
 
+	case detailPaneResultMsg:
+		if m.detailView != nil && m.detailView == msg.owner {
+			var cmd tea.Cmd
+			m.detailView, cmd = m.detailView.Update(msg.result)
+			cmds = append(cmds, cmd)
+		}
+
+	case detailCleanupMsg:
+		m.detailCleanupInFlight = false
+		if msg.failed != nil {
+			m.detailView = msg.failed
+			m.currentView = ViewDetail
+			m.pendingDetailLoad = nil
+			m.taskLoadRevision++
+			m.taskTransitionInProgress = false
+			m.notification = "Could not return task panes to the daemon; the running process was preserved. Try Back again."
+			m.detailView.paneError = m.notification
+			if m.detailView.task != nil {
+				m.kanban.SelectTask(m.detailView.task.ID)
+			}
+			m.notifyUntil = time.Now().Add(10 * time.Second)
+			return m, nil
+		}
+		if m.pendingDetailLoad != nil {
+			pending := *m.pendingDetailLoad
+			m.pendingDetailLoad = nil
+			return m.Update(pending)
+		}
+
 	case detailRefreshMsg:
 		if m.detailView != nil && m.detailView == msg.owner {
 			cmds = append(cmds, m.detailView.handleRefreshSnapshot(msg))
@@ -1156,6 +1188,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskLoadedMsg:
+		if msg.revision != m.taskLoadRevision {
+			return m, nil
+		}
+		if m.detailCleanupInFlight {
+			m.pendingDetailLoad = &msg
+			return m, nil
+		}
 		// Reset transition flag now that task is loaded
 		m.taskTransitionInProgress = false
 		// Set grace period to prevent focus flashing during task switch
@@ -1627,6 +1666,7 @@ func (m *AppModel) View() string {
 		if m.detailView != nil {
 			return m.detailView.View()
 		}
+		return m.viewDashboard()
 	case ViewNewTask:
 		if m.newTaskForm != nil {
 			return m.newTaskForm.View()
@@ -2623,6 +2663,33 @@ func scoreTaskFields(task *db.Task, query string, includeProject bool) int {
 	return best
 }
 
+type detailCleanupMsg struct {
+	failed *DetailModel
+}
+
+// Detach ownership immediately so board input can continue. New detail loads
+// wait for the handoff, and old pane results cannot reach the next detail view.
+func (m *AppModel) detachDetail(saveHeight bool) tea.Cmd {
+	if m.detailView == nil {
+		return nil
+	}
+	detail := m.detailView
+	m.detailView = nil
+	m.detailCleanupInFlight = true
+	return func() tea.Msg {
+		detail.paneWork.Wait()
+		detail.closeRemotePane(true)
+		if detail.claudePaneID != "" || detail.workdirPaneID != "" {
+			detail.breakTmuxPanes(saveHeight, true)
+		}
+		if detail.claudePaneID != "" {
+			return detailCleanupMsg{failed: detail}
+		}
+		detail.releaseExecutorLock()
+		return detailCleanupMsg{}
+	}
+}
+
 func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If detail view is in feedback mode, route all messages there
 	if m.detailView != nil && m.detailView.InFeedbackMode() {
@@ -2644,14 +2711,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
+		m.taskLoadRevision++
+		m.pendingDetailLoad = nil
+		m.taskTransitionInProgress = false
 		m.currentView = ViewDashboard
 		// Clear origin column when exiting detail view
 		m.kanban.ClearOriginColumn()
-		if m.detailView != nil {
-			m.detailView.Cleanup()
-			m.detailView = nil
-		}
-		return m, nil
+		return m, m.detachDetail(true)
 	}
 
 	// Handle queue/close/retry from detail view
@@ -2789,18 +2855,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.taskTransitionInProgress = true
 		// Clean up current detail view before switching (without saving height)
-		if m.detailView != nil {
-			m.detailView.CleanupWithoutSaving()
-			m.detailView = nil
-		}
+		cleanup := m.detachDetail(false)
 		// Move selection up in the kanban
 		m.kanban.MoveUp()
 		// Load the new task
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.loadTask(task.ID)
+			return m, tea.Batch(cleanup, m.loadTask(task.ID))
 		}
 		m.taskTransitionInProgress = false
-		return m, nil
+		return m, cleanup
 	}
 	if key.Matches(keyMsg, m.keys.Down) {
 		// Ignore if no next task exists
@@ -2813,18 +2876,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.taskTransitionInProgress = true
 		// Clean up current detail view before switching (without saving height)
-		if m.detailView != nil {
-			m.detailView.CleanupWithoutSaving()
-			m.detailView = nil
-		}
+		cleanup := m.detachDetail(false)
 		// Move selection down in the kanban
 		m.kanban.MoveDown()
 		// Load the new task
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.loadTask(task.ID)
+			return m, tea.Batch(cleanup, m.loadTask(task.ID))
 		}
 		m.taskTransitionInProgress = false
-		return m, nil
+		return m, cleanup
 	}
 
 	if m.detailView != nil {
@@ -4238,6 +4298,7 @@ func (msg tasksLoadedMsg) latestChoicePrompt(taskID int64) (string, bool) {
 }
 
 type taskLoadedMsg struct {
+	revision      uint64
 	task          *db.Task
 	err           error
 	focusExecutor bool // Focus executor pane after entering detail view (e.g., from notification jump)
@@ -4478,6 +4539,9 @@ func (m *AppModel) loadTaskWithFocus(id int64) tea.Cmd {
 }
 
 func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
+	m.taskLoadRevision++
+	revision := m.taskLoadRevision
+	database := m.db
 	// Update last accessed timestamp (async, don't block UI)
 	if m.db != nil {
 		database := m.db
@@ -4485,8 +4549,8 @@ func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		task, err := m.db.GetTask(id)
-		return taskLoadedMsg{task: task, err: err, focusExecutor: focusExecutor}
+		task, err := database.GetTask(id)
+		return taskLoadedMsg{task: task, err: err, focusExecutor: focusExecutor, revision: revision}
 	}
 }
 
