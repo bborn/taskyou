@@ -4301,6 +4301,7 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 		model,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
+		tea.WithFPS(120), // Keep selection latency below a 60 Hz frame while scrolling.
 	)
 
 	if _, err := p.Run(); err != nil {

@@ -162,3 +162,73 @@ func TestTerminalEnrichmentKeepsCurrentPrompt(t *testing.T) {
 		t.Fatal("current capture was not applied")
 	}
 }
+
+func TestEventPromptIgnoresSupersededRead(t *testing.T) {
+	m, marker := refreshTestModel(t)
+	task := &db.Task{Title: "Prompt revision", Status: db.StatusProcessing}
+	if err := m.db.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.db.AppendTaskLog(task.ID, "question", "Old question"); err != nil {
+		t.Fatal(err)
+	}
+	old := m.loadEventPrompt(task.ID, task.Status)().(eventPromptMsg)
+	if err := m.db.AppendTaskLog(task.ID, "user", "Replied: continue"); err != nil {
+		t.Fatal(err)
+	}
+	current := m.loadEventPrompt(task.ID, task.Status)().(eventPromptMsg)
+	m.Update(current)
+	m.Update(old)
+	if m.tasksNeedingInput[task.ID] {
+		t.Fatal("late read restored a resolved prompt")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("prompt application ran terminal process")
+	}
+}
+
+func TestFocusCheckRunsInCommandAndIgnoresOldDetail(t *testing.T) {
+	m, marker := refreshTestModel(t)
+	t.Setenv("TMUX", "stub")
+	original := &DetailModel{tuiPaneID: "%original"}
+	m.currentView = ViewDetail
+	m.detailView = original
+	_, cmd := m.Update(focusTickMsg(time.Now()))
+	if cmd == nil || !m.focusLoadInFlight {
+		t.Fatal("focus check not scheduled")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("focus tick launched a process")
+	}
+	// Run the snapshot independently so the timer does not obscure the boundary.
+	msg := original.focusStateCmd()().(focusStateMsg)
+	replacement := &DetailModel{focused: false}
+	m.detailView = replacement
+	m.Update(msg)
+	if replacement.focused || m.focusLoadInFlight {
+		t.Fatal("old focus result changed replacement or retained slot")
+	}
+}
+
+func TestBoardLoadDoesNotSilentlyCapActiveTasks(t *testing.T) {
+	m, _ := refreshTestModel(t)
+	for i := 0; i < 250; i++ {
+		if err := m.db.CreateTask(&db.Task{Title: "Scroll fixture", Status: db.StatusBacklog}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := m.loadTasks()().(tasksLoadedMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if len(msg.tasks) != 250 {
+		t.Fatalf("loaded %d of 250 active tasks", len(msg.tasks))
+	}
+	m.Update(msg)
+	for i := 1; i < 250; i++ {
+		m.kanban.MoveDown()
+	}
+	if m.kanban.selectedRow != 249 {
+		t.Fatal("cannot scroll to final task")
+	}
+}

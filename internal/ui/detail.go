@@ -2980,32 +2980,26 @@ func (m *DetailModel) IsFocused() bool {
 	return m.focused
 }
 
-// RefreshFocusState is a lightweight refresh that only updates focus state.
-// Used by the fast focus tick for responsive dimming without full refresh overhead.
-func (m *DetailModel) RefreshFocusState() {
-	m.checkFocusState()
+type focusStateMsg struct {
+	detail  *DetailModel
+	focused bool
 }
 
-// checkFocusState checks if the TUI pane is the active pane in tmux.
-func (m *DetailModel) checkFocusState() {
-	// Default to focused if not in tmux or no panes joined
-	if os.Getenv("TMUX") == "" || m.tuiPaneID == "" {
-		m.focused = true
-		return
+// Capture inputs before launching the command: no mutable model reads in workers.
+func (m *DetailModel) focusStateCmd() tea.Cmd {
+	paneID, inTmux := m.tuiPaneID, os.Getenv("TMUX") != ""
+	return func() tea.Msg {
+		focused := true
+		if inTmux && paneID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+			if err == nil {
+				focused = strings.TrimSpace(string(out)) == paneID
+			}
+		}
+		return focusStateMsg{detail: m, focused: focused}
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	// Get the currently active pane ID
-	out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
-	if err != nil {
-		m.focused = true // Default to focused on error
-		return
-	}
-
-	activePaneID := strings.TrimSpace(string(out))
-	m.focused = activePaneID == m.tuiPaneID
 }
 
 // View renders the detail view.

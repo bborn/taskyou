@@ -468,7 +468,7 @@ type ListTasksOptions struct {
 	Type           string
 	Project        string
 	Tag            string // Filter to tasks carrying this exact tag (delimiter-safe; "gm:cortex" does not match "gm:cortex-2")
-	Limit          int
+	Limit          int    // Zero defaults to 100; negative means no limit.
 	Offset         int
 	IncludeClosed  bool // Include closed tasks even when Status is empty
 	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
@@ -552,8 +552,10 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
-	} else {
+	} else if opts.Limit == 0 {
 		query += " LIMIT 100"
+	} else {
+		query += " LIMIT -1"
 	}
 	if opts.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
@@ -1589,17 +1591,23 @@ func (db *DB) HasSessionStarted(taskID int64) (bool, error) {
 
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
+	return db.GetTaskLogsBefore(taskID, 0, limit)
+}
+
+// GetTaskLogsBefore returns a bounded history page, newest first. A zero beforeID selects the latest page.
+func (db *DB) GetTaskLogsBefore(taskID, beforeID int64, limit int) ([]*TaskLog, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-
-	rows, err := db.Query(`
-		SELECT id, task_id, line_type, content, created_at
-		FROM task_logs
-		WHERE task_id = ?
-		ORDER BY id DESC
-		LIMIT ?
-	`, taskID, limit)
+	query := `SELECT id, task_id, line_type, content, created_at FROM task_logs WHERE task_id = ?`
+	args := []any{taskID}
+	if beforeID > 0 {
+		query += " AND id < ?"
+		args = append(args, beforeID)
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query task logs: %w", err)
 	}
@@ -1723,12 +1731,20 @@ func (db *DB) GetTaskLogCount(taskID int64) (int, error) {
 
 // GetTaskLogsSince retrieves logs after a given ID.
 func (db *DB) GetTaskLogsSince(taskID int64, sinceID int64) ([]*TaskLog, error) {
-	rows, err := db.Query(`
-		SELECT id, task_id, line_type, content, created_at
-		FROM task_logs
-		WHERE task_id = ? AND id > ?
-		ORDER BY id ASC
-	`, taskID, sinceID)
+	return db.GetTaskLogsSinceLimit(taskID, sinceID, 0)
+}
+
+// GetTaskLogsSinceLimit bounds streaming catch-up without discarding older rows.
+// A zero limit preserves the unbounded internal API for existing callers.
+func (db *DB) GetTaskLogsSinceLimit(taskID, sinceID int64, limit int) ([]*TaskLog, error) {
+	query := `SELECT id, task_id, line_type, content, created_at FROM task_logs
+		WHERE task_id = ? AND id > ? ORDER BY id ASC`
+	args := []any{taskID, sinceID}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query task logs: %w", err)
 	}

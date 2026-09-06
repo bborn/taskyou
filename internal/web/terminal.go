@@ -78,6 +78,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	// Buffered so the reader never blocks; coalesces bursts into one redraw.
 	redraw := make(chan struct{}, 1)
+	inputActivity := make(chan struct{}, 1)
 	triggerRedraw := func() {
 		select {
 		case redraw <- struct{}{}:
@@ -122,6 +123,10 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			// Send raw input bytes to tmux using send-keys with literal flag
 			input := string(msg)
 			exec.Command("tmux", "send-keys", "-t", paneID, "-l", input).Run()
+			select {
+			case inputActivity <- struct{}{}:
+			default:
+			}
 		}
 	}()
 
@@ -129,6 +134,14 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Briefly sample faster after input so shell echo is visible within a frame,
+	// including output that arrives after send-keys returns. Idle terminals keep
+	// their inexpensive polling interval; bursts share one timer.
+	fastTimer := time.NewTimer(time.Hour)
+	fastTimer.Stop()
+	defer fastTimer.Stop()
+	var fastTick <-chan time.Time
+	var fastUntil time.Time
 	lastOutput := output
 	sendFrame := func() {
 		current, err := paneFrame(paneID)
@@ -145,6 +158,19 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-done:
 			return
+		case <-inputActivity:
+			fastUntil = time.Now().Add(time.Second)
+			if fastTick == nil {
+				fastTimer.Reset(16 * time.Millisecond)
+				fastTick = fastTimer.C
+			}
+		case <-fastTick:
+			sendFrame()
+			if time.Now().Before(fastUntil) {
+				fastTimer.Reset(33 * time.Millisecond)
+			} else {
+				fastTick = nil
+			}
 		case <-redraw:
 			// Give the pane a beat to reflow after the SIGWINCH before capturing.
 			time.Sleep(80 * time.Millisecond)

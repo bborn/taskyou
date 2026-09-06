@@ -402,6 +402,25 @@ func (db *DB) migrate() error {
 		db.Exec(m)
 	}
 
+	// Build board indexes after column migrations so older databases have
+	// pinned/deleted_at before these expressions are compiled.
+	for _, query := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_tasks_active_board ON tasks(
+			pinned DESC,
+			CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC,
+			id DESC
+		) WHERE deleted_at IS NULL AND status NOT IN ('done', 'archived')`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_status_recency ON tasks(
+			status,
+			CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC,
+			id DESC
+		) WHERE deleted_at IS NULL`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			return fmt.Errorf("create task listing index: %w", err)
+		}
+	}
+
 	// Note: SQLite doesn't support ALTER COLUMN DEFAULT directly
 	// The default value change for project column will be handled in the application layer
 	// New tasks will get 'personal' as default through the form and executor logic

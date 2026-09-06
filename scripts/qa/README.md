@@ -273,3 +273,23 @@ remote returns 403 on PutObject); override via `TY_QA_R2_REMOTE`/`TY_QA_R2_BUCKE
 - An agent's `pane_current_command` shows as the Claude **version string** (e.g. `2.1.162`), not `claude`.
 - Claude's folder-trust prompt needs one `Enter` unless `~/.claude.json` already trusts the worktree (`ty-qa-agent.sh` sends it).
 - Requires `tmux`, `go`, `python3`; `jq` and `sqlite3` for state filters / the agent helper.
+
+### Sustained Kanban scrolling
+
+`ty-qa-scroll.py` tracks the highlighted task ID in rendered tmux frames, rather
+than counting any screen change as an input response. Run with Backlog focused
+and at least 301 ordinary (non-workflow) backlog tasks after the selected task:
+
+```bash
+TY_QA_ROOT=/tmp/ty-qa TY_QA_SID=qa \
+  python3 scripts/qa/ty-qa-scroll.py scroll-30hz
+TY_QA_ROOT=/tmp/ty-qa TY_QA_SID=qa TY_QA_SCROLL_RATE=60 \
+  python3 scripts/qa/ty-qa-scroll.py scroll-60hz busy
+```
+
+It sends 300 Down and 300 Up keys at the requested rate, measures visible selection
+latency, and reports the final expected/actual task IDs and observed frame gaps.
+`TY_QA_SCROLL_STEPS` changes the distance. `busy` writes synthetic logs at about
+50/second to an existing processing fixture; keep the QA executor frozen. Busy
+mode refuses database roots outside `/tmp`. JSON results stay in the QA root.
+The measurement includes tmux IPC and output scheduling, not physical iTerm pixels.

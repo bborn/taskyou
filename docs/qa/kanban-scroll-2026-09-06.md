@@ -1,0 +1,84 @@
+# Kanban scrolling stress test — September 6, 2026
+
+The user prioritized fluid TUI scrolling. The previous 60-task benchmark alternated
+between two visible cards and did not exercise growing columns or viewport scrolling.
+
+## Changes
+
+- Render signatures cover the visible cards, column metadata, and scroll position.
+  Scrolling no longer hashes every task and its summary on every keypress.
+- Pinned-layout calculation stops once pins fill the viewport, avoiding a scan of
+  an arbitrarily long pinned prefix on navigation.
+- The TUI explicitly requests all active tasks; `Limit: 0` had silently loaded 100.
+  The shared listing API retains its zero/default behavior and uses negative limits
+  for explicit unlimited queries.
+- Local and SSH Kanban renderers use Bubble Tea's supported 120 fps ceiling to
+  reduce output scheduling latency. Unchanged frames remain cached.
+- Added viewport/cache and full-active-list regression coverage and a scrolling
+  benchmark at 100 / 1,000 / 10,000 tasks.
+- Added `scripts/qa/ty-qa-scroll.py`, which measures highlighted task IDs and verifies
+  final selection, rather than treating unrelated screen changes as successful input.
+
+## Render benchmark
+
+Apple M4 Pro, 160×50 terminal, one backlog column, descriptive titles and ~1 KiB
+summaries, navigation repeatedly crossing viewport boundaries:
+
+| Tasks | Before | After |
+|---|---:|---:|
+| 100 | 0.480 ms | 0.286 ms |
+| 1,000 | 2.590 ms | 0.289 ms |
+| 10,000 | 23.115 ms | 0.286 ms |
+
+These timings include navigation and View, not terminal I/O. The new viewport
+signature reduces 10,000-task frame computation by about 80×.
+
+## Actual TUI stress test
+
+Private QA tmux server, 160×50, 10,000 backlog tasks plus 100 each processing,
+blocked, and done. Each task has a ~1 KiB summary and body. The executor was frozen
+using a persistent sleep in the private tmux server. A separate SQLite writer
+appended approximately 50 synthetic log rows per second.
+
+Both comparison binaries loaded all 10,000 backlog tasks and used the new database
+indexes. The before binary retained the full-board render hash; the after binary
+used viewport hashing. No concurrent builds/tests ran during these main latency
+measurements.
+
+At **30 keys/second**, 300 Down followed by 300 Up:
+
+| Direction | Before median / p95 / worst | After median / p95 / worst |
+|---|---:|---:|
+| Down | 68.13 / 190.39 / 222.65 ms | 21.91 / 29.60 / 33.86 ms |
+| Up | 100.88 / 203.98 / 238.69 ms | 15.55 / 29.93 / 33.83 ms |
+
+All 600 selected positions were observed in both runs, and both final task IDs
+matched exactly. This after measurement still used the 60 fps renderer ceiling.
+
+After raising the renderer ceiling to 120 fps, at **60 keys/second**:
+
+| Direction | Median | p95 | Worst |
+|---|---:|---:|---:|
+| Down | 15.39 ms | 22.69 ms | 57.53 ms |
+| Up | 13.71 ms | 20.92 ms | 26.44 ms |
+
+Both final IDs matched, demonstrating that input was not lost. The sampler observed
+589 of 600 intermediate selections at this higher rate; skipped observed frames
+are not equivalent to dropped inputs. Largest observed frame gaps were 58.41 ms
+Down and 34.22 ms Up. The isolated outlier remains visible in this report.
+
+A separate sequence of **200 rapid reversals** (Down, Up, Right, Left repeated),
+waiting for the exact expected highlighted ID each time, measured **13.74 ms median,
+19.80 ms p95, and 23.81 ms maximum**. This reversal run had no background writer.
+
+Timings include key injection, tmux IPC, frame scheduling, and pane capture. They
+measure keyboard scrolling and column navigation, not physical iTerm rendering or
+mouse-wheel behavior. Raw measurements and synthetic fixtures remain under
+`/private/tmp/ty-qa-scroll/` on the audit machine.
+
+## Remaining performance work
+
+The broader audit is still active: asynchronous detail refresh/cleanup, asynchronous
+search, eliminating duplicate desktop board fetches, and separating daemon
+maintenance from queue dispatch remain to implement and verify. The scrolling
+results above do not claim those unrelated paths are complete.

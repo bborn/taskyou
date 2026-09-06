@@ -427,8 +427,12 @@ func (k *KanbanBoard) columnLayoutFor(colIdx, maxVisible int) columnLayout {
 		maxVisible = 1
 	}
 	col := k.columns[colIdx]
-	pinned, _ := splitPinnedTasks(col.Tasks)
-	pinnedCount := len(pinned)
+	// Once pins fill the viewport they all scroll; scanning the rest cannot
+	// change the layout. Keep navigation constant-time even in all-pinned lists.
+	pinnedCount := 0
+	for pinnedCount < len(col.Tasks) && pinnedCount < maxVisible && col.Tasks[pinnedCount].Pinned {
+		pinnedCount++
+	}
 
 	fixedPinned := pinnedCount
 	if pinnedCount >= maxVisible {
@@ -736,7 +740,8 @@ func (s *sigHasher) boolean(b bool) {
 	}
 }
 
-// renderSignature hashes every input that affects the board's rendered output.
+// renderSignature hashes inputs that affect the current viewport. Off-screen
+// cards cannot change its pixels; their current state is hashed when scrolled in.
 //
 // IMPORTANT: when adding a new field to renderTaskCard / viewDesktop / viewMobile
 // that changes what is drawn, add it here too, or the render cache will show stale
@@ -761,10 +766,21 @@ func (k *KanbanBoard) renderSignature() uint64 {
 	for ci := range k.columns {
 		col := &k.columns[ci]
 		h.str(col.Status)
+		h.str(col.Title)
 		h.str(string(col.Color))
 		h.str(col.Icon)
 		h.int(len(col.Tasks))
-		for _, t := range col.Tasks {
+		if (k.IsMobileMode() && ci != k.selectedCol) || (!k.IsMobileMode() && k.IsColumnCollapsed(ci)) {
+			continue
+		}
+		lay := k.columnLayoutFor(ci, k.maxVisibleCards())
+		h.int(lay.fixedPinned)
+		for _, t := range col.Tasks[:lay.fixedPinned] {
+			k.hashTaskCard(&h, t)
+		}
+		start := lay.fixedPinned + lay.scrollOffset
+		end := min(start+lay.scrollCapacity, len(col.Tasks))
+		for _, t := range col.Tasks[start:end] {
 			k.hashTaskCard(&h, t)
 		}
 	}

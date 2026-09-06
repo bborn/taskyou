@@ -17,15 +17,30 @@ export function subscribeBoard(onChange: () => void): () => void {
 export function subscribeTaskLogs(
   taskId: number,
   since: number,
-  onLog: (log: LogLine) => void,
+  onLogs: (logs: LogLine[]) => void,
 ): () => void {
   const source = new EventSource(`${apiBase()}/api/tasks/${taskId}/stream?since=${since}`);
+  const pending = new Map<number, LogLine>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   source.addEventListener("log", (event) => {
     try {
-      onLog(JSON.parse((event as MessageEvent).data));
+      const line = JSON.parse((event as MessageEvent).data) as LogLine;
+      pending.set(line.id, line);
+      // Background tabs throttle timers. Bound pending storage as well as state.
+      if (pending.size > 500) pending.delete(pending.keys().next().value!);
+      if (timer === undefined) timer = setTimeout(() => {
+        timer = undefined;
+        const batch = [...pending.values()];
+        pending.clear();
+        onLogs(batch);
+      }, 33);
     } catch {
       // skip malformed payloads
     }
   });
-  return () => source.close();
+  return () => {
+    source.close();
+    clearTimeout(timer);
+    pending.clear();
+  };
 }

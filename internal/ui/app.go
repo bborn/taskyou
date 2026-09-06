@@ -380,6 +380,8 @@ type AppModel struct {
 	loading              bool
 	tasksLoadInFlight    bool
 	terminalLoadInFlight bool
+	focusLoadInFlight    bool
+	promptRevisions      map[int64]uint64
 	tasksLoadPending     bool
 	err                  error
 	notification         string    // Notification banner text
@@ -731,7 +733,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -1009,6 +1011,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		for id := range m.promptRevisions {
+			m.promptRevisions[id]++
+		}
+
 		// Sync permission prompt state for all active tasks from DB hook logs.
 		// This is status-agnostic: detects pending prompts on any task, and
 		// clears stale entries when prompts are resolved. Only queries tasks
@@ -1099,6 +1105,31 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.tasksNeedingInput[id] && m.executorPrompts[id] == prompt.text && prompt.paneContent != "" {
 				m.executorPrompts[id] = prompt.paneContent
 			}
+		}
+
+	case eventPromptMsg:
+		if m.promptRevisions[msg.taskID] != msg.revision {
+			break
+		}
+		if msg.prompt.text == "" {
+			delete(m.tasksNeedingInput, msg.taskID)
+			delete(m.questionPrompts, msg.taskID)
+			delete(m.executorPrompts, msg.taskID)
+		} else {
+			if !m.terminalLoadInFlight {
+				m.terminalLoadInFlight = true
+				cmds = append(cmds, m.loadBoardTerminals(map[int64]taskChoicePrompt{msg.taskID: msg.prompt}))
+			}
+			m.tasksNeedingInput[msg.taskID] = true
+			m.questionPrompts[msg.taskID] = msg.prompt.isQuestion
+			m.executorPrompts[msg.taskID] = strings.TrimPrefix(msg.prompt.text, "Waiting for permission: ")
+		}
+		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+
+	case focusStateMsg:
+		m.focusLoadInFlight = false
+		if m.detailView != nil && m.detailView == msg.detail && m.currentView == ViewDetail {
+			m.detailView.focused = msg.focused
 		}
 
 	case projectInferredMsg:
@@ -1431,32 +1462,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
 						}
-						// Sync cached prompt state on any status change.
-						// Re-validate existing entries, and detect new prompts for
-						// newly-blocked tasks so the user can approve/deny immediately
-						// without waiting for the next loadTasks poll.
-						if m.tasksNeedingInput[event.TaskID] {
-							if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt == "" {
-								delete(m.tasksNeedingInput, event.TaskID)
-								delete(m.questionPrompts, event.TaskID)
-								delete(m.executorPrompts, event.TaskID)
-							} else {
-								m.questionPrompts[event.TaskID] = isQ
-							}
-						} else if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt != "" {
-							m.tasksNeedingInput[event.TaskID] = true
-							m.questionPrompts[event.TaskID] = isQ
-							paneContent := executor.CapturePaneContent(executor.TmuxSessionName(event.TaskID), 15)
-							if paneContent != "" {
-								m.executorPrompts[event.TaskID] = paneContent
-							} else {
-								displayPrompt := prompt
-								if strings.HasPrefix(prompt, "Waiting for permission: ") {
-									displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
-								}
-								m.executorPrompts[event.TaskID] = displayPrompt
-							}
-						}
+						cmds = append(cmds, m.loadEventPrompt(event.TaskID, event.Task.Status))
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
 					break
@@ -1505,8 +1511,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewDetail && m.detailView != nil {
 			// Skip focus checking during task transitions to prevent visual flashing
 			// The grace period allows the new task to settle before checking focus
-			if !m.taskTransitionInProgress && time.Now().After(m.taskTransitionGraceUntil) {
-				m.detailView.RefreshFocusState()
+			if !m.taskTransitionInProgress && time.Now().After(m.taskTransitionGraceUntil) && !m.focusLoadInFlight {
+				m.focusLoadInFlight = true
+				cmds = append(cmds, m.detailView.focusStateCmd())
 			}
 			cmds = append(cmds, m.focusTick())
 		}
@@ -4280,6 +4287,28 @@ const maxDoneTasksInKanban = 20
 // Matches the command palette's SearchTasks limit for consistency.
 const boardFilterDBSearchLimit = 100
 
+type eventPromptMsg struct {
+	taskID   int64
+	revision uint64
+	prompt   taskChoicePrompt
+}
+
+func (m *AppModel) loadEventPrompt(id int64, status string) tea.Cmd {
+	if m.promptRevisions == nil {
+		m.promptRevisions = make(map[int64]uint64)
+	}
+	m.promptRevisions[id]++
+	revision, database := m.promptRevisions[id], m.db
+	return func() tea.Msg {
+		var text string
+		var question bool
+		if status != db.StatusDone && status != db.StatusBacklog && status != db.StatusArchived {
+			text, question = loadChoicePrompt(database, id)
+		}
+		return eventPromptMsg{taskID: id, revision: revision, prompt: taskChoicePrompt{text: text, isQuestion: question}}
+	}
+}
+
 func (m *AppModel) loadTasks() tea.Cmd {
 	// Coalesce filesystem notifications and polling while a refresh is running.
 	// Keep one follow-up so a mutation during the query is not lost.
@@ -4291,7 +4320,7 @@ func (m *AppModel) loadTasks() tea.Cmd {
 	database := m.db
 	return func() tea.Msg {
 		// Load all non-done tasks (no limit)
-		activeTasks, err := database.ListTasks(db.ListTasksOptions{Limit: 0, IncludeClosed: false})
+		activeTasks, err := database.ListTasks(db.ListTasksOptions{Limit: -1, IncludeClosed: false})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
@@ -128,4 +129,28 @@ func BenchmarkRenderTaskCardCold(b *testing.B) {
 		sink = k.renderTaskCard(task, 36, false)
 	}
 	_ = sink
+}
+
+// Sustained scrolling: cross viewport boundaries, with substantial task history.
+func BenchmarkKanbanScroll(b *testing.B) {
+	for _, count := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			k := NewKanbanBoard(160, 50)
+			tasks := make([]*db.Task, count)
+			for i := range tasks {
+				tasks[i] = &db.Task{ID: int64(i + 1), Title: fmt.Sprintf("Task %d with a descriptive title", i), Summary: strings.Repeat("Summary text. ", 80), Status: db.StatusBacklog}
+			}
+			k.SetTasks(tasks)
+			k.View()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if k.selectedRow == count-1 {
+					k.selectedRow = 0
+				}
+				k.MoveDown()
+				k.View()
+			}
+		})
+	}
 }
