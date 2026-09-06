@@ -3074,47 +3074,14 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 		return
 	}
 
-	var windowsToKill []string
-	var canonicalFound bool
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
+	canonical, windowsToKill := duplicateTaskWindows(string(out), windowName, task.TmuxWindowID)
+	if canonical == "" {
+		return
+	}
+	if canonical != task.TmuxWindowID {
+		if err := e.db.UpdateTaskWindowID(taskID, canonical); err != nil {
+			return
 		}
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		sessionName := parts[0]
-		windowID := parts[1]
-		name := parts[2]
-
-		// Only look at daemon sessions
-		if !strings.HasPrefix(sessionName, "task-daemon-") {
-			continue
-		}
-
-		// Check for matching window name (including -shell variant)
-		if name != windowName && name != windowName+"-shell" {
-			continue
-		}
-
-		// Keep canonical window, kill duplicates
-		if task.TmuxWindowID != "" && windowID == task.TmuxWindowID {
-			canonicalFound = true
-			continue // Keep this one
-		}
-
-		if task.TmuxWindowID == "" && !canonicalFound {
-			// No canonical set - keep first, set it as canonical
-			if name == windowName { // Only set canonical for main window, not -shell
-				e.db.UpdateTaskWindowID(taskID, windowID)
-				canonicalFound = true
-				continue
-			}
-		}
-
-		windowsToKill = append(windowsToKill, windowID)
 	}
 
 	// Kill duplicates
@@ -3122,6 +3089,41 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
 		tmuxCmd(ctx, "kill-window", "-t", windowID).Run()
 	}
+}
+
+// Choose a surviving main window before deleting duplicates. Saved IDs become
+// stale when tmux restarts; their absence must never make every live window a
+// deletion candidate. Shell-only remnants are left alone without a main window.
+func duplicateTaskWindows(listing, windowName, savedID string) (string, []string) {
+	type window struct{ id, name string }
+	var windows []window
+	canonical := ""
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 || !strings.HasPrefix(parts[0], "task-daemon-") {
+			continue
+		}
+		id, name := parts[1], parts[2]
+		if (name != windowName && name != windowName+"-shell") || seen[id] {
+			continue
+		}
+		seen[id] = true
+		windows = append(windows, window{id, name})
+		if name == windowName && (canonical == "" || id == savedID) {
+			canonical = id
+		}
+	}
+	if canonical == "" {
+		return "", nil
+	}
+	var duplicates []string
+	for _, window := range windows {
+		if window.id != canonical {
+			duplicates = append(duplicates, window.id)
+		}
+	}
+	return canonical, duplicates
 }
 
 // GetTasksWithRunningShellProcess returns a map of task IDs that have a running process

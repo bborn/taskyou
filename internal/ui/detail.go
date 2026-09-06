@@ -1755,6 +1755,63 @@ func (m *DetailModel) getShellPaneWidth() string {
 	return "50%"
 }
 
+// Read all dimensions from the same window snapshot. Cleanup used to read
+// these separately, then repeat the same subprocesses when saving preferences.
+func (m *DetailModel) readPaneLayout(ctx context.Context) (heightPercent, shellPercent int) {
+	if m.tuiPaneID == "" {
+		return 0, 0
+	}
+	out, err := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.tuiPaneID,
+		"-F", "#{pane_id} #{pane_width} #{pane_height} #{window_height}").Output()
+	if err != nil {
+		return 0, 0
+	}
+	var shellWidth, executorWidth int
+	for _, line := range strings.Split(string(out), "\n") {
+		var id string
+		var width, height, totalHeight int
+		if n, _ := fmt.Sscanf(line, "%s %d %d %d", &id, &width, &height, &totalHeight); n != 4 {
+			continue
+		}
+		if id == m.tuiPaneID && height > 0 && totalHeight > 0 {
+			heightPercent = (height*100 + totalHeight/2) / totalHeight
+		}
+		if id == m.workdirPaneID {
+			shellWidth = width
+		}
+		if id == m.claudePaneID {
+			executorWidth = width
+		}
+	}
+	if shellWidth > 0 && executorWidth > 0 {
+		shellPercent = (shellWidth*100 + (shellWidth+executorWidth)/2) / (shellWidth + executorWidth)
+	}
+	return
+}
+
+// tmux accepts command separators as argv entries; no shell interpolation is
+// involved. A failed batch falls back to the original best-effort commands.
+func runTmuxBatch(ctx context.Context, commands [][]string) {
+	var args []string
+	for _, command := range commands {
+		if len(args) > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, command...)
+	}
+	if len(args) == 0 {
+		return
+	}
+	if osExec.CommandContext(ctx, "tmux", args...).Run() != nil {
+		for _, command := range commands {
+			if ctx.Err() != nil {
+				return
+			}
+			osExec.CommandContext(ctx, "tmux", command...).Run()
+		}
+	}
+}
+
 // getCurrentDetailPaneHeight returns the current detail pane height as a percentage (0-100).
 // Returns 0 on error.
 func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
@@ -2688,8 +2745,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	defer cancel()
 
 	// Get current dimensions to check if user has resized
-	currentHeight := m.getCurrentDetailPaneHeight(m.tuiPaneID)
-	currentWidth := m.getCurrentShellPaneWidth()
+	currentHeight, currentWidth := m.readPaneLayout(ctx)
 	log.Debug("breakTmuxPanes: currentHeight=%d, currentWidth=%d, initialHeight=%d, initialWidth=%d",
 		currentHeight, currentWidth, m.initialDetailHeight, m.initialShellWidth)
 
@@ -2702,8 +2758,8 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 
 	// Save pane positions before breaking (must save width before killing workdir pane)
 	// Save shell width if explicitly requested OR if user has resized
-	if saveHeight || widthChanged {
-		m.saveShellPaneWidth()
+	if m.database != nil && (saveHeight || widthChanged) && currentWidth >= 10 && currentWidth <= 90 {
+		m.database.SetSetting(config.SettingShellPaneWidth, fmt.Sprintf("%d%%", currentWidth))
 	}
 
 	// Save detail pane height if explicitly requested OR if user has resized
@@ -2712,33 +2768,29 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		// Use the stored TUI pane ID, not the currently focused pane.
 		// The user may have Tab'd to Claude or Shell pane before pressing Escape,
 		// so #{pane_id} could return the wrong pane.
-		m.saveDetailPaneHeight(m.tuiPaneID)
+		if m.database != nil && currentHeight >= 1 && currentHeight <= 50 {
+			m.database.SetSetting(config.SettingDetailPaneHeight, fmt.Sprintf("%d%%", currentHeight))
+		}
 	}
 
 	// Reset status bar and pane styling
 	log.Debug("breakTmuxPanes: resetting status bar and pane styling")
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " ").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-lines", "single").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-indicators", "off").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF").Run()
-
-	// Reset window styling (remove inactive pane de-emphasis)
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-style", "default").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-active-style", "default").Run()
-
-	// Unbind Shift+Arrow keybindings that were set in joinTmuxPanes
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Down").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Right").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Up").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Left").Run()
-
-	// Unbind Alt+Shift+Arrow task navigation keybindings
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Up").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
-
-	// Reset pane title back to main view label
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.uiSessionName+":.0", "-T", "Tasks").Run()
+	runTmuxBatch(ctx, [][]string{
+		{"set-option", "-t", m.uiSessionName, "status-right", " "},
+		{"set-option", "-t", m.uiSessionName, "pane-border-lines", "single"},
+		{"set-option", "-t", m.uiSessionName, "pane-border-indicators", "off"},
+		{"set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151"},
+		{"set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF"},
+		{"set-option", "-t", m.uiSessionName, "window-style", "default"},
+		{"set-option", "-t", m.uiSessionName, "window-active-style", "default"},
+		{"unbind-key", "-T", "root", "S-Down"},
+		{"unbind-key", "-T", "root", "S-Right"},
+		{"unbind-key", "-T", "root", "S-Up"},
+		{"unbind-key", "-T", "root", "S-Left"},
+		{"unbind-key", "-T", "root", "M-S-Up"},
+		{"unbind-key", "-T", "root", "M-S-Down"},
+		{"select-pane", "-t", m.uiSessionName + ":.0", "-T", "Tasks"},
+	})
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {

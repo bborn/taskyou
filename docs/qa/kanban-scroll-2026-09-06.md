@@ -162,3 +162,38 @@ server; a proposed q comparison was invalid because q is not a detail Back key.
 The remaining terminal-visible delay needs further profiling. The QA server was
 stopped after checks. Other action-specific cleanup paths and daemon maintenance
 remain part of the active audit.
+
+## Final bounded pass
+
+At the user's request, finish the current cleanup changes and report the remaining
+findings instead of expanding the audit further.
+
+Cleanup now reads pane dimensions once from a consistent window snapshot and
+batches fourteen style/binding reset commands into one tmux invocation. A failed
+batch retains the previous best-effort fallback. The repeated ten-cycle private
+QA test measured:
+
+| Measurement | Before median / worst | After median / worst |
+|---|---:|---:|
+| Escape to board | 141.08 / 227.65 ms | 69.25 / 190.89 ms |
+| Full layout restored | 212.19 / 262.25 ms | 181.42 / 225.57 ms |
+
+All ten cycles preserved the synthetic task process. Raw after results:
+`/private/tmp/ty-qa-scroll/pane-handoff-batched.json`. These are small local samples,
+not a guarantee of instant transitions or a statistically controlled benchmark.
+
+The first rerun also exposed stale canonical-window handling: duplicate cleanup
+would delete all matching live windows if the saved window ID no longer existed.
+It now selects a surviving main window before deleting duplicates, persists that
+selection, and leaves shell-only remnants alone. Pure regression tests cover stale
+and valid IDs, linked windows, unrelated sessions/tasks, and shell-only cases.
+The real QA run exercises replacement-window recovery with the stale saved ID.
+
+Validation: UI/DB/parity/server suites; focused executor regression and race test;
+pane-layout rounding/missing-pane tests; rebuilt CLI; ten real private pane cycles.
+
+Remaining findings, intentionally left for a later task: action-specific cleanup
+paths still contain synchronous work; daemon maintenance still shares the dispatch
+loop; some terminal-visible detail transitions still exceed 100 ms. Kanban scroll
+measurements and the implemented improvements above remain valid. No claim is
+made that every performance opportunity in the app has been exhausted.
