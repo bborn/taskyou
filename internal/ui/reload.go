@@ -1,8 +1,9 @@
 package ui
 
 import (
-	"github.com/bborn/workflow/internal/tuireload"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/bborn/workflow/internal/tuireload"
 )
 
 // ReloadState contains navigation state only. Forms are never interrupted.

@@ -1,8 +1,9 @@
 package ui
 
 import (
-	"github.com/bborn/workflow/internal/db"
 	"testing"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestReloadWaitsForUnfinishedForms(t *testing.T) {

@@ -1135,17 +1135,6 @@ func (m *DetailModel) closeRemotePane(resizeTUI bool) {
 	}
 }
 
-// remotePaneAlive reports whether the attach pane is still there. It dies when
-// the user closes it after reading why the session ended.
-func (m *DetailModel) remotePaneAlive() bool {
-	if m.remotePaneID == "" {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	return osExec.CommandContext(ctx, "tmux", "display-message", "-t", m.remotePaneID, "-p", "#{pane_id}").Run() == nil
-}
-
 // startAndJoinSession starts the task's executor session, locates its window, and
 // joins the panes, returning the resulting panesJoinedMsg. It is the shared body
 // of the async "no active window" path used by both startPanesAsync and
@@ -1581,14 +1570,6 @@ func (m *DetailModel) hasActiveTmuxSession() bool {
 	return m.cachedWindowTarget != ""
 }
 
-// refreshTmuxWindowTarget re-checks for available tmux sessions.
-// This is useful when the user wants to open tmux panes that were created
-// after the detail view was opened, or if panes were closed externally.
-func (m *DetailModel) refreshTmuxWindowTarget() bool {
-	m.cachedWindowTarget = m.findTaskWindow()
-	return m.cachedWindowTarget != ""
-}
-
 // paneJoinBlockedByLoad reports whether ensureTmuxPanesJoined should stay out of
 // the way because another code path is actively setting up the panes.
 //
@@ -1910,44 +1891,6 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 	totalWidth := shellWidth + claudeWidth
 	// Use proper rounding to avoid truncation errors
 	return (shellWidth*100 + totalWidth/2) / totalWidth
-}
-
-// saveDetailPaneHeight saves the current detail pane height to settings.
-func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	// Get the current height of the TUI pane
-	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
-	heightOut, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	paneHeight, err := strconv.Atoi(strings.TrimSpace(string(heightOut)))
-	if err != nil || paneHeight <= 0 {
-		return
-	}
-
-	// Get the total window height
-	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
-	totalHeightOut, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	totalHeight, err := strconv.Atoi(strings.TrimSpace(string(totalHeightOut)))
-	if err != nil || totalHeight <= 0 {
-		return
-	}
-
-	// Calculate the percentage with proper rounding to avoid truncation errors
-	// that cause the pane to progressively shrink over time
-	percentage := (paneHeight*100 + totalHeight/2) / totalHeight
-	if percentage >= 1 && percentage <= 50 {
-		heightStr := fmt.Sprintf("%d%%", percentage)
-		m.database.SetSetting(config.SettingDetailPaneHeight, heightStr)
-	}
 }
 
 // saveShellPaneWidth saves the current shell pane width to settings.

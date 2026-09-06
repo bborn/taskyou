@@ -3,11 +3,12 @@ package web
 import (
 	"context"
 	"fmt"
-	"github.com/bborn/workflow/internal/db"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 type logStreamRecorder struct {

@@ -3,9 +3,10 @@ package ui
 import (
 	"testing"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestPaletteSearchEnterWaitsForLatestQuery(t *testing.T) {

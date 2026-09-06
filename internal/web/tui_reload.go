@@ -1,8 +1,9 @@
 package web
 
 import (
-	"github.com/bborn/workflow/internal/tuireload"
 	"net/http"
+
+	"github.com/bborn/workflow/internal/tuireload"
 )
 
 func (s *Server) handleTUIReload(w http.ResponseWriter, r *http.Request) {

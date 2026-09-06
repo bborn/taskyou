@@ -1,11 +1,12 @@
 package web
 
 import (
-	"github.com/bborn/workflow/internal/db"
-	"github.com/bborn/workflow/internal/tuireload"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tuireload"
 )
 
 func TestTUIReloadRouteUsesSharedRequest(t *testing.T) {

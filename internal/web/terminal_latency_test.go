@@ -2,8 +2,6 @@ package web
 
 import (
 	"fmt"
-	"github.com/bborn/workflow/internal/db"
-	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +9,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestTerminalEchoDoesNotWaitForIdlePoll(t *testing.T) {
@@ -42,7 +44,10 @@ func TestTerminalEchoDoesNotWaitForIdlePoll(t *testing.T) {
 		srv.handleTerminal(w, r)
 	}))
 	defer httpServer.Close()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if response != nil {
+		defer response.Body.Close()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

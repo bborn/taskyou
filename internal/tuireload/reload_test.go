@@ -1,9 +1,10 @@
 package tuireload
 
 import (
-	"github.com/bborn/workflow/internal/db"
 	"path/filepath"
 	"testing"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestRequestsAreSharedOnlyWithinDatabase(t *testing.T) {

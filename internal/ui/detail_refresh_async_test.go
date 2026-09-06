@@ -1,10 +1,11 @@
 package ui
 
 import (
-	"github.com/bborn/workflow/internal/db"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestDetailRefreshReadsOutsideInputLoop(t *testing.T) {
