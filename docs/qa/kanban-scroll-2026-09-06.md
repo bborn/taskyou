@@ -115,3 +115,18 @@ Full task data remains available for body searches and editing.
 Validation: UI, DB, parity, server and web Go suites; targeted search race tests;
 Node refresh/log tests; desktop typecheck/production build; private seeded TUI
 scroll/search checks. Tests use temporary data, and the QA executor stays frozen.
+
+## Detail observation follow-up
+
+Periodic detail task/log reads and memory, listening-port, and shell-process
+checks now execute in a coalesced background command. The command snapshots only
+the fields its checks need. Results are bound to their originating detail view;
+newer task events and log loads take precedence. Pane-title updates also execute
+as commands. Tests use a temporary tmux stub to verify neither scheduling nor
+result handling runs a subprocess, and cover stale results and overlap prevention.
+
+Scheduling measured **0.0016 ms** with the race detector enabled (pane health
+checks suppressed in this microbenchmark). UI/DB/parity/server tests and focused
+race tests passed. This does **not** measure or fix pane reattachment/cleanup:
+those lifecycle operations still need coordination outside the input loop, along
+with the outstanding daemon-maintenance work.

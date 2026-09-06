@@ -229,8 +229,9 @@ type DetailModel struct {
 	viewportContentVersion uint64
 
 	// Log count tracking for smarter refreshes
-	lastLogCount int
-	logsLoading  bool // true while async log loading is in progress
+	lastLogCount    int
+	logsLoading     bool // true while async log loading is in progress
+	refreshInFlight bool
 
 	// Memory check throttling (don't check every refresh)
 	lastMemoryCheck time.Time
@@ -674,72 +675,7 @@ func (m *DetailModel) Refresh() tea.Cmd {
 		return nil
 	}
 
-	prevTask := m.task
-
-	// Reload task
-	task, err := m.database.GetTask(m.task.ID)
-	if err == nil && task != nil {
-		m.task = task
-	}
-
-	if m.ready && prevTask != nil && m.task != nil {
-		if prevTask.Status != m.task.Status ||
-			prevTask.DangerousMode != m.task.DangerousMode ||
-			prevTask.PermissionMode != m.task.PermissionMode ||
-			prevTask.Pinned != m.task.Pinned ||
-			prevTask.Project != m.task.Project ||
-			prevTask.Type != m.task.Type ||
-			prevTask.Title != m.task.Title {
-			m.setViewportContent()
-		}
-	}
-
-	// Check log count first to avoid loading all logs if unchanged.
-	// Load logs asynchronously to avoid blocking the UI event loop.
-	var cmd tea.Cmd
-	logCount, err := m.database.GetTaskLogCount(m.task.ID)
-	if err == nil && logCount != m.lastLogCount && !m.logsLoading {
-		m.logsLoading = true
-		taskID := m.task.ID
-		database := m.database
-		cmd = func() tea.Msg {
-			logs, _ := database.GetTaskLogs(taskID, 500)
-			return logsLoadedMsg{taskID: taskID, logs: logs, logCount: logCount}
-		}
-	}
-
-	// Throttle memory checks to every 3 seconds (expensive: 3 shell commands)
-	if time.Since(m.lastMemoryCheck) >= 3*time.Second {
-		m.claudeMemoryMB = m.getClaudeMemoryMB()
-		m.lastMemoryCheck = time.Now()
-
-		// Update Claude pane title with memory info
-		if m.claudePaneID != "" {
-			title := m.executorDisplayName()
-			if m.claudeMemoryMB > 0 {
-				title = fmt.Sprintf("%s (%d MB)", title, m.claudeMemoryMB)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", title).Run()
-			cancel()
-		}
-	}
-
-	// Note: Focus state is checked by focusTick every 200ms, no need to duplicate here
-
-	// Throttle server port checks to every 2 seconds
-	if time.Since(m.lastServerCheck) >= 2*time.Second {
-		m.checkServerListening()
-		m.lastServerCheck = time.Now()
-	}
-
-	// Throttle the shell-process indicator check to every 2 seconds. This shells
-	// out to tmux, so we cache the result here instead of querying it from
-	// renderHeader() on every frame.
-	if time.Since(m.lastShellProcessPoll) >= 2*time.Second {
-		m.hasRunningShellProc = m.HasRunningShellProcess()
-		m.lastShellProcessPoll = time.Now()
-	}
+	cmd := m.refreshSnapshotCmd()
 
 	// Throttle pane join checks (runs tmux commands)
 	// Poll faster (1s) while loading to reduce latency for "create and execute" flow,
@@ -769,6 +705,103 @@ func (m *DetailModel) Refresh() tea.Cmd {
 	}
 
 	return cmd
+}
+
+// detailRefreshMsg carries read-only observations from a private snapshot.
+// The owner prevents a late result from updating another detail view.
+type detailRefreshMsg struct {
+	owner                                      *DetailModel
+	previousTask                               *db.Task
+	task                                       *db.Task
+	previousLogCount                           int
+	logs                                       []*db.TaskLog
+	logCount                                   int
+	memoryChecked, serverChecked, shellChecked bool
+	memoryMB                                   int
+	serverListening, shellRunning              bool
+	claudePaneID, shellPaneID                  string
+}
+
+func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
+	if m.refreshInFlight {
+		return nil
+	}
+	m.refreshInFlight = true
+	previous := m.task
+	taskCopy := *previous
+	worker := &DetailModel{task: &taskCopy, database: m.database, claudePaneID: m.claudePaneID, workdirPaneID: m.workdirPaneID, cachedWindowTarget: m.cachedWindowTarget}
+	result := detailRefreshMsg{owner: m, previousTask: previous, previousLogCount: m.lastLogCount, claudePaneID: m.claudePaneID, shellPaneID: m.workdirPaneID}
+	result.memoryChecked = time.Since(m.lastMemoryCheck) >= 3*time.Second
+	result.serverChecked = time.Since(m.lastServerCheck) >= 2*time.Second
+	result.shellChecked = time.Since(m.lastShellProcessPoll) >= 2*time.Second
+	lastLogCount, logsLoading := m.lastLogCount, m.logsLoading
+	return func() tea.Msg {
+		result.task, _ = worker.database.GetTask(taskCopy.ID)
+		count, err := worker.database.GetTaskLogCount(taskCopy.ID)
+		if err == nil && count != lastLogCount && !logsLoading {
+			result.logs, _ = worker.database.GetTaskLogs(taskCopy.ID, 500)
+			result.logCount = count
+		}
+		if result.memoryChecked {
+			result.memoryMB = worker.getClaudeMemoryMB()
+		}
+		if result.serverChecked {
+			worker.checkServerListening()
+			result.serverListening = worker.serverListening
+		}
+		if result.shellChecked {
+			result.shellRunning = worker.HasRunningShellProcess()
+		}
+		return result
+	}
+}
+
+func (m *DetailModel) handleRefreshSnapshot(msg detailRefreshMsg) tea.Cmd {
+	if msg.owner != m {
+		return nil
+	}
+	m.refreshInFlight = false
+	if m.task == nil || msg.previousTask == nil || m.task.ID != msg.previousTask.ID {
+		return nil
+	}
+	// Task events can replace the task while the read is in flight. Preserve
+	// that newer state instead of restoring a stale database snapshot.
+	if msg.task != nil && m.task == msg.previousTask {
+		m.task = msg.task
+	}
+	if msg.logs != nil && m.lastLogCount == msg.previousLogCount {
+		m.logs = msg.logs
+		m.lastLogCount = msg.logCount
+	}
+	if msg.serverChecked && m.task.Port == msg.previousTask.Port {
+		m.serverListening = msg.serverListening
+		m.lastServerCheck = time.Now()
+	}
+	if msg.shellChecked && m.workdirPaneID == msg.shellPaneID {
+		m.hasRunningShellProc = msg.shellRunning
+		m.lastShellProcessPoll = time.Now()
+	}
+	var titleCmd tea.Cmd
+	if msg.memoryChecked && m.claudePaneID == msg.claudePaneID {
+		m.claudeMemoryMB = msg.memoryMB
+		m.lastMemoryCheck = time.Now()
+		if m.claudePaneID != "" {
+			paneID, title := m.claudePaneID, m.executorDisplayName()
+			if msg.memoryMB > 0 {
+				title = fmt.Sprintf("%s (%d MB)", title, msg.memoryMB)
+			}
+			titleCmd = func() tea.Msg {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T", title).Run()
+				return nil
+			}
+		}
+	}
+	if m.ready {
+		m.setViewportContent()
+	}
+	return titleCmd
 }
 
 // HandleLogsLoaded processes the result of async log loading.
