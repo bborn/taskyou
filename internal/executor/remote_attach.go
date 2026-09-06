@@ -87,7 +87,23 @@ func remoteViewSession(taskID int64) string {
 // use by hand — is the whole point of wrapping it in a shell instead of running
 // ssh as the pane's process directly.
 func RemoteAttachScript(task *db.Task, loc RemoteTaskLocation) string {
+	return remoteAttachScript(task, loc, false)
+}
+
+// RemoteShellAttachScript attaches a view to the persistent shell ensured by
+// InspectRemoteTerminal. Closing the view leaves the remote shell running.
+func RemoteShellAttachScript(task *db.Task, loc RemoteTaskLocation) string {
+	return remoteAttachScript(task, loc, true)
+}
+
+func remoteAttachScript(task *db.Task, loc RemoteTaskLocation, shell bool) string {
 	view := remoteViewSession(task.ID)
+	window := TmuxWindowName(task.ID)
+	if shell {
+		view += "-shell"
+		window += "-shell"
+		loc.Attach = fmt.Sprintf("ssh %s -t tmux attach -t %s:%s", loc.Host, task.DaemonSession, window)
+	}
 
 	attach := loc.Attach
 	if attach == "" {
@@ -100,7 +116,7 @@ func RemoteAttachScript(task *db.Task, loc RemoteTaskLocation) string {
 	// command uses one: ~/.profile is where a fleet host puts tmux on PATH.)
 	return strings.Join([]string{
 		fmt.Sprintf("%s -t %s %s", localSSHInvocation(), shellQuote(loc.Host),
-			shellQuote(loginShell(remoteAttachChain(task, view)))),
+			shellQuote(loginShell(remoteAttachWindowChain(task, view, window)))),
 		"status=$?",
 		`printf '\n\033[33m── %s ──\033[0m\n' "$(if [ "$status" = 0 ]; then echo 'the remote session ended'; else echo "disconnected from the remote session (exit $status)"; fi)"`,
 		fmt.Sprintf("printf 'Reattach by hand: %%s\\n' %s", shellQuote(attach)),
@@ -114,7 +130,10 @@ func RemoteAttachScript(task *db.Task, loc RemoteTaskLocation) string {
 // remoteAttachChain is the shell line the PLACED HOST runs: check the window is
 // there, build a disposable grouped view of it, fix the nested prefix, attach.
 func remoteAttachChain(task *db.Task, view string) string {
-	window := TmuxWindowName(task.ID)
+	return remoteAttachWindowChain(task, view, TmuxWindowName(task.ID))
+}
+
+func remoteAttachWindowChain(task *db.Task, view, window string) string {
 	q := shellQuote
 	return strings.Join([]string{
 		// Nothing to attach to: say so, and let the wrapper print the manual

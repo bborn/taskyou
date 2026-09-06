@@ -191,6 +191,7 @@ function TerminalSurface({
    * Returns null (after setting a waiting state) when not attachable. */
   const resolveInfo = useCallback(async (): Promise<TerminalInfo | null> => {
     const current = await api.terminalInfo(task.id);
+    if (current.error) throw new Error(current.error);
     if (!current.window_exists) {
       setInfo(current);
       setState(
@@ -208,10 +209,10 @@ function TerminalSurface({
   /** Browser fallback: no PTY available, so mirror the tmux pane over the
    * server's capture-pane WebSocket. Input flows via tmux send-keys; works by
    * pane ID, so it keeps working even while the TUI borrows the pane. */
-  const attachBrowser = useCallback(async () => {
+  const attachBrowser = useCallback(async (resolvedInfo?: TerminalInfo) => {
     setState({ kind: "loading" });
     try {
-      const resolved = await resolveInfo();
+      const resolved = resolvedInfo ?? await resolveInfo();
       if (!resolved) return;
       const paneId = tab === "shell" ? resolved.shell_pane_id : resolved.claude_pane_id;
       if (!paneId) {
@@ -268,6 +269,7 @@ function TerminalSurface({
     try {
       const resolved = await resolveInfo();
       if (!resolved) return;
+      if (resolved.remote_host) return attachBrowser(resolved);
 
       // window_target is "session:index"; attach the grouped view to that
       // session, select the same window, and zoom this tab's pane.
@@ -347,6 +349,7 @@ function TerminalSurface({
     const id = setInterval(async () => {
       try {
         const current = await api.terminalInfo(task.id);
+        if (current.error) throw new Error(current.error);
         setInfo(current);
         if (current.window_exists) {
           clearInterval(id);

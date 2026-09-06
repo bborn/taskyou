@@ -728,6 +728,13 @@ The agent reports its own outcome through it (`.ty/signal done "…"`), so a rem
 task finishes when it says it has finished, rather than when it has been quiet
 long enough to look finished.
 
+Remote tasks support the workdir shell in every interface: `\` toggles it in
+TUI detail view, and the desktop/browser terminal has a **Shell** tab. The shell
+runs on the placed host with the task's environment and survives closing the
+view. Shift-arrow keys cycle the TUI, agent, and shell panes; Alt-Shift-Up/Down
+switch tasks. Inside an attached remote pane, **Ctrl-a** is the remote tmux
+prefix. Desktop and browser remote terminals use the HTTP terminal bridge.
+
 See [docs/plugins.md](docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)
 and the reference resolver in [extensions/ty-on](extensions/ty-on/README.md).
 

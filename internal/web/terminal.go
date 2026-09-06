@@ -1,16 +1,18 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/bborn/workflow/internal/executor"
 )
 
 var upgrader = websocket.Upgrader{
@@ -38,16 +40,28 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	terminal := paneTerminal{ctx: r.Context(), runner: executor.LocalRunner{}}
 	paneID := task.ClaudePaneID
-	if r.URL.Query().Get("pane") == "shell" {
+	shell := r.URL.Query().Get("pane") == "shell"
+	if shell {
 		paneID = task.ShellPaneID
-		if paneID == "" {
-			http.Error(w, "task has no shell pane", http.StatusBadRequest)
+	}
+	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		info := s.remoteTerminalInfo(ctx, task, false)
+		cancel()
+		if info.Error != "" {
+			http.Error(w, info.Error, http.StatusConflict)
 			return
 		}
+		paneID = info.ClaudePaneID
+		if shell {
+			paneID = info.ShellPaneID
+		}
+		terminal.runner = executor.RemoteRunner{Host: info.RemoteHost}
 	}
 	if paneID == "" {
-		http.Error(w, "task has no executor pane", http.StatusBadRequest)
+		http.Error(w, "task has no requested terminal pane", http.StatusBadRequest)
 		return
 	}
 
@@ -59,7 +73,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	// Get the tmux pane's actual dimensions and send to client
-	cols, rows := getPaneSize(paneID)
+	cols, rows := terminal.getPaneSize(paneID)
 	sizeMsg, _ := json.Marshal(map[string]interface{}{
 		"type": "size",
 		"cols": cols,
@@ -68,7 +82,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	conn.WriteMessage(websocket.TextMessage, sizeMsg)
 
 	// Send initial full capture
-	output, err := paneFrame(paneID)
+	output, err := terminal.paneFrame(paneID)
 	if err != nil {
 		conn.WriteMessage(websocket.TextMessage, []byte("Error: could not read executor pane\r\n"))
 		return
@@ -107,9 +121,11 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 				}
 				if json.Unmarshal(msg, &resizeMsg) == nil && resizeMsg.Type == "resize" {
 					if resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
-						exec.Command("tmux", "resize-pane", "-t", paneID,
+						if err := terminal.run("resize-pane", "-t", paneID,
 							"-x", strconv.Itoa(resizeMsg.Cols),
-							"-y", strconv.Itoa(resizeMsg.Rows)).Run()
+							"-y", strconv.Itoa(resizeMsg.Rows)); err != nil {
+							return
+						}
 						// Push a fresh frame at the new size instead of waiting up
 						// to a full tick — otherwise the client renders the pane's
 						// old (wider) width and the content wraps/gaps until the
@@ -122,7 +138,9 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 			// Send raw input bytes to tmux using send-keys with literal flag
 			input := string(msg)
-			exec.Command("tmux", "send-keys", "-t", paneID, "-l", input).Run()
+			if err := terminal.run("send-keys", "-t", paneID, "-l", input); err != nil {
+				return
+			}
 			select {
 			case inputActivity <- struct{}{}:
 			default:
@@ -143,16 +161,17 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	var fastTick <-chan time.Time
 	var fastUntil time.Time
 	lastOutput := output
-	sendFrame := func() {
-		current, err := paneFrame(paneID)
+	sendFrame := func() bool {
+		current, err := terminal.paneFrame(paneID)
 		if err != nil {
-			return
+			return false
 		}
 		if current != lastOutput {
 			// Clear screen and rewrite
 			conn.WriteMessage(websocket.TextMessage, []byte("\033[2J\033[H"+current))
 			lastOutput = current
 		}
+		return true
 	}
 	for {
 		select {
@@ -165,7 +184,9 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 				fastTick = fastTimer.C
 			}
 		case <-fastTick:
-			sendFrame()
+			if !sendFrame() {
+				return
+			}
 			if time.Now().Before(fastUntil) {
 				fastTimer.Reset(33 * time.Millisecond)
 			} else {
@@ -174,9 +195,13 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		case <-redraw:
 			// Give the pane a beat to reflow after the SIGWINCH before capturing.
 			time.Sleep(80 * time.Millisecond)
-			sendFrame()
+			if !sendFrame() {
+				return
+			}
 		case <-ticker.C:
-			sendFrame()
+			if !sendFrame() {
+				return
+			}
 		}
 	}
 }
@@ -187,12 +212,12 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 // of trailing the last line of captured text (the mode-line). capture-pane
 // discards cursor position, so without this every client parks the cursor on
 // the wrong row.
-func paneFrame(paneID string) (string, error) {
-	content, err := capturePane(paneID)
+func (terminal paneTerminal) paneFrame(paneID string) (string, error) {
+	content, err := terminal.capturePane(paneID)
 	if err != nil {
 		return "", err
 	}
-	if x, y, ok := paneCursor(paneID); ok {
+	if x, y, ok := terminal.paneCursor(paneID); ok {
 		// tmux reports 0-based col/row; CUP (\033[row;colH) is 1-based.
 		content += fmt.Sprintf("\033[%d;%dH", y+1, x+1)
 	}
@@ -200,8 +225,8 @@ func paneFrame(paneID string) (string, error) {
 }
 
 // paneCursor returns the tmux pane's current cursor position (0-based col, row).
-func paneCursor(paneID string) (x, y int, ok bool) {
-	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{cursor_x} #{cursor_y}").Output()
+func (terminal paneTerminal) paneCursor(paneID string) (x, y int, ok bool) {
+	out, err := terminal.output("display-message", "-t", paneID, "-p", "#{cursor_x} #{cursor_y}")
 	if err != nil {
 		return 0, 0, false
 	}
@@ -220,9 +245,8 @@ func paneCursor(paneID string) (x, y int, ok bool) {
 // capturePane runs tmux capture-pane and returns the visible pane content
 // with trailing whitespace stripped from each line so it renders correctly
 // in a browser terminal that may be a different width than the tmux pane.
-func capturePane(paneID string) (string, error) {
-	cmd := exec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-e")
-	out, err := cmd.Output()
+func (terminal paneTerminal) capturePane(paneID string) (string, error) {
+	out, err := terminal.output("capture-pane", "-t", paneID, "-p", "-e")
 	if err != nil {
 		return "", fmt.Errorf("capture-pane: %w", err)
 	}
@@ -238,8 +262,8 @@ func capturePane(paneID string) (string, error) {
 }
 
 // getPaneSize returns the width and height of a tmux pane.
-func getPaneSize(paneID string) (int, int) {
-	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_width} #{pane_height}").Output()
+func (terminal paneTerminal) getPaneSize(paneID string) (int, int) {
+	out, err := terminal.output("display-message", "-t", paneID, "-p", "#{pane_width} #{pane_height}")
 	if err != nil {
 		return 120, 40
 	}
@@ -253,4 +277,22 @@ func getPaneSize(paneID string) (int, int) {
 		return 120, 40
 	}
 	return cols, rows
+}
+
+// Every terminal operation carries its host, including keystrokes and resize.
+// Bound commands separately so a lost SSH connection cannot hang the socket.
+type paneTerminal struct {
+	ctx    context.Context
+	runner executor.Runner
+}
+
+func (terminal paneTerminal) output(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(terminal.ctx, 15*time.Second)
+	defer cancel()
+	return terminal.runner.Command(ctx, "", "tmux", args...).Output()
+}
+func (terminal paneTerminal) run(args ...string) error {
+	ctx, cancel := context.WithTimeout(terminal.ctx, 15*time.Second)
+	defer cancel()
+	return terminal.runner.Command(ctx, "", "tmux", args...).Run()
 }

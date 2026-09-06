@@ -2862,8 +2862,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openPR(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
-		m.detailView.ToggleShellPane()
-		return m, nil
+		return m, m.detailView.ToggleShellPane()
 	}
 	if key.Matches(keyMsg, m.keys.Actions) && m.selectedTask != nil {
 		return m.openActionPicker()
@@ -2875,7 +2874,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// Arrow key navigation to prev/next task in the same column
 	// j/k keys are passed through to the viewport for scrolling
-	if key.Matches(keyMsg, m.keys.Up) {
+	if key.Matches(keyMsg, m.keys.Up) || keyMsg.String() == "ctrl+up" {
 		// Ignore if no previous task exists
 		if !m.kanban.HasPrevTask() {
 			return m, nil
@@ -2891,12 +2890,12 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.MoveUp()
 		// Load the new task
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, tea.Batch(cleanup, m.loadTask(task.ID))
+			return m, tea.Batch(cleanup, m.loadTaskWithOptions(task.ID, keyMsg.String() == "ctrl+up"))
 		}
 		m.taskTransitionInProgress = false
 		return m, cleanup
 	}
-	if key.Matches(keyMsg, m.keys.Down) {
+	if key.Matches(keyMsg, m.keys.Down) || keyMsg.String() == "ctrl+down" {
 		// Ignore if no next task exists
 		if !m.kanban.HasNextTask() {
 			return m, nil
@@ -2912,7 +2911,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.MoveDown()
 		// Load the new task
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, tea.Batch(cleanup, m.loadTask(task.ID))
+			return m, tea.Batch(cleanup, m.loadTaskWithOptions(task.ID, keyMsg.String() == "ctrl+down"))
 		}
 		m.taskTransitionInProgress = false
 		return m, cleanup

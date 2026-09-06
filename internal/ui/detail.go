@@ -261,7 +261,8 @@ type DetailModel struct {
 	// placed task's tmux session. It is not a joined daemon pane and must never be
 	// broken back to one: nothing on this machine owns it, so it is created and
 	// killed outright. Empty for every local task.
-	remotePaneID string
+	remotePaneID      string
+	remoteShellPaneID string
 
 	// waitingForExecutor is true when we're passively waiting for the daemon's
 	// executor to create the tmux window (e.g. a freshly created+queued task with
@@ -313,8 +314,9 @@ type paneRemoteMsg struct{ message string }
 // session was rendered into a LOCAL pane. paneID is that pane; notice is the
 // line shown beside it, which documents the nested-tmux prefix.
 type paneRemoteAttachedMsg struct {
-	paneID string
-	notice string
+	paneID      string
+	notice      string
+	shellHidden bool
 }
 
 // logsLoadedMsg is sent when async log loading completes.
@@ -813,6 +815,9 @@ func (m *DetailModel) Task() *db.Task {
 
 // ClaudePaneID returns the tmux pane ID where Claude is running.
 func (m *DetailModel) ClaudePaneID() string {
+	if m.remotePaneID != "" {
+		return m.remotePaneID
+	}
 	return m.claudePaneID
 }
 
@@ -1015,7 +1020,7 @@ func (m *DetailModel) setupRemotePane(loc executor.RemoteTaskLocation) tea.Msg {
 	switch m.executor.RemoteSessionState(ctx, m.task) {
 	case executor.RemoteSessionLive:
 		if paneID := m.attachRemotePane(loc); paneID != "" {
-			return paneRemoteAttachedMsg{paneID: paneID, notice: executor.RemoteAttachNotice(loc)}
+			return paneRemoteAttachedMsg{paneID: paneID, notice: executor.RemoteAttachNotice(loc), shellHidden: m.remoteShellPaneID == ""}
 		}
 		// Attaching failed locally (no tmux, split refused). Never leave the user
 		// with nothing: fall back to the text that tells them how to get there.
@@ -1109,14 +1114,23 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
 	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
 	m.remotePaneID = paneID // Cleanup must see it even before the result is delivered.
+	m.bindPaneNavigation(ctx)
+	if !m.shellPaneHidden {
+		if err := m.showRemoteShellPane(ctx, loc); err != nil {
+			m.logExecutorFailure(err.Error())
+		}
+	}
+	if m.focusExecutorOnJoin {
+		osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID).Run()
+	}
 	return paneID
 }
 
 // closeRemotePane kills the attach pane, which drops the ssh client, which
 // detaches the grouped view session on the host — where destroy-unattached then
-// disposes of it. Nothing is left running on either machine.
+// disposes of it. The remote agent and workdir shell keep running.
 func (m *DetailModel) closeRemotePane(resizeTUI bool) {
-	if m.remotePaneID == "" {
+	if m.remotePaneID == "" && m.remoteShellPaneID == "" {
 		return
 	}
 	tmuxPaneOpMu.Lock()
@@ -1124,8 +1138,20 @@ func (m *DetailModel) closeRemotePane(resizeTUI bool) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if m.remoteShellPaneID != "" {
+		m.killPaneWithProcess(ctx, m.remoteShellPaneID)
+		m.remoteShellPaneID = ""
+	}
 	m.killPaneWithProcess(ctx, m.remotePaneID)
 	m.remotePaneID = ""
+	runTmuxBatch(ctx, [][]string{
+		{"unbind-key", "-T", "root", "S-Down"},
+		{"unbind-key", "-T", "root", "S-Right"},
+		{"unbind-key", "-T", "root", "S-Up"},
+		{"unbind-key", "-T", "root", "S-Left"},
+		{"unbind-key", "-T", "root", "M-S-Up"},
+		{"unbind-key", "-T", "root", "M-S-Down"},
+	})
 
 	if m.uiSessionName != "" {
 		osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " ").Run()
@@ -1256,6 +1282,15 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case remoteShellToggledMsg:
+		m.paneLoading = false
+		m.shellPaneHidden = msg.hidden
+		m.paneError = ""
+		if msg.err != nil {
+			m.paneError = msg.err.Error()
+		}
+		m.setViewportContent()
+		return m, nil
 	case paneHealthMsg:
 		return m, m.applyPaneHealth(msg)
 	case detailPaneResultMsg:
@@ -1310,6 +1345,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.waitingForExecutor = false
 		m.paneError = ""
 		m.remotePaneID = msg.paneID
+		m.shellPaneHidden = msg.shellHidden
 		m.paneNotice = msg.notice
 		m.setViewportContent()
 		return m, nil
@@ -2355,21 +2391,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	log.Debug("joinTmuxPanes: resizing TUI pane to %q", detailHeight)
 	osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 
-	// Bind Shift+Arrow keys to cycle through panes from any pane
-	// Down/Right = next pane, Up/Left = previous pane
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
-
-	// Bind Alt+Shift+Up/Down to jump to prev/next task while focusing executor pane
-	// This allows quick task navigation from any pane (especially useful from Claude pane)
-	// Using Alt+Shift mirrors the Shift+Arrow pane switching, and doesn't produce printable chars
-	// The sequence: select TUI pane -> send navigation key -> wait for re-join -> select executor pane
-	prevTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Up && sleep 0.3 && tmux select-pane -t :.1"
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up", "run-shell", prevTaskCmd).Run()
-	nextTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Down && sleep 0.3 && tmux select-pane -t :.1"
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down", "run-shell", nextTaskCmd).Run()
+	m.bindPaneNavigation(ctx)
 
 	// Capture initial dimensions so we can detect user resizing later
 	// This allows us to save only when the user has actually dragged to resize
@@ -2400,14 +2422,15 @@ func (m *DetailModel) joinTmuxPanes() {
 
 // focusExecutorPane focuses the executor (Claude) pane.
 func (m *DetailModel) focusExecutorPane() {
-	if m.claudePaneID == "" {
+	paneID := m.ClaudePaneID()
+	if paneID == "" {
 		return
 	}
 	log := GetLogger()
-	log.Info("focusExecutorPane: focusing Claude pane %q", m.claudePaneID)
+	log.Info("focusExecutorPane: focusing Claude pane %q", paneID)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
+	err := osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID).Run()
 	if err != nil {
 		log.Error("focusExecutorPane: select-pane failed: %v", err)
 	} else {
@@ -2415,10 +2438,38 @@ func (m *DetailModel) focusExecutorPane() {
 	}
 }
 
+// bindPaneNavigation installs the same navigation for local and SSH panes.
+func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
+	// Bind Shift+Arrow keys to cycle through panes from any pane
+	// Down/Right = next pane, Up/Left = previous pane
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
+
+	// Forward an internal navigation key to the TUI. The task loader focuses
+	// the executor after pane setup completes, including slow SSH attachments.
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up",
+		"select-pane", "-t", ":.0", ";", "send-keys", "-t", ":.0", "C-Up").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down",
+		"select-pane", "-t", ":.0", ";", "send-keys", "-t", ":.0", "C-Down").Run()
+
+}
+
 // ToggleShellPane toggles the visibility of the shell pane.
 // When hidden, the shell pane is moved to the daemon window and Claude expands to full width.
 // When shown, the shell pane is rejoined from the daemon or a new one is created.
-func (m *DetailModel) ToggleShellPane() {
+func (m *DetailModel) ToggleShellPane() tea.Cmd {
+	if loc, remote := m.remoteTaskLocation(); remote {
+		if m.paneLoading {
+			return nil
+		}
+		m.paneLoading = true
+		return tea.Batch(m.spinnerTick(), m.paneCommand(func() tea.Msg {
+			err := m.toggleRemoteShellPane(loc)
+			return remoteShellToggledMsg{err: err, hidden: m.remoteShellPaneID == ""}
+		}))
+	}
 	log := GetLogger()
 	log.Info("ToggleShellPane: shellPaneHidden=%v, workdirPaneID=%q, claudePaneID=%q",
 		m.shellPaneHidden, m.workdirPaneID, m.claudePaneID)
@@ -2441,6 +2492,7 @@ func (m *DetailModel) ToggleShellPane() {
 	}
 	m.database.SetSetting(config.SettingShellPaneHidden, hiddenStr)
 	log.Info("ToggleShellPane: saved shellPaneHidden=%v", m.shellPaneHidden)
+	return nil
 }
 
 // hideShellPane moves the shell pane to a hidden background window (preserves process).
@@ -3788,7 +3840,7 @@ func (m *DetailModel) renderHelp() string {
 		keys = append(keys, helpKey{"X", "execute dangerous", false, false})
 	}
 
-	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
+	hasPanes := m.claudePaneID != "" || m.workdirPaneID != "" || (!m.paneLoading && m.remotePaneID != "")
 
 	keys = append(keys, helpKey{"e", "edit", false, true})
 
