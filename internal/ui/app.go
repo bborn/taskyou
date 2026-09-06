@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -363,10 +364,16 @@ func LoadKeyMap() KeyMap {
 
 // AppModel is the main application model.
 type AppModel struct {
-	db       *db.DB
-	executor *executor.Executor
-	keys     KeyMap
-	help     help.Model
+	reloadWrites                                                                   atomic.Int64
+	reloadSelectionID                                                              int64
+	reloadEnabled, reloadCheckInFlight, reloadPending, reloadPrepared, reloadReady bool
+	reloadToken                                                                    string
+	reloadSnapshot                                                                 ReloadState
+	reloadRestoring                                                                *ReloadState
+	db                                                                             *db.DB
+	executor                                                                       *executor.Executor
+	keys                                                                           KeyMap
+	help                                                                           help.Model
 
 	// Working directory context (for project detection)
 	workingDir string
@@ -738,7 +745,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg, reloadTokenMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -1093,6 +1100,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.reloadRestoring != nil {
+			state := *m.reloadRestoring
+			m.reloadRestoring = nil
+			if state.Detail && state.TaskID > 0 {
+				cmds = append(cmds, m.loadTask(state.TaskID))
+			}
+		}
+
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
 			m.initialPRRefreshDone = true
@@ -1106,10 +1121,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case reloadTokenMsg:
+		m.reloadCheckInFlight = false
+		if msg.err == nil && msg.token != "" && msg.token != m.reloadToken {
+			m.reloadToken = msg.token
+			m.reloadPending = true
+			cmds = append(cmds, m.beginReload())
+		}
+
 	case detailCleanupMsg:
 		m.detailCleanupInFlight = false
 		if msg.failed != nil {
 			m.detailView = msg.failed
+			m.reloadPending = false
+			m.reloadPrepared = false
 			m.currentView = ViewDetail
 			m.pendingDetailLoad = nil
 			m.taskLoadRevision++
@@ -1127,6 +1152,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingDetailLoad = nil
 			return m.Update(pending)
 		}
+		cmds = append(cmds, m.beginReload())
 
 	case detailRefreshMsg:
 		if m.detailView != nil && m.detailView == msg.owner {
@@ -1538,6 +1564,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForTaskEvent())
 
 	case tickMsg:
+		cmds = append(cmds, m.checkReload(), m.beginReload())
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
@@ -2438,6 +2465,10 @@ func (m *AppModel) finishBoardFilter(msg boardFilterMsg) tea.Cmd {
 		return m.applyFilter()
 	}
 	m.kanban.SetTasks(m.collapseForBoard(msg.tasks))
+	if m.reloadSelectionID > 0 {
+		m.kanban.SelectTask(m.reloadSelectionID)
+		m.reloadSelectionID = 0
+	}
 	return nil
 }
 
@@ -3967,9 +3998,11 @@ func (m *AppModel) updateChangeStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Just set the requested status directly. Don't auto-queue to avoid
 		// restarting the executor. Users can explicitly retry/requeue if they
 		// want to restart execution.
@@ -4556,9 +4589,11 @@ func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
 
 // updateTaskWithRename updates a task and renames the Claude session if the title changed.
 func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		err := database.UpdateTask(newTask)
 		if err == nil {
 			exec.NotifyTaskChange("updated", newTask)
@@ -4573,9 +4608,11 @@ func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.C
 }
 
 func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string) tea.Cmd {
+	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Generate title from body if title is empty but body is provided
 		if strings.TrimSpace(t.Title) == "" && strings.TrimSpace(t.Body) != "" {
 			// Try to generate title using LLM
@@ -4630,8 +4667,10 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 // title/body as the goal and its project/permission mode for every phase. The
 // task itself is not persisted — it is only the goal carrier.
 func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		goal := strings.TrimSpace(t.Title)
 		if body := strings.TrimSpace(t.Body); body != "" {
 			if goal == "" {
@@ -4655,9 +4694,11 @@ func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) t
 }
 
 func (m *AppModel) queueTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
@@ -4669,9 +4710,11 @@ func (m *AppModel) queueTask(id int64) tea.Cmd {
 }
 
 func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Set dangerous mode before queueing (writes permission_mode, the source of
 		// truth, keeping the dangerous_mode bool in sync).
 		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
@@ -4688,9 +4731,11 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 }
 
 func (m *AppModel) closeTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		err := database.UpdateTaskStatus(id, db.StatusDone)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
@@ -4731,9 +4776,11 @@ func (m *AppModel) summarizeTask(id int64, force bool) tea.Cmd {
 }
 
 func (m *AppModel) archiveTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Get the task first
 		task, err := database.GetTask(id)
 		if err != nil {
@@ -4772,9 +4819,11 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 }
 
 func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Get the task first
 		task, err := database.GetTask(id)
 		if err != nil {
@@ -4807,7 +4856,9 @@ func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
 // old one-shot destructive delete that made incidents like the lost Creator Commerce
 // session unrecoverable.
 func (m *AppModel) deleteTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Kill Claude process to free memory
 		m.executor.KillClaudeProcess(id)
 
@@ -5024,9 +5075,11 @@ type taskMovedMsg struct {
 // moveTaskToProject moves a task to a different project by creating a new task
 // in the target project and deleting the old task (including its worktree).
 func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// First, clean up the old task's resources
 
 		// Kill Claude process to free memory
@@ -5087,9 +5140,11 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 }
 
 func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
 			return taskPermissionModeCycledMsg{err: fmt.Errorf("failed to get task")}
@@ -5108,8 +5163,10 @@ func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
 }
 
 func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
 			return taskPinnedMsg{err: fmt.Errorf("failed to get task")}
@@ -5125,9 +5182,11 @@ func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
 }
 
 func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string, dangerous bool) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Set dangerous mode if requested (writes permission_mode, the source of
 		// truth, keeping the dangerous_mode bool in sync).
 		if dangerous {

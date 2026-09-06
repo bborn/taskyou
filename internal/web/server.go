@@ -87,6 +87,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/board/stream", s.handleBoardStream)
 
 	// Tasks CRUD
+	mux.HandleFunc("POST /api/tui/reload", s.handleTUIReload)
 	mux.HandleFunc("GET /api/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /api/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /api/tasks/{id}", s.handleTaskDetail)

@@ -331,6 +331,19 @@ make build
 ./bin/ty daemon status  # Check daemon status
 ```
 
+### Restarting without closing terminals
+
+`ty restart` restarts the daemon and asks local TUIs using the same database to
+reload the current binary in place. Their tmux sessions stay open. Task selection,
+board filter, and the open detail view are restored, and borrowed agent panes are
+returned before reloading. Unsaved forms and pending task saves defer the reload.
+
+TUIs started with an older build that lacks cooperative reload remain running;
+reopen those once with the updated build to enable future automatic reloads.
+`POST /api/tui/reload` requests the same cooperative TUI reload through the HTTP API.
+`ty daemon restart` only restarts the daemon. `ty restart --hard` remains an explicit
+destructive reset that kills TaskYou tmux sessions.
+
 ### Maintenance commands
 
 ```bash

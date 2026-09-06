@@ -34,6 +34,7 @@ import (
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/routine"
+	"github.com/bborn/workflow/internal/tuireload"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -333,8 +334,10 @@ Examples:
 	var hardRestart bool
 	restartCmd := &cobra.Command{
 		Use:   "restart",
-		Short: "Restart the daemon and TUI (preserves agent sessions)",
-		Long: `Restarts the daemon and TUI while preserving running agent sessions.
+		Short: "Restart the daemon and safely reload open TUIs",
+		Long: `Restarts the daemon and asks open TUIs to reload in their existing terminals.
+Unfinished forms are preserved until saved or cancelled. Agent sessions are preserved.
+Older TUIs that do not support cooperative reload are left running.
 Use --hard to kill all tmux sessions for a complete reset.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(dimStyle.Render("Stopping daemon..."))
@@ -351,16 +354,13 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 					}
 				}
 			} else {
-				// Soft restart: only kill the task-ui session, preserve task-daemon sessions with agent windows
-				fmt.Println(dimStyle.Render("Preserving agent sessions..."))
-				out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
-				for _, session := range strings.Split(string(out), "\n") {
-					session = strings.TrimSpace(session)
-					// Only kill task-ui sessions, keep task-daemon sessions with Claude windows
-					if strings.HasPrefix(session, "task-ui-") {
-						osexec.Command("tmux", "kill-session", "-t", session).Run()
-					}
+				if err := restartWithLiveTUIs(dangerous || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
 				}
+				fmt.Println(successStyle.Render("Daemon restarted; open TUIs requested to reload safely."))
+				fmt.Println(dimStyle.Render("Unfinished forms wait until saved or cancelled. Older TUIs remain running and need one manual reopen."))
+				return
 			}
 
 			fmt.Println(successStyle.Render("Restarting..."))
@@ -4291,8 +4291,20 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 
 	// Create and run TUI
 	model := ui.NewAppModel(database, exec, cwd, version)
+	token, err := tuireload.Token(database)
+	if err != nil {
+		return fmt.Errorf("read TUI reload state: %w", err)
+	}
+	model.EnableReload(token)
 	if focusTaskID > 0 {
 		model.FocusTaskOnLoad(focusTaskID)
+	}
+	if saved := os.Getenv("TASKYOU_TUI_RELOAD_STATE"); saved != "" {
+		os.Unsetenv("TASKYOU_TUI_RELOAD_STATE")
+		var state ui.ReloadState
+		if json.Unmarshal([]byte(saved), &state) == nil {
+			model.RestoreReloadState(state)
+		}
 	}
 	if debugStatePath != "" {
 		model.SetDebugStatePath(debugStatePath)
@@ -4306,6 +4318,23 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("run TUI: %w", err)
+	}
+
+	if state, ready := model.ReloadState(); ready {
+		// Bubble Tea has restored the terminal and the model returned borrowed
+		// panes first. Replace this process without destroying its tmux session.
+		stopProfiling()
+		database.Close()
+		data, _ := json.Marshal(state)
+		executable, reloadErr := os.Executable()
+		if reloadErr == nil {
+			reloadErr = syscall.Exec(executable, os.Args, append(os.Environ(), "TASKYOU_TUI_RELOAD_STATE="+string(data)))
+		}
+		// A missing/unusable replacement must not strand the terminal. Resume
+		// the currently loaded build instead, acknowledging the request token.
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Reload failed; resuming current TUI: "+reloadErr.Error()))
+		os.Setenv("TASKYOU_TUI_RELOAD_STATE", string(data))
+		return runLocal(dangerousMode, debugStatePath, cpuProfilePath, memProfilePath, focusTaskID)
 	}
 
 	// Flush profiles now, before the tmux cleanup below may kill our own session
@@ -4325,6 +4354,40 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	}
 
 	return nil
+}
+
+// The daemon has already been stopped by the command. Cooperative clients read
+// the request from their own database; unrelated databases and old clients stay up.
+func restartWithLiveTUIs(dangerousMode bool) error {
+	// The old daemon owns this lock until shutdown finishes. Waiting for it
+	// avoids launching a replacement that immediately exits on lock contention.
+	lock, err := os.OpenFile(getPidFilePath()+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			lock.Close()
+			return fmt.Errorf("daemon is still stopping; TUIs were left running")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	lock.Close()
+
+	if err := ensureDaemonRunning(dangerousMode); err != nil {
+		return err
+	}
+	database, err := openTaskDB(db.DefaultPath())
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return tuireload.Request(database)
 }
 
 // ensureDaemonForQueuedWork makes sure work queued from the CLI will actually
