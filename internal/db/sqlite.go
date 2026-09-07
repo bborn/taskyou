@@ -268,6 +268,7 @@ func (db *DB) migrate() error {
 		)`,
 	}
 
+	migrations = append(migrations, remoteMigrations...)
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)

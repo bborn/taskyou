@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  Placement,
   Routine,
   RoutineRun,
   Dependencies,
@@ -59,6 +60,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+ placement: (id: number) => request<Placement>("GET", `/api/tasks/${id}/placement`),
+ placeTask: (id: number, target: string, workdir: string) => request<{messages: string[]}>("POST", `/api/tasks/${id}/placement`, {target, workdir}),
   // Tasks
   listTasks: (opts?: { all?: boolean; project?: string; limit?: number }) => {
     const params = new URLSearchParams();

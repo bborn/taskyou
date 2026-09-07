@@ -254,3 +254,41 @@ func TestReconcileOrphanedTasksStartupIgnoresSpawnGrace(t *testing.T) {
 		t.Fatalf("expected startup sweep to block recent task, got %q", got.Status)
 	}
 }
+
+func TestReconcileReplaysRemoteInboxAfterRestart(t *testing.T) {
+	e, database := newTestExecutor(t)
+	task := createProcessingTask(t, database, "Remote question")
+	if err := database.CommitTaskPlacement(task.ID, "build", "test", "/srv/app", ""); err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.BeginRemoteRun(task.ID, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveRemoteEvent(db.RemoteEvent{ID: "question", TaskID: task.ID, RunID: run, Host: "build", Kind: "needs-input", Detail: "Which branch?"}); err != nil {
+		t.Fatal(err)
+	}
+	// A replacement executor has no in-memory signals; its remote process lives.
+	restarted := New(database, &config.Config{})
+	restarted.hostChans.closed = true // Offline replay must not need an SSH dial.
+	restarted.windowExistsFn = func(int64) bool { return true }
+	restarted.reconcileOrphanedTasks(true)
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != db.StatusBlocked {
+		t.Fatalf("inbox not replayed: %s", got.Status)
+	}
+	logs, _ := database.GetTaskLogs(task.ID, 100)
+	found := false
+	for _, line := range logs {
+		if strings.Contains(line.Content, "Which branch?") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("lost remote question")
+	}
+	e.hostChans.Close()
+}

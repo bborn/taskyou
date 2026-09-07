@@ -738,6 +738,11 @@ prefix. Desktop and browser remote terminals use the HTTP terminal bridge.
 See [docs/plugins.md](docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)
 and the reference resolver in [extensions/ty-on](extensions/ty-on/README.md).
 
+Task placement is also available from the task detail view in the desktop and
+browser, and with `@` in the TUI. See [remote execution](docs/remote-execution.md)
+for executor eligibility, required remote placement, connection health, and
+shared HTTP placement endpoints.
+
 Install one — or a whole collection, since a single git repo can hold many plugins —
 with one command:
 

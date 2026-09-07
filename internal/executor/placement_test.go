@@ -236,11 +236,87 @@ func TestRemoteLaunchScriptStagesThePromptRemotely(t *testing.T) {
 // An executor ty cannot launch remotely fails visibly instead of quietly
 // becoming a local run.
 func TestRemoteLaunchScriptRefusesAnUnsupportedExecutor(t *testing.T) {
-	_, err := remoteLaunchScript(&db.Task{ID: 1}, "codex", "/srv/x", "hi")
+	_, err := remoteLaunchScript(&db.Task{ID: 1}, "gemini", "/srv/x", "hi")
 	if err == nil {
-		t.Fatal("remoteLaunchScript accepted a non-claude executor")
+		t.Fatal("remoteLaunchScript accepted an unsupported executor")
 	}
-	if !strings.Contains(err.Error(), "codex") {
+	if !strings.Contains(err.Error(), "gemini") {
 		t.Errorf("error %q does not name the executor it cannot launch", err)
+	}
+}
+
+func TestRemoteLaunchSupportsCodex(t *testing.T) {
+	script, err := remoteLaunchScript(&db.Task{ID: 123, Model: "model-name", DangerousMode: true}, "codex", "/srv/app", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"codex", "--model 'model-name'", "--dangerously-bypass-approvals-and-sandbox"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("missing %q: %s", want, script)
+		}
+	}
+	if strings.Contains(script, "CLAUDE_CONFIG_DIR") {
+		t.Fatal("local profile leaked")
+	}
+}
+
+func TestRemoteRequiredRejectsLocalFallback(t *testing.T) {
+	e, d := placementExecutor(t, t.TempDir())
+	project, err := d.GetProjectByName("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project.Path, ".taskyou.yml"), []byte("placement:\n  remote_required: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task := placementTestTask(t, d)
+	r, _, err := e.resolvePlacement(context.Background(), task)
+	if err == nil || r != nil {
+		t.Fatalf("local fallback: %T %v", r, err)
+	}
+	p, _ := d.GetTaskPlacementDecision(task.ID)
+	if p.Decided {
+		t.Fatal("unavailable placement became sticky")
+	}
+}
+
+func TestRemotePromptsAreScopedToLaunchAttempt(t *testing.T) {
+	task := &db.Task{ID: 42}
+	a, err := remoteLaunchScript(task, "codex", "/srv/app", "first", "aaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := remoteLaunchScript(task, "codex", "/srv/app", "second", "bbb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b || !strings.Contains(a, "42-aaa-prompt.txt") || !strings.Contains(b, "42-bbb-prompt.txt") {
+		t.Fatalf("shared prompt staging: %s / %s", a, b)
+	}
+}
+
+func TestRemoteSessionNamespaceIsPerCoordinator(t *testing.T) {
+	calls := filepath.Join(t.TempDir(), "calls")
+	stubSSH(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(calls)+"\nexit 0\n")
+	ctx := WithRunner(context.Background(), RemoteRunner{Host: "build"})
+	a, err := findOrCreateRemoteDaemonSession(ctx, "aaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := findOrCreateRemoteDaemonSession(ctx, "bbb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("coordinators share a tmux session")
+	}
+	commands, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []string{a, b} {
+		if !strings.Contains(string(commands), "="+session) {
+			t.Fatalf("missing exact session lookup for %s: %s", session, commands)
+		}
 	}
 }

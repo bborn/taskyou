@@ -26,11 +26,12 @@ type Request struct {
 
 // Task describes the task being placed.
 type Task struct {
-	ID       int64  `json:"id"`
-	Title    string `json:"title"`
-	Project  string `json:"project"`
-	RepoPath string `json:"repo_path"`
-	Executor string `json:"executor"`
+	ID             int64  `json:"id"`
+	Title          string `json:"title"`
+	Project        string `json:"project"`
+	RepoPath       string `json:"repo_path"`
+	Executor       string `json:"executor"`
+	RemoteRequired bool   `json:"remote_required,omitempty"`
 }
 
 // Response is the JSON document the resolver writes to stdout.
@@ -38,9 +39,10 @@ type Task struct {
 // An empty Target means "run locally". Reason is always populated and is shown
 // to the user, so it should be specific enough to explain a surprising choice.
 type Response struct {
-	Target  string `json:"target"`
-	Workdir string `json:"workdir"`
-	Reason  string `json:"reason"`
+	Target      string `json:"target"`
+	Unavailable bool   `json:"unavailable,omitempty"`
+	Workdir     string `json:"workdir"`
+	Reason      string `json:"reason"`
 }
 
 // Local builds a "run here" response with the given reason.
@@ -69,7 +71,19 @@ type Resolver struct {
 
 // Resolve applies the placement rules to req and always returns a usable
 // response.
-func (r Resolver) Resolve(ctx context.Context, req Request) Response {
+func (r Resolver) Resolve(ctx context.Context, req Request) (answer Response) {
+	defer func() {
+		if req.Task.RemoteRequired && answer.Target == "" {
+			answer.Unavailable = true
+		}
+	}()
+	executor := req.Task.Executor
+	if executor == "" {
+		executor = "claude"
+	}
+	if executor != "claude" && executor != "codex" {
+		return Local("executor %s does not support remote execution", executor)
+	}
 	if req.Event != "" && req.Event != Event {
 		return Local("unsupported event %q, expected %q", req.Event, Event)
 	}
@@ -88,14 +102,28 @@ func (r Resolver) Resolve(ctx context.Context, req Request) Response {
 		return Local("%s", err)
 	}
 
-	candidates := inv.Serving(project)
+	var candidates []Candidate
+	for _, c := range inv.Serving(project) {
+		// Explicit executor capabilities restrict eligibility; legacy generic agent
+		// hosts retain their existing behavior and are checked before launch.
+		explicit, matches := false, false
+		for _, capability := range c.Host.Capabilities {
+			if strings.HasPrefix(capability, "executor:") {
+				explicit = true
+				matches = matches || capability == "executor:"+executor
+			}
+		}
+		if !explicit || matches {
+			candidates = append(candidates, c)
+		}
+	}
 	switch len(candidates) {
 	case 0:
 		return Local("no host in %s serves %s (%s)", path, project, hostSummary(inv))
 	case 1:
 		c := candidates[0]
 		return Response{
-			Target:  c.Name,
+			Target:  c.Destination(),
 			Workdir: c.Checkout,
 			Reason:  fmt.Sprintf("only host serving %s", project),
 		}
@@ -151,7 +179,7 @@ func (r Resolver) rank(ctx context.Context, project, path string, candidates []C
 	case 1:
 		only := reachable[0]
 		return Response{
-			Target:  only.Name,
+			Target:  only.Destination(),
 			Workdir: only.Checkout,
 			Reason: fmt.Sprintf("only reachable host of %d serving %s (%s)",
 				len(candidates), project, names(candidates)),
@@ -178,7 +206,7 @@ func (r Resolver) rank(ctx context.Context, project, path string, candidates []C
 	}
 
 	best := reachable[0]
-	return Response{Target: best.Name, Workdir: best.Checkout, Reason: reason}
+	return Response{Target: best.Destination(), Workdir: best.Checkout, Reason: reason}
 }
 
 func names(candidates []Candidate) string {

@@ -139,7 +139,7 @@ func (r RemoteRunner) sshArgs() []string {
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(r.connectTimeout().Seconds())),
 	}
 	args = append(args, sshMultiplexArgs()...)
-	return append(args, r.Host)
+	return append(args, "--", r.Host)
 }
 
 // sshMultiplexArgs reuse ONE ssh connection per host across every command ty
@@ -215,8 +215,8 @@ func (r RemoteRunner) connectTimeout() time.Duration {
 // fallback would put the load right back on the machine this feature exists to
 // unload, on exactly the days nobody is watching.
 func (r RemoteRunner) Preflight(ctx context.Context) (string, error) {
-	if strings.TrimSpace(r.Host) == "" {
-		return "", fmt.Errorf("placement named no host")
+	if strings.TrimSpace(r.Host) == "" || strings.HasPrefix(r.Host, "-") || strings.ContainsAny(r.Host, " \t\r\n") {
+		return "", fmt.Errorf("placement must name a valid SSH destination")
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.connectTimeout()+5*time.Second)
 	defer cancel()
