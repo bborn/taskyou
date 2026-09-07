@@ -45,14 +45,14 @@ func (b *bell) Ring() {
 	}
 	b.timer = time.AfterFunc(b.delay, func() {
 		b.mu.Lock()
+		defer b.mu.Unlock()
 		if gen != b.gen {
 			// Superseded by a later Ring (or a Flush) while the timer was
 			// firing — that call owns the ring now.
-			b.mu.Unlock()
 			return
 		}
 		b.timer = nil
-		b.mu.Unlock()
+		// Keep delivery inside the lock so Flush waits for an in-flight write.
 		b.ring()
 	})
 }
@@ -62,18 +62,17 @@ func (b *bell) Ring() {
 // isn't silently dropped.
 func (b *bell) Flush() {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.timer == nil {
-		b.mu.Unlock()
 		return
 	}
-	pending := b.timer.Stop()
+	// Stop can return false when the timer has expired but its callback is
+	// waiting for our lock. The non-nil timer means we still own delivery;
+	// advancing gen prevents that callback from ringing a second time.
+	b.timer.Stop()
 	b.timer = nil
 	b.gen++
-	b.mu.Unlock()
-
-	if pending {
-		b.ring()
-	}
+	b.ring()
 }
 
 // pending reports whether a ring is scheduled but not yet delivered.

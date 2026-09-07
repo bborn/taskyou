@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -163,4 +164,46 @@ func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("condition not met within %v", timeout)
+}
+
+// An expired AfterFunc can be waiting for the mutex when shutdown flushes it.
+func TestBellFlushDeliversExpiredPendingRing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := &recorder{}
+		b := newBell(time.Second, rec.ring)
+		b.Ring()
+		b.mu.Lock()
+		time.Sleep(time.Second)
+		// The deadline has elapsed while the mutex prevents delivery.
+		b.mu.Unlock()
+		b.Flush()
+		synctest.Wait()
+		if got := rec.count(); got != 1 {
+			t.Fatalf("Flush delivered %d rings after timer expiry, want 1", got)
+		}
+	})
+}
+
+func TestBellFlushWaitsForDelivery(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	b := newBell(time.Millisecond, func() {
+		close(started)
+		<-release
+	})
+	b.Ring()
+	<-started
+	flushed := make(chan struct{})
+	go func() { b.Flush(); close(flushed) }()
+	select {
+	case <-flushed:
+		t.Error("Flush returned before the bell finished ringing")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-flushed:
+	case <-time.After(time.Second):
+		t.Fatal("Flush did not return after delivery finished")
+	}
 }
