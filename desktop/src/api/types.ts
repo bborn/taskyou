@@ -97,6 +97,8 @@ export interface Attachment {
 }
 
 export interface TerminalInfo {
+  remote_host?: string;
+  error?: string;
   daemon_session: string;
   tmux_window_id: string;
   claude_pane_id: string;

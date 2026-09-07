@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -146,7 +145,7 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Starting new %s session", executorName))
 	}
 
-	err = exec.CommandContext(ctx, "tmux", "new-window", "-d",
+	err = tmuxCmd(ctx, "new-window", "-d",
 		"-t", daemonSession,
 		"-n", windowName,
 		"-c", workDir,
@@ -166,7 +165,7 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
-	if err := exec.CommandContext(ctx, "tmux", "split-window",
+	if err := tmuxCmd(ctx, "split-window",
 		"-h",
 		"-t", windowTarget+".0",
 		"-c", workDir,
@@ -174,8 +173,8 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		e.logger.Warn("split-window for shell pane failed", "window", windowTarget, "error", err)
 	}
 
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 
 	// Persist pane IDs so other clients (HTTP API, TUI) can target the panes.
 	e.savePaneIDs(ctx, windowTarget, task.ID)
@@ -209,6 +208,62 @@ func (e *Executor) taskWorkdir(task *db.Task) string {
 // so there is nowhere safe to start an agent.
 var ErrNoWorktree = errors.New("task has no worktree yet")
 
+// ErrPlacedRemotely means the task is running on another machine, so this
+// process has no workspace to launch it in and no pane to show.
+//
+// It is NOT the same failure as ErrNoWorktree, and saying so matters: a
+// remotely-placed task opened in the TUI used to report "task has no worktree
+// yet: refusing to start ... Check your executor configuration", which reads as
+// a broken local setup when the truth is that the task is alive and well on
+// another host.
+var ErrPlacedRemotely = errors.New("task is running on another machine")
+
+// RemoteTaskLocation describes where a remotely placed task actually lives, for
+// surfaces (the TUI, `ty show`) that can only say so rather than show it.
+type RemoteTaskLocation struct {
+	Host    string // the placed host
+	WorkDir string // the task's worktree on it
+	Branch  string // the branch checked out there
+	Attach  string // the ssh+tmux command that attaches to its session
+}
+
+// RemoteLocation returns where a task is running when it was placed on another
+// host, and false when it is an ordinary local task.
+func (e *Executor) RemoteLocation(task *db.Task) (RemoteTaskLocation, bool) {
+	if task == nil || task.PlacementTarget == "" {
+		return RemoteTaskLocation{}, false
+	}
+	loc := RemoteTaskLocation{Host: task.PlacementTarget}
+	if e.db != nil {
+		if path, branch, err := e.db.GetTaskRemoteWorktree(task.ID); err == nil {
+			loc.WorkDir, loc.Branch = path, branch
+		}
+	}
+	if task.DaemonSession != "" {
+		loc.Attach = fmt.Sprintf("ssh %s -t tmux attach -t %s:%s",
+			task.PlacementTarget, task.DaemonSession, TmuxWindowName(task.ID))
+	}
+	return loc, true
+}
+
+// RemoteTaskMessage is the one-line explanation a local surface shows instead of
+// panes for a remotely placed task. It never blames the local configuration,
+// because nothing local is wrong.
+func RemoteTaskMessage(loc RemoteTaskLocation) string {
+	msg := fmt.Sprintf("Running on %s", loc.Host)
+	if loc.WorkDir != "" {
+		msg += " in " + loc.WorkDir
+	}
+	if loc.Branch != "" {
+		msg += " (" + loc.Branch + ")"
+	}
+	msg += " — no local pane to show."
+	if loc.Attach != "" {
+		msg += " Attach with: " + loc.Attach
+	}
+	return msg
+}
+
 // launchWorkdir returns the directory to START AN AGENT in, or an error when no
 // isolated directory exists.
 //
@@ -229,6 +284,12 @@ func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
 	if task == nil {
 		return "", ErrNoWorktree
 	}
+	// A task placed on another machine has no local workspace by design. Say that,
+	// instead of reporting the local "no worktree" failure and telling the user to
+	// check an executor configuration that is not the problem.
+	if task.PlacementTarget != "" {
+		return "", fmt.Errorf("%w: task %d was placed on %s", ErrPlacedRemotely, task.ID, task.PlacementTarget)
+	}
 	if task.WorktreePath != "" {
 		return task.WorktreePath, nil
 	}
@@ -245,7 +306,7 @@ func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
 // findExistingTaskWindow looks for windowName in any task-daemon session and
 // returns its "session:index" target, or "" when absent.
 func findExistingTaskWindow(ctx context.Context, windowName string) string {
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
+	out, err := tmuxCmd(ctx, "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
 	if err != nil {
 		return ""
 	}
@@ -261,10 +322,11 @@ func findExistingTaskWindow(ctx context.Context, windowName string) string {
 // findOrCreateDaemonSession returns the name of an existing task-daemon
 // session, creating one (with a placeholder window) when none exists.
 func findOrCreateDaemonSession(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := tmuxCmd(ctx, "list-sessions", "-F", "#{session_name}").Output()
 	if err == nil {
 		for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if strings.HasPrefix(session, "task-daemon-") {
+				tagSessionOwner(ctx, session)
 				return session, nil
 			}
 		}
@@ -272,8 +334,35 @@ func findOrCreateDaemonSession(ctx context.Context) (string, error) {
 
 	daemonSession := fmt.Sprintf("task-daemon-%d", os.Getpid())
 	// "tail -f /dev/null" keeps the placeholder window alive (empty windows exit immediately).
-	if err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
+	if err := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session failed: %w", err)
 	}
+	tagSessionOwner(ctx, daemonSession)
 	return daemonSession, nil
+}
+
+// TmuxOwnerOption is the tmux user option naming the machine whose database owns
+// the tasks in a task-daemon session.
+//
+// It exists because a session's name says nothing about who owns it. A placed
+// task's window lives in a task-daemon session on the REMOTE host, but the task
+// row lives in the database of the machine that placed it. Orphan cleanup asks
+// "is this window's task in my database?", and on the remote host the honest
+// answer for someone else's task is "no" — which used to read as "deleted, kill
+// it" and tore down live agents mid-run.
+const TmuxOwnerOption = "@ty_owner"
+
+// LocalOwnerTag identifies this machine as the owner of the sessions it creates.
+func LocalOwnerTag() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "unknown-host"
+	}
+	return strings.TrimSpace(host)
+}
+
+// tagSessionOwner records which machine's database owns this session's tasks.
+// Best-effort: an untagged session is treated as "unknown", never as "mine".
+func tagSessionOwner(ctx context.Context, session string) {
+	_ = tmuxCmd(ctx, "set-option", "-t", session, TmuxOwnerOption, LocalOwnerTag()).Run()
 }

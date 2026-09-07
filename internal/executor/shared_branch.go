@@ -1,9 +1,9 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -122,7 +122,7 @@ func (e *Executor) clearBranchWait(taskID int64) {
 // review, the next step trying to attach — is contending for that single slot,
 // so the first question on failure is always "who has it?".
 func gitWorktreeHolder(projectDir, branch string) string {
-	out, err := exec.Command("git", "-C", projectDir, "worktree", "list", "--porcelain").Output()
+	out, err := gitCmd(context.Background(), projectDir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return ""
 	}
@@ -150,7 +150,7 @@ func gitWorktreeHolder(projectDir, branch string) string {
 // disk and stays readable — which matters, because a finished step's worktree is
 // where a human goes to see what it did.
 func gitDetachWorktree(worktreePath string) error {
-	cmd := exec.Command("git", "-C", worktreePath, "checkout", "--detach")
+	cmd := gitCmd(context.Background(), worktreePath, "checkout", "--detach")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("detach %s: %v: %s", worktreePath, err, strings.TrimSpace(string(out)))
 	}
@@ -351,9 +351,7 @@ func runGitWorktreeAddOutput(projectDir string, args ...string) ([]byte, error) 
 		// fails loudly and is retried.
 		log.Warn("proceeding without the repo worktree lock", "repo", projectDir, "error", err)
 	}
-	cmd := exec.Command("git", args...)
-	cmd.Dir = projectDir
-	return cmd.CombinedOutput()
+	return gitCmd(context.Background(), projectDir, args...).CombinedOutput()
 }
 
 // repoLockTimeout bounds the wait for another worktree creation in the same

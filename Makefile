@@ -1,6 +1,7 @@
 .PHONY: build build-no-restart build-ty build-taskd restart-daemon build-linux \
        install clean test vet vuln audit coverage run daemon \
-       deploy deploy-service deploy-full status logs connect tag fmt lint
+       deploy deploy-service deploy-full status logs connect tag fmt lint \
+       install-ty-on uninstall-ty-on
 
 # Configuration
 SERVER ?= root@cloud-claude
@@ -27,11 +28,20 @@ build: build-ty build-taskd restart-daemon
 # Build binaries without touching any running daemon
 build-no-restart: build-ty build-taskd
 
+# The daemon usually IS bin/ty, and `build` writes these binaries before
+# restart-daemon stops anything — so the build would be overwriting the file a
+# running process is executing. Unlinking first leaves that process on its held
+# inode, alive and unharmed, and hands the build a fresh path. This belongs here
+# rather than in an ordering fix in `build`, so `build-no-restart` and a bare
+# `make build-ty` are equally safe, and so a FAILED build never leaves you with a
+# daemon that was killed for a binary that then did not appear.
 build-ty:
+	@rm -f bin/ty bin/taskyou
 	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o bin/ty ./cmd/task
 	ln -sf ty bin/taskyou
 
 build-taskd:
+	@rm -f bin/taskd
 	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o bin/taskd ./cmd/taskd
 
 # Build the web/desktop frontend and stage it for embedding into ty serve.
@@ -65,6 +75,34 @@ restart-daemon:
 		sleep 1; \
 		echo "Daemon restarted (PID $$(pgrep -f 'ty daemon' || true))"; \
 	fi
+
+# ---- Extensions ----------------------------------------------------------
+#
+# extensions/* are separate Go modules built with `go build -o <name> ./cmd`
+# (see each extension's README). ty-on is different in one way: it is not a
+# sidecar you run, it is a PLUGIN ty consults, so it has to end up in the
+# plugins dir alongside its manifest or ty will never call it.
+#
+# The plugins dir is whatever `ty plugins dir` reports (TY_PLUGINS_DIR overrides
+# it, and it is NOT ~/.config on macOS) — asking the binary is the only way to
+# install to the same place ty looks.
+
+# Build ty-on and install it as a task.placement plugin.
+install-ty-on: build-ty
+	cd extensions/ty-on && $(GO) build -ldflags="$(LDFLAGS)" -o ty-on ./cmd
+	@DIR="$$(bin/ty plugins dir)/ty-on"; \
+	 mkdir -p "$$DIR"; \
+	 cp extensions/ty-on/ty-on "$$DIR/ty-on"; \
+	 chmod +x "$$DIR/ty-on"; \
+	 cp extensions/ty-on/plugin.yaml "$$DIR/plugin.yaml"; \
+	 echo "Installed ty-on to $$DIR"; \
+	 echo "Tasks are now placed by the 'on' inventory. Remove it with 'make uninstall-ty-on'."
+
+# Remove the ty-on plugin; every task goes back to running locally.
+uninstall-ty-on: build-ty
+	@DIR="$$(bin/ty plugins dir)/ty-on"; \
+	 rm -rf "$$DIR"; \
+	 echo "Removed $$DIR"
 
 # Build for Linux (server deployment)
 build-linux:

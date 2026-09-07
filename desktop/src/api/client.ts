@@ -67,6 +67,8 @@ export const api = {
     params.set("limit", String(opts?.limit ?? 1000));
     return request<Task[]>("GET", `/api/tasks?${params}`);
   },
+  taskLogsBefore: (id: number, before: number, limit = 200) =>
+    request<LogLine[]>("GET", `/api/tasks/${id}/logs?before=${before}&limit=${limit}`),
   taskDetail: (id: number) => request<TaskDetail>("GET", `/api/tasks/${id}`),
   createTask: (task: {
     title: string;

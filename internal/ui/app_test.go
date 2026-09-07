@@ -1544,7 +1544,18 @@ func TestTaskEventDetectsPermissionPrompt(t *testing.T) {
 		TaskID: task.ID,
 		Task:   task,
 	}}
-	m.Update(event)
+	m.eventCh = make(chan executor.TaskEvent)
+	close(m.eventCh)
+	_, cmd := m.Update(event)
+	// Process the asynchronous prompt read, without executing the long-lived
+	// event subscription or optional terminal enrichment.
+	for _, command := range cmd().(tea.BatchMsg) {
+		if result := command(); result != nil {
+			if prompt, ok := result.(eventPromptMsg); ok {
+				m.Update(prompt)
+			}
+		}
+	}
 
 	// The handler should have detected the permission prompt
 	if !m.tasksNeedingInput[task.ID] {
@@ -2100,5 +2111,77 @@ func TestNewDetailModel_FocusExecutorOnJoinFlag(t *testing.T) {
 	detail2, _ := NewDetailModel(task, database, nil, 100, 50, false)
 	if detail2.focusExecutorOnJoin {
 		t.Error("expected focusExecutorOnJoin=false when focusExecutor=false")
+	}
+}
+
+// --task names a task to open the board on. Selection has to wait for the first
+// tasksLoadedMsg: at construction the board is empty, so selecting there is a
+// silent no-op and the user lands on whatever sorts first instead.
+func TestFocusTaskOnLoadSelectsAfterTasksArrive(t *testing.T) {
+	tasks := []*db.Task{
+		&db.Task{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		&db.Task{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		&db.Task{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{},
+		tasksNeedingInput: map[int64]bool{},
+		executorPrompts:   map[int64]string{},
+		questionPrompts:   map[int64]bool{},
+	}
+	m.FocusTaskOnLoad(3)
+
+	if got := m.kanban.SelectedTask(); got != nil && got.ID == 3 {
+		t.Fatal("task 3 selected before any tasks loaded; the test cannot prove anything")
+	}
+
+	m.Update(tasksLoadedMsg{tasks: tasks})
+
+	got := m.kanban.SelectedTask()
+	if got == nil {
+		t.Fatal("no task selected after load")
+	}
+	if got.ID != 3 {
+		t.Errorf("selected task %d, want 3", got.ID)
+	}
+	if m.pendingFocusTaskID != 0 {
+		t.Error("request should be cleared after being applied, or it re-grabs the selection on every refresh")
+	}
+}
+
+// A --task id that is filtered out or no longer exists must not keep stealing
+// the selection on later refreshes.
+func TestFocusTaskOnLoadIsAttemptedOnlyOnce(t *testing.T) {
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{},
+		tasksNeedingInput: map[int64]bool{},
+		executorPrompts:   map[int64]string{},
+		questionPrompts:   map[int64]bool{},
+	}
+	m.FocusTaskOnLoad(999)
+
+	m.Update(tasksLoadedMsg{tasks: []*db.Task{&db.Task{ID: 1, Title: "Task 1", Status: db.StatusBacklog}}})
+	if m.pendingFocusTaskID != 0 {
+		t.Fatal("a missing task should not stay pending")
+	}
+
+	m.kanban.SelectTask(1)
+	m.Update(tasksLoadedMsg{tasks: []*db.Task{
+		&db.Task{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		&db.Task{ID: 999, Title: "Late arrival", Status: db.StatusBacklog},
+	}})
+	if got := m.kanban.SelectedTask(); got != nil && got.ID == 999 {
+		t.Error("selection was stolen on a later refresh")
 	}
 }

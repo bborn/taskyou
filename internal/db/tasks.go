@@ -55,6 +55,13 @@ type Task struct {
 	ArchiveCommit       string // Commit hash at time of archiving
 	ArchiveWorktreePath string // Original worktree path before archiving
 	ArchiveBranchName   string // Original branch name before archiving
+	// Where this task ran, as decided by the task.placement hook. An empty target
+	// means this machine, which is every task unless a placement plugin is
+	// installed. Recorded so a result can be traced back to the machine that
+	// produced it: once tasks run on four hosts, a suite that only fails on one of
+	// them is indistinguishable from a real bug without it.
+	PlacementTarget string // Host the task ran on ("" = local)
+	PlacementReason string // The resolver's explanation for that choice
 }
 
 // Task statuses
@@ -406,7 +413,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -418,6 +426,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.PlacementTarget, &t.PlacementReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -459,7 +468,7 @@ type ListTasksOptions struct {
 	Type           string
 	Project        string
 	Tag            string // Filter to tasks carrying this exact tag (delimiter-safe; "gm:cortex" does not match "gm:cortex-2")
-	Limit          int
+	Limit          int    // Zero defaults to 100; negative means no limit.
 	Offset         int
 	IncludeClosed  bool // Include closed tasks even when Status is empty
 	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
@@ -479,7 +488,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -542,8 +552,10 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
-	} else {
+	} else if opts.Limit == 0 {
 		query += " LIMIT 100"
+	} else {
+		query += " LIMIT -1"
 	}
 	if opts.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
@@ -568,6 +580,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -593,7 +606,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -607,6 +621,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.PlacementTarget, &t.PlacementReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -636,7 +651,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -669,6 +685,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -933,6 +950,23 @@ func (db *DB) UpdateTaskPermissionMode(taskID int64, mode string) error {
 	`, mode, mode == PermissionModeDangerous, taskID)
 	if err != nil {
 		return fmt.Errorf("update task permission mode: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskClaudeConfigDir sets the per-task CLAUDE_CONFIG_DIR override,
+// which is how a task is pinned to one Claude profile (account). Writing it as
+// its own column update — rather than through UpdateTask — matters at spawn
+// time: the routing decision is made from a task struct the daemon has been
+// holding, and a full-row write would stomp any field another surface (the TUI,
+// a hook) changed in the meantime.
+func (db *DB) UpdateTaskClaudeConfigDir(taskID int64, configDir string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_config_dir = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, configDir, taskID)
+	if err != nil {
+		return fmt.Errorf("update task claude config dir: %w", err)
 	}
 	return nil
 }
@@ -1285,7 +1319,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -1300,6 +1335,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.PlacementTarget, &t.PlacementReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1323,7 +1359,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -1346,6 +1383,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -1435,6 +1473,105 @@ func (db *DB) GetTaskBaseDirty(taskID int64) (string, error) {
 	return s, nil
 }
 
+// SetTaskPlacement records where a task ran: the host the task.placement hook
+// named and the reason it gave. Written once, just before the executor spawns.
+//
+// An empty target is a real answer, not a missing one — it means the resolver
+// chose this machine — so it is stored alongside its reason rather than skipped.
+// Tasks that were never consulted (no placement plugin installed) keep both
+// fields empty and read exactly as they always have.
+func (db *DB) SetTaskPlacement(taskID int64, target, reason string) error {
+	_, err := db.Exec(`UPDATE tasks SET placement_target = ?, placement_reason = ? WHERE id = ?`,
+		target, reason, taskID)
+	return err
+}
+
+// GetTaskPlacement returns the host a task ran on and why, both empty when the
+// task ran locally or predates the placement hook.
+func (db *DB) GetTaskPlacement(taskID int64) (target, reason string, err error) {
+	err = db.QueryRow(
+		`SELECT COALESCE(placement_target, ''), COALESCE(placement_reason, '') FROM tasks WHERE id = ?`,
+		taskID).Scan(&target, &reason)
+	if err != nil {
+		return "", "", err
+	}
+	return target, reason, nil
+}
+
+// TaskPlacement is a task's recorded placement decision: where it runs, why,
+// and the checkout it was given on that host.
+//
+// Decided is the state placement_target alone cannot express. An empty target is
+// a real answer meaning "run here", so without a separate marker "the resolver
+// chose local" and "the resolver was never asked" read identically — and a task
+// that had been deliberately placed locally would be re-asked on every retry.
+type TaskPlacement struct {
+	Target  string // Host the task runs on ("" = this machine)
+	Reason  string // The resolver's explanation
+	WorkDir string // The checkout on that host ("" for local)
+	Decided bool   // Whether placement has been decided at all
+}
+
+// SetTaskPlacementDecision records a placement decision, stamping the time it
+// was made. Called once, at the first spawn; every later spawn reads it back
+// with GetTaskPlacementDecision instead of asking the resolver again.
+func (db *DB) SetTaskPlacementDecision(taskID int64, target, reason, workDir string) error {
+	_, err := db.Exec(`UPDATE tasks
+		SET placement_target = ?, placement_reason = ?, placement_workdir = ?,
+		    placement_decided_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, target, reason, workDir, taskID)
+	return err
+}
+
+// GetTaskPlacementDecision returns the placement already decided for a task.
+func (db *DB) GetTaskPlacementDecision(taskID int64) (TaskPlacement, error) {
+	var (
+		p         TaskPlacement
+		decidedAt sql.NullString
+	)
+	err := db.QueryRow(`SELECT COALESCE(placement_target, ''), COALESCE(placement_reason, ''),
+		       COALESCE(placement_workdir, ''), placement_decided_at
+		FROM tasks WHERE id = ?`, taskID).Scan(&p.Target, &p.Reason, &p.WorkDir, &decidedAt)
+	if err != nil {
+		return TaskPlacement{}, err
+	}
+	p.Decided = decidedAt.Valid && decidedAt.String != ""
+	return p, nil
+}
+
+// ClearTaskPlacement forgets a task's placement decision so the next spawn asks
+// the resolver again. This is what `ty retry --replace` does, and it is the ONLY
+// way a placed task moves hosts: a host that has gone away fails the task
+// visibly rather than silently re-placing it, because a silent move orphans the
+// worktree, branch and executor session the first attempt left behind.
+func (db *DB) ClearTaskPlacement(taskID int64) error {
+	_, err := db.Exec(`UPDATE tasks
+		SET placement_target = '', placement_reason = '', placement_workdir = '',
+		    placement_decided_at = NULL, remote_worktree_path = '', remote_branch = ''
+		WHERE id = ?`, taskID)
+	return err
+}
+
+// SetTaskRemoteWorktree records the isolated worktree a remotely placed task was
+// given on its host, so the TUI can say where the task actually is and a retry
+// can find the same directory.
+func (db *DB) SetTaskRemoteWorktree(taskID int64, path, branch string) error {
+	_, err := db.Exec(`UPDATE tasks SET remote_worktree_path = ?, remote_branch = ? WHERE id = ?`,
+		path, branch, taskID)
+	return err
+}
+
+// GetTaskRemoteWorktree returns the remote worktree path and branch, both empty
+// for a task that has never run remotely.
+func (db *DB) GetTaskRemoteWorktree(taskID int64) (path, branch string, err error) {
+	err = db.QueryRow(`SELECT COALESCE(remote_worktree_path, ''), COALESCE(remote_branch, '')
+		FROM tasks WHERE id = ?`, taskID).Scan(&path, &branch)
+	if err != nil {
+		return "", "", err
+	}
+	return path, branch, nil
+}
+
 // HasSessionStarted reports whether the task's executor session actually began. A task
 // flips to 'processing' and then spends tens of seconds on worktree setup (clone, bundle,
 // migrations) before any session exists — so this, not the absence of a tmux window, is
@@ -1454,17 +1591,23 @@ func (db *DB) HasSessionStarted(taskID int64) (bool, error) {
 
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
+	return db.GetTaskLogsBefore(taskID, 0, limit)
+}
+
+// GetTaskLogsBefore returns a bounded history page, newest first. A zero beforeID selects the latest page.
+func (db *DB) GetTaskLogsBefore(taskID, beforeID int64, limit int) ([]*TaskLog, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-
-	rows, err := db.Query(`
-		SELECT id, task_id, line_type, content, created_at
-		FROM task_logs
-		WHERE task_id = ?
-		ORDER BY id DESC
-		LIMIT ?
-	`, taskID, limit)
+	query := `SELECT id, task_id, line_type, content, created_at FROM task_logs WHERE task_id = ?`
+	args := []any{taskID}
+	if beforeID > 0 {
+		query += " AND id < ?"
+		args = append(args, beforeID)
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query task logs: %w", err)
 	}
@@ -1484,7 +1627,8 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 }
 
 // GetLatestLogPerTask returns the most recent log entry for each of the given task IDs.
-// Returns a map of taskID -> latest TaskLog. Uses a single efficient query.
+// Returns a map of taskID -> latest TaskLog. Seek to the last indexed row per
+// task instead of scanning its entire history with GROUP BY / MAX(id).
 func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
 	if len(taskIDs) == 0 {
 		return nil, nil
@@ -1500,13 +1644,11 @@ func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
 
 	query := fmt.Sprintf(`
 		SELECT tl.id, tl.task_id, tl.line_type, tl.content, tl.created_at
-		FROM task_logs tl
-		INNER JOIN (
-			SELECT task_id, MAX(id) as max_id
-			FROM task_logs
-			WHERE task_id IN (%s)
-			GROUP BY task_id
-		) latest ON tl.id = latest.max_id
+		FROM tasks t
+		JOIN task_logs tl ON tl.id = (
+			SELECT id FROM task_logs WHERE task_id = t.id ORDER BY id DESC LIMIT 1
+		)
+		WHERE t.id IN (%s)
 	`, strings.Join(placeholders, ","))
 
 	rows, err := db.Query(query, args...)
@@ -1589,12 +1731,20 @@ func (db *DB) GetTaskLogCount(taskID int64) (int, error) {
 
 // GetTaskLogsSince retrieves logs after a given ID.
 func (db *DB) GetTaskLogsSince(taskID int64, sinceID int64) ([]*TaskLog, error) {
-	rows, err := db.Query(`
-		SELECT id, task_id, line_type, content, created_at
-		FROM task_logs
-		WHERE task_id = ? AND id > ?
-		ORDER BY id ASC
-	`, taskID, sinceID)
+	return db.GetTaskLogsSinceLimit(taskID, sinceID, 0)
+}
+
+// GetTaskLogsSinceLimit bounds streaming catch-up without discarding older rows.
+// A zero limit preserves the unbounded internal API for existing callers.
+func (db *DB) GetTaskLogsSinceLimit(taskID, sinceID int64, limit int) ([]*TaskLog, error) {
+	query := `SELECT id, task_id, line_type, content, created_at FROM task_logs
+		WHERE task_id = ? AND id > ? ORDER BY id ASC`
+	args := []any{taskID, sinceID}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query task logs: %w", err)
 	}
@@ -2383,7 +2533,8 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE worktree_path != ''
 		  AND status IN ('done', 'archived')
@@ -2411,6 +2562,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)

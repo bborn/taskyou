@@ -367,11 +367,58 @@ func (db *DB) migrate() error {
 		// no longer destroys its worktree or Claude transcript up front — that only
 		// happens when the sweep fires, and even then the transcript is preserved.
 		`ALTER TABLE tasks ADD COLUMN deleted_at DATETIME`,
+		// Where the task ran, as answered by the task.placement hook: the host and
+		// the resolver's reason for choosing it. Both empty for every task that ran
+		// on this machine, which is every task unless a placement plugin is
+		// installed. This is traceability, not decoration — once tasks run on four
+		// machines, a suite that only fails on one of them is indistinguishable from
+		// a real bug unless the result can be traced to the machine that produced it.
+		`ALTER TABLE tasks ADD COLUMN placement_target TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN placement_reason TEXT DEFAULT ''`,
+		// When placement was DECIDED, which is the third state placement_target
+		// alone cannot express: an empty target means "run here", and without a
+		// timestamp that is indistinguishable from "never asked". Placement is
+		// decided once, at the first spawn, and reused for every retry, restart and
+		// resume — a resolver that picks by free memory would otherwise move a
+		// retried task to a different host, orphaning the worktree, branch and
+		// session the first attempt left on the old one.
+		`ALTER TABLE tasks ADD COLUMN placement_decided_at DATETIME`,
+		// The checkout on the placed host, as the resolver named it and Preflight
+		// resolved it. Stored so a retry can reach the same directory without
+		// asking the resolver again.
+		`ALTER TABLE tasks ADD COLUMN placement_workdir TEXT DEFAULT ''`,
+		// The task's OWN worktree on the placed host, and its branch. A remote run
+		// gets the same isolation a local one does: it never runs in the host's
+		// primary checkout. Kept out of worktree_path deliberately — that column
+		// names a directory on THIS machine, and everything that reads it (the
+		// detail view, worktree cleanup, dirty-tree checks) would stat a path that
+		// does not exist here.
+		`ALTER TABLE tasks ADD COLUMN remote_worktree_path TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN remote_branch TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {
 		// Ignore "duplicate column" errors for idempotent migrations
 		db.Exec(m)
+	}
+
+	// Build board indexes after column migrations so older databases have
+	// pinned/deleted_at before these expressions are compiled.
+	for _, query := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_tasks_active_board ON tasks(
+			pinned DESC,
+			CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC,
+			id DESC
+		) WHERE deleted_at IS NULL AND status NOT IN ('done', 'archived')`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_status_recency ON tasks(
+			status,
+			CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC,
+			id DESC
+		) WHERE deleted_at IS NULL`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			return fmt.Errorf("create task listing index: %w", err)
+		}
 	}
 
 	// Note: SQLite doesn't support ALTER COLUMN DEFAULT directly
@@ -742,9 +789,21 @@ func DefaultPath() string {
 	return filepath.Join(home, ".local", "share", "task", "tasks.db")
 }
 
+// placedElsewhere excludes remotely placed tasks from the stale-reference sweep.
+//
+// The sessions and window ids handed to RecoverStaleTmuxRefs come from the tmux
+// server on THIS machine. A task placed on another host records the session and
+// window it was given THERE, and those names are never in a local listing — so
+// without this the sweep reads every remotely placed task as stale and erases
+// the only pointer ty has to its running agent. Task 5271 was mid-run on
+// ik-agents when a daemon restart did exactly that.
+const placedElsewhere = ` AND COALESCE(placement_target, '') = '' `
+
 // RecoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
 // from tasks. Called automatically on daemon startup to recover from crashes.
 // Returns (staleDaemonCount, staleWindowCount) of cleaned references.
+//
+// Only LOCAL references are swept: see placedElsewhere.
 func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowIDs map[string]bool) (int, int, error) {
 	var staleDaemonCount, staleWindowCount int
 
@@ -756,7 +815,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 			WHERE daemon_session IS NOT NULL
 			AND daemon_session != ''
 			AND daemon_session NOT IN (` + sessionList + `)
-		`)
+			` + placedElsewhere)
 		row.Scan(&staleDaemonCount)
 
 		if staleDaemonCount > 0 {
@@ -765,17 +824,17 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 				WHERE daemon_session IS NOT NULL
 				AND daemon_session != ''
 				AND daemon_session NOT IN (` + sessionList + `)
-			`)
+			` + placedElsewhere)
 			if err != nil {
 				return 0, 0, fmt.Errorf("clear stale daemon sessions: %w", err)
 			}
 		}
 	} else {
 		// No active sessions - clear all daemon_session refs
-		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE daemon_session IS NOT NULL AND daemon_session != ''`)
+		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE daemon_session IS NOT NULL AND daemon_session != ''` + placedElsewhere)
 		row.Scan(&staleDaemonCount)
 		if staleDaemonCount > 0 {
-			_, err := db.Exec(`UPDATE tasks SET daemon_session = NULL WHERE daemon_session IS NOT NULL AND daemon_session != ''`)
+			_, err := db.Exec(`UPDATE tasks SET daemon_session = NULL WHERE daemon_session IS NOT NULL AND daemon_session != ''` + placedElsewhere)
 			if err != nil {
 				return 0, 0, fmt.Errorf("clear all daemon sessions: %w", err)
 			}
@@ -790,7 +849,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 			WHERE tmux_window_id IS NOT NULL
 			AND tmux_window_id != ''
 			AND tmux_window_id NOT IN (` + windowList + `)
-		`)
+			` + placedElsewhere)
 		row.Scan(&staleWindowCount)
 
 		if staleWindowCount > 0 {
@@ -799,17 +858,17 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 				WHERE tmux_window_id IS NOT NULL
 				AND tmux_window_id != ''
 				AND tmux_window_id NOT IN (` + windowList + `)
-			`)
+			` + placedElsewhere)
 			if err != nil {
 				return staleDaemonCount, 0, fmt.Errorf("clear stale window IDs: %w", err)
 			}
 		}
 	} else {
 		// No valid windows - clear all tmux_window_id refs
-		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''`)
+		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''` + placedElsewhere)
 		row.Scan(&staleWindowCount)
 		if staleWindowCount > 0 {
-			_, err := db.Exec(`UPDATE tasks SET tmux_window_id = NULL WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''`)
+			_, err := db.Exec(`UPDATE tasks SET tmux_window_id = NULL WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''` + placedElsewhere)
 			if err != nil {
 				return staleDaemonCount, 0, fmt.Errorf("clear all window IDs: %w", err)
 			}

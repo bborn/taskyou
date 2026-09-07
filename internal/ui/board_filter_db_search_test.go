@@ -43,7 +43,7 @@ func TestApplyFilterFindsUnloadedDoneTask(t *testing.T) {
 	m.tasks = []*db.Task{activeTask}
 
 	m.filterText = "demo functionality"
-	m.applyFilter()
+	m.finishBoardFilter(m.applyFilter()().(boardFilterMsg))
 
 	if !kanbanHasTask(m.kanban, doneTask.ID) {
 		t.Errorf("filter %q did not surface unloaded done task #%d", m.filterText, doneTask.ID)
@@ -71,9 +71,65 @@ func TestApplyFilterNoKeywordSkipsDBSearch(t *testing.T) {
 	m.tasks = []*db.Task{loaded}
 
 	m.filterText = "[personal]"
-	m.applyFilter()
+	m.finishBoardFilter(m.applyFilter()().(boardFilterMsg))
 
 	if !kanbanHasTask(m.kanban, loaded.ID) {
 		t.Errorf("project-only filter dropped loaded task #%d", loaded.ID)
+	}
+}
+
+// A pending search must neither queue every intermediate keystroke nor repaint
+// stale results after the query or live task snapshot changes.
+func TestBoardFilterCoalescesAndDiscardsStaleResults(t *testing.T) {
+	first := &db.Task{ID: 1, Title: "alpha", Status: db.StatusBacklog}
+	second := &db.Task{ID: 2, Title: "beta", Status: db.StatusBacklog}
+	m := &AppModel{kanban: NewKanbanBoard(80, 24), tasks: []*db.Task{first, second}, filterText: "alpha"}
+	cmd := m.applyFilter()
+	first.Title = "changed during search"
+	old := cmd().(boardFilterMsg)
+	if len(old.tasks) != 1 || old.tasks[0].Title != "alpha" {
+		t.Fatal("search did not capture task values")
+	}
+	m.filterText = "be"
+	if m.applyFilter() != nil {
+		t.Fatal("started overlapping search")
+	}
+	m.filterText = "beta"
+	if m.applyFilter() != nil {
+		t.Fatal("queued intermediate search")
+	}
+	next := m.finishBoardFilter(old)
+	if next == nil {
+		t.Fatal("latest query was not scheduled")
+	}
+	if kanbanHasTask(m.kanban, first.ID) {
+		t.Fatal("stale query repainted board")
+	}
+	m.finishBoardFilter(next().(boardFilterMsg))
+	if !kanbanHasTask(m.kanban, second.ID) || kanbanHasTask(m.kanban, first.ID) {
+		t.Fatal("latest query did not win")
+	}
+}
+
+func TestBoardFilterClearInvalidatesPendingResult(t *testing.T) {
+	m := &AppModel{kanban: NewKanbanBoard(80, 24), tasks: []*db.Task{{ID: 1, Title: "alpha", Status: db.StatusBacklog}}, filterText: "missing"}
+	cmd := m.applyFilter()
+	m.filterText = ""
+	m.applyFilter()
+	m.finishBoardFilter(cmd().(boardFilterMsg))
+	if !kanbanHasTask(m.kanban, 1) || m.filterInFlight {
+		t.Fatal("old search undid clearing the filter")
+	}
+}
+
+func BenchmarkBoardFilterInput10000(b *testing.B) {
+	m := &AppModel{filterText: "matching", tasks: make([]*db.Task, 10000)}
+	for i := range m.tasks {
+		m.tasks[i] = &db.Task{ID: int64(i + 1), Title: "matching task", Status: db.StatusBacklog}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.filterInFlight = false
+		_ = m.applyFilter()
 	}
 }

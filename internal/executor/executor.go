@@ -22,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
@@ -85,6 +86,10 @@ type Executor struct {
 	// off instead of spinning at the worker tick. Keyed by task ID.
 	branchWaitMu sync.Mutex
 	branchWaits  map[int64]*branchWait
+
+	// hostChans holds one long-lived connection per placed host, so polling costs
+	// O(hosts) rather than O(tasks). See hostchannel.go.
+	hostChans hostChannels
 }
 
 // windowExists reports whether a live executor tmux window exists for a task,
@@ -295,7 +300,7 @@ func (e *Executor) Start(ctx context.Context) {
 func (e *Executor) recoverStaleTmuxRefs() {
 	// Step 1: Find all active daemon sessions
 	activeSessions := make(map[string]bool)
-	sessionsOut, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	sessionsOut, err := tmuxCmd(context.Background(), "list-sessions", "-F", "#{session_name}").Output()
 	if err == nil {
 		for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
 			if strings.HasPrefix(session, "task-daemon-") {
@@ -307,7 +312,7 @@ func (e *Executor) recoverStaleTmuxRefs() {
 	// Step 2: Find all valid window IDs across all daemon sessions
 	validWindowIDs := make(map[string]bool)
 	for session := range activeSessions {
-		windowsOut, err := exec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_id}").Output()
+		windowsOut, err := tmuxCmd(context.Background(), "list-windows", "-t", session, "-F", "#{window_id}").Output()
 		if err == nil {
 			for _, windowID := range strings.Split(strings.TrimSpace(string(windowsOut)), "\n") {
 				if windowID != "" {
@@ -338,6 +343,142 @@ func (e *Executor) recoverStaleTmuxRefs() {
 // enter this executor's runningTasks set - without this grace period the sweep
 // would blocked-out a task that is in the middle of coming up.
 const orphanSpawnGrace = 90 * time.Second
+
+// executorWindowLives reports whether a task's executor window is still there,
+// asking the machine the task was actually placed on.
+//
+// The plain local check is wrong for a placed task in the most damaging possible
+// way: its window is on another host, so a local tmux server always answers "not
+// here", and the reconciler blocks a task whose agent is working perfectly well.
+// Task 5271 was eight minutes into a run on ik-agents — it had just pushed its
+// branch — when a daemon restart parked it for this reason.
+//
+// Only a definite "gone" counts as dead. An unreachable host means we could not
+// LOOK, which is not the same as the task having finished; treating the two
+// alike is what windowProbe's third state exists to prevent, and blocking a task
+// because a VPN blipped would be the same bug wearing a different hat.
+func (e *Executor) executorWindowLives(task *db.Task) bool {
+	if task == nil {
+		return false
+	}
+	placement, err := e.db.GetTaskPlacementDecision(task.ID)
+	if err != nil || placement.Target == "" {
+		return e.windowExists(task.ID)
+	}
+	// A placed task with no recorded session was never given a window on its
+	// host, so there is nothing there to be alive.
+	if task.DaemonSession == "" {
+		return false
+	}
+
+	// The host's standing connection already knows about every task on it, and
+	// the reconciler is the one path that runs for tasks this daemon did not
+	// spawn — a restart's adopted tasks are checked here and nowhere else. Asking
+	// the channel first is what keeps that O(hosts) too.
+	target := remoteWindowTarget(task)
+	if probe, _, ok := e.channelProbe(placement.Target, target); ok {
+		return probe != windowGone
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteProbeTimeout)
+	defer cancel()
+	ctx = WithRunner(ctx, RemoteRunner{Host: placement.Target, WorkDir: placement.WorkDir})
+
+	probe := probeWindow(ctx, target, true)
+	if probe == windowUnreachable {
+		e.logger.Warn("could not reach a placed task's host to check on it; leaving it alone",
+			"task", task.ID, "host", placement.Target)
+	}
+	return probe != windowGone
+}
+
+// applyHostSignal turns a remote agent's own account of itself into a result.
+//
+// The detail is logged whatever the kind, because the sentence the agent wrote is
+// usually the only explanation anyone will ever have for why a task on another
+// machine ended the way it did.
+func (e *Executor) applyHostSignal(taskID int64, ev hostEvent) execResult {
+	detail := ev.Detail
+	if detail == "" {
+		detail = "(no detail given)"
+	}
+	switch ev.Kind {
+	case eventNeedsInput:
+		e.logLine(taskID, "system", "The agent asked for input: "+detail)
+		return execResult{NeedsInput: true, Message: detail}
+	case eventFailed:
+		e.logLine(taskID, "error", "The agent stopped: "+detail)
+		return execResult{Message: detail}
+	default:
+		e.logLine(taskID, "system", "The agent reported it finished: "+detail)
+		return e.completeFromSignal(taskID, detail)
+	}
+}
+
+// completeFromSignal finishes a remotely placed task the same way taskyou_complete
+// finishes a local one.
+//
+// A placed agent has no MCP, so this signal is the only thing it can send. Left as
+// a bare success it fell through to the executor's generic "agent finished" branch,
+// which writes backlog — skipping the evidence gate, the human gate, and the
+// PR-review park. A task that had just opened a PR went to backlog instead of
+// blocked, so the one state that means "your turn" never got set and the work was
+// invisible on the board.
+//
+// Complete writes the status itself; the finalizer re-reads it and respects done
+// and blocked ahead of result.Success, which is the same contract the MCP path
+// relies on.
+func (e *Executor) completeFromSignal(taskID int64, detail string) execResult {
+	outcome, err := completion.Complete(e.db, taskID, detail, completion.Options{AsyncSummary: true})
+	if err != nil {
+		// Fall back to the old behaviour rather than dropping the signal: a task
+		// parked in backlog is wrong, but losing the agent's report is worse.
+		e.logLine(taskID, "error", "Could not run the completion checks: "+err.Error())
+		return execResult{Success: true, Message: detail}
+	}
+
+	// A rejected completion cannot "keep running" here the way it does locally —
+	// the remote agent has already stopped. Park it visibly with the reason.
+	if outcome.Kind == completion.KindVerifyFailed {
+		msg := fmt.Sprintf("Verification failed, so this is not complete: %s\n%s",
+			outcome.VerifyCommand, outcome.VerifyOutput)
+		e.logLine(taskID, "error", msg)
+		return execResult{NeedsInput: true, Message: msg}
+	}
+
+	if outcome.Kind == completion.KindPRReview {
+		e.logLine(taskID, "system", fmt.Sprintf(
+			"PR #%d is open — parked for your review.", outcome.PRNumber))
+	}
+	return execResult{Success: true, Message: detail}
+}
+
+// channelProbe answers the poll's two questions — is the window there, and what
+// is on its screen — from the host's standing connection.
+//
+// ok is false whenever the channel cannot speak for the host right now: a local
+// task, no channel yet, or a snapshot too old to trust. The caller then does what
+// it always did, one round trip at a time. That fallback is what makes this safe
+// to switch on: the channel can only ever make polling cheaper, never wrong, and
+// a host agent that dies degrades to the previous behaviour rather than freezing
+// every task's view of itself.
+func (e *Executor) channelProbe(host, target string) (windowProbe, hostWindow, bool) {
+	if host == "" {
+		return windowUnreachable, hostWindow{}, false
+	}
+	channel := e.hostChannelFor(host)
+	if channel == nil {
+		return windowUnreachable, hostWindow{}, false
+	}
+	win, live, known := channel.Window(target)
+	if !known {
+		return windowUnreachable, hostWindow{}, false
+	}
+	if !live {
+		return windowGone, hostWindow{}, true
+	}
+	return windowLive, win, true
+}
 
 // reconcileOrphanedTasks moves tasks that are stuck in 'processing' but have no
 // live executor window back to 'blocked' so the board reflects reality. This
@@ -380,7 +521,9 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 
 		// A processing task with a live executor window is genuinely still
 		// running (e.g. the tmux server survived a daemon restart) - leave it.
-		if e.windowExists(task.ID) {
+		// For a placed task that window is on another machine, so this asks the
+		// machine the task actually runs on.
+		if e.executorWindowLives(task) {
 			continue
 		}
 
@@ -619,7 +762,7 @@ func tmuxWindowExistsForTask(taskID int64) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-a", "-F", "#{session_name}:#{window_name}").Output()
 	if err != nil {
 		// tmux not running / no server => no windows exist.
@@ -653,6 +796,11 @@ func (e *Executor) Stop() {
 	e.running = false
 	close(e.stopCh)
 	e.mu.Unlock()
+
+	// Each of these owns an ssh to a host. Nothing else reaps them, so a daemon
+	// that stops without closing them leaves one process per placed host alive
+	// until the machine reboots.
+	e.hostChans.Close()
 
 	e.logger.Info("Background executor stopped")
 }
@@ -939,7 +1087,7 @@ func gitHeadCommit(worktreePath string) string {
 	if worktreePath == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	out, err := gitCmd(context.Background(), worktreePath, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return ""
 	}
@@ -950,7 +1098,7 @@ func gitHeadCommit(worktreePath string) string {
 // porcelain status prefix is stripped so a path compares equal regardless of whether it
 // is " M", "MM", "??" etc.
 func gitDirtyPaths(worktreePath string) (string, bool) {
-	out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output()
+	out, err := gitCmd(context.Background(), worktreePath, "status", "--porcelain").Output()
 	if err != nil {
 		return "", false
 	}
@@ -1020,7 +1168,7 @@ func WorkflowStepUnfinishedReason(worktreePath, baseCommit, baseDirty string) st
 		}
 	}
 
-	headOut, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	headOut, errH := gitCmd(context.Background(), worktreePath, "rev-parse", "HEAD").Output()
 	if errH != nil {
 		return "could not resolve the worktree's HEAD commit"
 	}
@@ -1038,7 +1186,7 @@ func WorkflowStepUnfinishedReason(worktreePath, baseCommit, baseDirty string) st
 	// And that commit must be pushed: HEAD reachable from an origin ref. Checked by
 	// reachability rather than "HEAD == origin/<--abbrev-ref>" because non-root steps
 	// share one branch and run on a DETACHED HEAD, where --abbrev-ref yields "HEAD".
-	refs, errR := exec.Command("git", "-C", worktreePath, "branch", "-r", "--contains",
+	refs, errR := gitCmd(context.Background(), worktreePath, "branch", "-r", "--contains",
 		head, "--format=%(refname:short)").Output()
 	if errR != nil {
 		return "could not check whether HEAD is pushed to origin"
@@ -1767,8 +1915,7 @@ func (e *Executor) pruneAllProjectWorktrees() {
 		if dir == "" {
 			continue
 		}
-		cmd := exec.Command("git", "worktree", "prune")
-		cmd.Dir = dir
+		cmd := gitCmd(context.Background(), dir, "worktree", "prune")
 		cmd.Run() // Ignore errors
 	}
 }
@@ -1793,7 +1940,20 @@ func (e *Executor) processNextTask(ctx context.Context) {
 		// A step deferred for branch contention serves its backoff here. Without
 		// this gate the task is re-entered on every 2s tick, and each pass writes
 		// a fresh "Starting task #N" line for a step that cannot start.
+		//
+		// This gate goes before routing deliberately: it is a map lookup, while
+		// routing may shell out to a plugin. A task sitting out a branch backoff
+		// shouldn't pay for a usage probe on every tick to learn it still can't run.
 		if !e.branchWaitDue(task.ID) {
+			continue
+		}
+
+		// Last decision before the spawn: which Claude profile does this run
+		// under? A routing plugin may pick one (stamping task.ClaudeConfigDir,
+		// which both command builders already honor) or ask to hold the task
+		// when every account is out of headroom. With no router installed this
+		// is a no-op. See routing.go.
+		if !e.routeTask(ctx, task, true) {
 			continue
 		}
 
@@ -1860,6 +2020,11 @@ func (e *Executor) ExecuteNow(ctx context.Context, taskID int64) error {
 	e.runningTasks[taskID] = true
 	e.mu.Unlock()
 
+	// Route this run to a Claude profile too, so a manually started task lands
+	// on the same account the queue would have chosen. A hold is not honored
+	// here: the user asked for this task to run now.
+	e.routeTask(ctx, task, false)
+
 	e.executeTask(ctx, task)
 	return nil
 }
@@ -1902,10 +2067,99 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.logLine(task.ID, "system", startMsg)
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
+	// Ask where this task should run, before anything is provisioned for it.
+	//
+	// The hook's contract calls this "just before the executor spawns", and this
+	// IS the spawn path — but it comes ahead of worktree setup deliberately.
+	// Provisioning a workspace here for a task that will run on another machine
+	// (a git worktree, then the project's init script: bundle, migrate, install)
+	// is precisely the local resource pressure placement exists to relieve, and it
+	// would all be spent on a directory the task never opens.
+	//
+	// With no placement handler installed this asks nothing, writes nothing, logs
+	// nothing and returns the local runner — every line below is then exactly what
+	// it has always been.
+	runner, placement, placementErr := e.resolvePlacement(taskCtx, task)
+	if placementErr != nil {
+		// A handler named a host we cannot run on. Fail loudly rather than quietly
+		// running here: a silent local fallback would reintroduce exactly the local
+		// resource pressure placement exists to relieve, on the days it is least
+		// likely to be noticed. Failing to DECIDE where to run falls back to local;
+		// failing to RUN where you were told does not.
+		msg := fmt.Sprintf("Placement failed: %v", placementErr)
+		e.logger.Error("placement failed; not falling back to local", "task", task.ID, "error", placementErr)
+		e.logLine(task.ID, "error", msg)
+		_ = e.updateStatus(task.ID, db.StatusBlocked)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+		e.events.EmitTaskFailed(task, msg)
+		return
+	}
+	remotePlacement, placedRemote := placedRemotely(runner)
+
 	// Setup worktree for isolated execution (symlinks claude config from project)
 	// SECURITY: We must have a valid worktree - never fall back to project directory
 	// to prevent Claude from accidentally writing to the main repo
-	workDir, createdWorktree, err := e.setupWorktree(task)
+	//
+	// A remotely-placed task has no LOCAL workspace — provisioning one here would
+	// leave an unopened worktree behind after every remote run — but it gets the
+	// same isolation on the host that placed it: its own git worktree, on its own
+	// branch, inside that host's checkout. Running in the checkout itself (which
+	// is what this path used to do) writes straight into the host's primary clone,
+	// which is exactly what the local path has always refused to do.
+	var (
+		workDir         string
+		createdWorktree bool
+		err             error
+	)
+	if placedRemote {
+		// Ask the host whether the agent can even log in there, BEFORE cutting a
+		// worktree on it and opening a window. A host whose login has lapsed
+		// otherwise takes the whole spawn: a branch, a checkout, a tmux window,
+		// and an agent that paints a login screen and waits forever — which is
+		// how mona's expired session turned into a task that hung and then parked
+		// as "needs review" with nothing saying why.
+		//
+		// Only a DEFINITE no stops the spawn. An executor with no probe, an older
+		// CLI, an unreadable answer: all fall through and run exactly as before,
+		// with the screen-scraping detector as the backstop it has always been.
+		executorSlug := taskExecutorName(task)
+		if state, hint := checkExecutorAuth(WithRunner(taskCtx, remotePlacement), executorSlug); state == authLoggedOut {
+			msg := remoteAuthFailure(executorSlug, remotePlacement.Host, hint)
+			e.logger.Warn("placed host is not logged in", "task", task.ID, "host", remotePlacement.Host, "executor", executorSlug)
+			e.reportAuthRequired(task, msg)
+			return
+		}
+
+		var wt remoteWorktree
+		wt, err = e.setupRemoteWorktree(taskCtx, task, remotePlacement)
+		if err != nil {
+			msg := fmt.Sprintf("Could not prepare an isolated worktree on %s: %v", remotePlacement.Host, err)
+			e.logger.Error("remote worktree setup failed", "task", task.ID, "host", remotePlacement.Host, "error", err)
+			e.logLine(task.ID, "error", msg)
+			_ = e.updateStatus(task.ID, db.StatusBlocked)
+			e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+			e.events.EmitTaskFailed(task, msg)
+			return
+		}
+		workDir = wt.Path
+		createdWorktree = wt.Created
+		// The runner's default directory becomes the task's worktree, so every
+		// command built from this placement — the tmux window, the agent, any git
+		// call — lands there rather than in the host's main checkout.
+		remotePlacement.WorkDir = wt.Path
+		if err := e.db.SetTaskRemoteWorktree(task.ID, wt.Path, wt.Branch); err != nil {
+			e.logger.Warn("could not record remote worktree", "task", task.ID, "error", err)
+		}
+		verb := "Reusing"
+		if wt.Created {
+			verb = "Created"
+		}
+		e.logLine(task.ID, "system", fmt.Sprintf("%s worktree %s on %s (branch: %s)",
+			verb, wt.Path, remotePlacement.Host, wt.Branch))
+		err = nil
+	} else {
+		workDir, createdWorktree, err = e.setupWorktree(task)
+	}
 	if errors.Is(err, ErrBranchBusy) {
 		// Not a failure: the branch this step needs is held by a sibling that is
 		// still running. Leave the task QUEUED so a later tick retries it, and
@@ -1942,7 +2196,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
 		return
 	}
-	e.events.EmitTaskWorktreeReady(task)
+	if !placedRemote {
+		e.events.EmitTaskWorktreeReady(task)
+	}
 
 	// Record the commit this worktree starts at, before anything can run in it. This is
 	// what lets WorkflowStepFinished tell "produced a commit" from "still sitting where
@@ -1955,7 +2211,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// after the step already committed re-baselines base_commit to that pushed HEAD,
 	// making "produced a commit" permanently false — the step can then never
 	// auto-complete and the DAG stalls behind it.
-	if base := gitHeadCommit(workDir); base != "" {
+	// (workDir is a path on another machine when the task is placed remotely, so
+	// there is no local HEAD to read and no local worktree to baseline.)
+	if base := localHeadCommit(placedRemote, workDir); base != "" {
 		prevBase, _ := e.db.GetTaskBaseCommit(task.ID)
 		if createdWorktree || prevBase == "" {
 			if err := e.db.SetTaskBaseCommit(task.ID, base); err != nil {
@@ -1971,9 +2229,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		}
 	}
 
-	// Prepare attachments (write to .claude/attachments for seamless access)
-	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
-	defer cleanupAttachments()
+	// Prepare attachments (write to .claude/attachments for seamless access).
+	// Attachments are staged inside the workspace on THIS machine; a remotely
+	// placed task's workspace is on another one, so there is nowhere here to put
+	// them.
+	var attachmentPaths []string
+	if !placedRemote {
+		var cleanupAttachments func()
+		attachmentPaths, cleanupAttachments = e.prepareAttachments(task.ID, workDir)
+		defer cleanupAttachments()
+	}
 	if len(attachmentPaths) > 0 {
 		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
 	}
@@ -1986,10 +2251,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	prompt := e.buildPrompt(task, attachmentPaths)
 
 	// Get the appropriate executor for this task
-	executorName := task.Executor
-	if executorName == "" {
-		executorName = db.DefaultExecutor()
-	}
+	executorName := taskExecutorName(task)
 	taskExecutor := e.executorFactory.Get(executorName)
 	if taskExecutor == nil {
 		// Fall back to default executor if specified executor not found
@@ -2009,9 +2271,19 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		return
 	}
 
-	// Run the executor
+	// Run the executor, wherever placement decided that is.
 	var result execResult
-	if isRetry {
+	if placedRemote {
+		e.logLine(task.ID, "system", fmt.Sprintf("Placed on %s by the %s plugin: %s",
+			remotePlacement.Host, placement.Handler, placement.Reason))
+		remotePrompt := prompt
+		if isRetry {
+			// A remote session has no stored executor session to resume, so the
+			// feedback has to travel in the prompt or it is simply lost.
+			remotePrompt = prompt + "\n\n" + retryFeedback
+		}
+		result = e.runRemoteSession(taskCtx, task, remotePlacement, executorName, remotePrompt)
+	} else if isRetry {
 		// Include attachments info in retry feedback so Claude knows about them
 		// This is important when attachments are added after the initial run or when resuming
 		feedbackWithAttachments := retryFeedback
@@ -2250,6 +2522,14 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Get attachments section (use relative paths to match permission patterns)
 	attachments := e.getAttachmentsSection(task.ID, attachmentPaths, task.WorktreePath)
 
+	// A handoff from a moved session comes first, before the task's own
+	// description. The task body says what was originally asked for; the handoff
+	// says what already happened, and an agent that reads them the other way
+	// round starts by redoing work that is already on its branch.
+	if handoff := e.handoffSection(task); handoff != "" {
+		prompt.WriteString(handoff)
+	}
+
 	// Always include the core task information first - title and body
 	prompt.WriteString(fmt.Sprintf("# Task: %s\n\n", task.Title))
 	if task.Body != "" {
@@ -2308,6 +2588,12 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	var b strings.Builder
 
+	// A task placed on another machine gets different instructions, because the
+	// ones below are all false there. See remoteUniversalGuidance.
+	if task != nil && task.PlacementTarget != "" {
+		return remoteUniversalGuidance(task, e.taskUsesWorktrees(task))
+	}
+
 	b.WriteString(`Your taskyou_* tools (via the "taskyou" MCP server) are connected to this session, but your harness may DEFER them behind tool search instead of loading them upfront. If you do not see a taskyou_* tool in your active toolset, it is deferred, NOT missing — load it before use (e.g. ToolSearch "select:taskyou_complete") and then call it. Never skip a required taskyou_* call without first trying to load the tool.
 
 If a taskyou_* tool still is not callable after you tried to load it, the MCP transport is genuinely down — do NOT stall, do NOT wait for a human, and do NOT hand-edit ty's database. Fall back to the ` + "`ty`" + ` CLI, which is always on PATH and needs no MCP session:
@@ -2336,6 +2622,45 @@ Completion signaling (REQUIRED — nothing else watches for completion):
 Working directory constraint (isolated git worktree):
 - You are running in an isolated git worktree. This worktree IS your project - it is NOT a copy. NEVER access the original project directory or any path outside your current working directory.
 - ONLY use paths within your current working directory. Always use relative paths (e.g., "." or "./src") when searching or navigating - never absolute paths. The parent repo does not exist for you; only this worktree does.`)
+	}
+
+	return b.String()
+}
+
+// remoteUniversalGuidance is the execution guidance for an agent running on a
+// PLACED HOST rather than on this machine.
+//
+// Everything the local guidance says about signalling completion is not merely
+// unhelpful there — it is wrong. A remote session is launched with plain
+// `claude`: no taskyou MCP server, and the `ty` on that host (if there is one)
+// talks to THAT machine's task store, where this task does not exist. Task 5245
+// spent its last turns calling `ty complete` and `ty artifact list` and getting
+// "task not found" back, because ty had told it to.
+//
+// What replaces it is the truth about how a remote run finishes: the local
+// daemon watches this host's tmux window, and when the session ends it parks the
+// task for a human to review. The agent's job is to leave its work somewhere
+// visible — a pushed branch and a PR — and then stop.
+func remoteUniversalGuidance(task *db.Task, usesWorktrees bool) string {
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf(`Where you are running:
+- You are running on %s, which is NOT the machine that scheduled this task. Its task store does not contain this task.
+- There is therefore NO taskyou MCP server here and NO usable `+"`ty`"+` CLI for this task. Do not call taskyou_complete, taskyou_needs_input, taskyou_get_artifact/taskyou_set_artifact, `+"`ty complete`"+`, `+"`ty artifact`"+` or `+"`ty close`"+`: they will fail with "task not found", and a failed call is not a completion signal.`, task.PlacementTarget))
+
+	b.WriteString(`
+
+Completion signaling (REQUIRED — and it is not a command you run):
+- Do your work, commit it, push the branch, and open a PR with the ` + "`gh`" + ` CLI. Put the PR link in your final message.
+- Then STOP and let your session end. The machine that scheduled this task is watching this session; when it ends, the task is parked for a human to review. That is the completion signal — there is nothing to call, and nothing marks itself done.
+- If you cannot finish (a question only a human can answer, a missing credential, a blocked dependency): say so plainly in your final message and stop. The same review step picks it up. Do not idle waiting for a reply — nobody can see this terminal.`)
+
+	if usesWorktrees {
+		b.WriteString(`
+
+Working directory constraint (isolated git worktree):
+- You are running in an isolated git worktree on this host. This worktree IS your project - it is NOT a copy. NEVER access the original checkout or any path outside your current working directory.
+- ONLY use paths within your current working directory. Always use relative paths (e.g., "." or "./src") when searching or navigating - never absolute paths.`)
 	}
 
 	return b.String()
@@ -2544,7 +2869,7 @@ var findExistingDaemonSession = func() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := tmuxCmd(ctx, "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		return ""
 	}
@@ -2592,33 +2917,35 @@ func CapturePaneContent(windowTarget string, lines int) string {
 	if windowTarget == "" {
 		return ""
 	}
-
-	// If it's already a pane ID (starts with %), use directly; otherwise append .0
-	target := windowTarget
-	if !strings.HasPrefix(windowTarget, "%") {
-		target = windowTarget + ".0"
-	}
-
-	// Try capture with a 3-second timeout and one retry
 	for attempt := 0; attempt < 2; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+		content := CapturePaneContentContext(ctx, windowTarget, lines)
 		cancel()
-
-		if err == nil {
-			content := strings.TrimRight(string(out), " \t\n\r")
-			if content != "" {
-				return content
-			}
+		if content != "" {
+			return content
 		}
-
-		// Only retry once after a short delay
 		if attempt == 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-
 	return ""
+}
+
+// CapturePaneContentContext makes one best-effort capture without retrying.
+// Callers doing optional UI enrichment can share a deadline across all panes.
+func CapturePaneContentContext(ctx context.Context, windowTarget string, lines int) string {
+	if windowTarget == "" {
+		return ""
+	}
+	target := windowTarget
+	if !strings.HasPrefix(windowTarget, "%") {
+		target += ".0"
+	}
+	out, err := tmuxCmd(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(out), " \t\n\r")
 }
 
 // FormatSessionHandoff formats captured pane content into a handoff prompt for the new executor.
@@ -2644,19 +2971,19 @@ func SendLiteralTextToPane(taskID int64, text string) error {
 	sessionName := TmuxSessionName(taskID)
 
 	// Check if session exists first
-	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+	if err := tmuxCmd(context.Background(), "has-session", "-t", sessionName).Run(); err != nil {
 		return fmt.Errorf("session not found: %w", err)
 	}
 
 	target := sessionName + ".0"
 
 	// Send text literally (won't interpret key names)
-	if err := exec.Command("tmux", "send-keys", "-t", target, "-l", text).Run(); err != nil {
+	if err := tmuxCmd(context.Background(), "send-keys", "-t", target, "-l", text).Run(); err != nil {
 		return err
 	}
 
 	// Send Enter as a key press
-	return exec.Command("tmux", "send-keys", "-t", target, "Enter").Run()
+	return tmuxCmd(context.Background(), "send-keys", "-t", target, "Enter").Run()
 }
 
 // KillAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
@@ -2666,7 +2993,7 @@ func KillAllWindowsByNameAllSessions(windowName string) {
 	defer cancel()
 
 	// List all windows across all sessions
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
 	if err != nil {
 		return
@@ -2694,7 +3021,7 @@ func KillAllWindowsByNameAllSessions(windowName string) {
 
 		// Kill if name matches (including -shell variant)
 		if name == windowName || name == shellWindowName {
-			exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+			tmuxCmd(ctx, "kill-window", "-t", windowID).Run()
 		}
 	}
 }
@@ -2706,7 +3033,7 @@ func getWindowID(session, windowName string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-t", session, "-F", "#{window_id}:#{window_name}").Output()
 	if err != nil {
 		return ""
@@ -2741,60 +3068,62 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 	defer cancel()
 
 	// List all windows across all sessions
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
 	if err != nil {
 		return
 	}
 
-	var windowsToKill []string
-	var canonicalFound bool
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
+	canonical, windowsToKill := duplicateTaskWindows(string(out), windowName, task.TmuxWindowID)
+	if canonical == "" {
+		return
+	}
+	if canonical != task.TmuxWindowID {
+		if err := e.db.UpdateTaskWindowID(taskID, canonical); err != nil {
+			return
 		}
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		sessionName := parts[0]
-		windowID := parts[1]
-		name := parts[2]
-
-		// Only look at daemon sessions
-		if !strings.HasPrefix(sessionName, "task-daemon-") {
-			continue
-		}
-
-		// Check for matching window name (including -shell variant)
-		if name != windowName && name != windowName+"-shell" {
-			continue
-		}
-
-		// Keep canonical window, kill duplicates
-		if task.TmuxWindowID != "" && windowID == task.TmuxWindowID {
-			canonicalFound = true
-			continue // Keep this one
-		}
-
-		if task.TmuxWindowID == "" && !canonicalFound {
-			// No canonical set - keep first, set it as canonical
-			if name == windowName { // Only set canonical for main window, not -shell
-				e.db.UpdateTaskWindowID(taskID, windowID)
-				canonicalFound = true
-				continue
-			}
-		}
-
-		windowsToKill = append(windowsToKill, windowID)
 	}
 
 	// Kill duplicates
 	for _, windowID := range windowsToKill {
 		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
-		exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+		tmuxCmd(ctx, "kill-window", "-t", windowID).Run()
 	}
+}
+
+// Choose a surviving main window before deleting duplicates. Saved IDs become
+// stale when tmux restarts; their absence must never make every live window a
+// deletion candidate. Shell-only remnants are left alone without a main window.
+func duplicateTaskWindows(listing, windowName, savedID string) (string, []string) {
+	type window struct{ id, name string }
+	var windows []window
+	canonical := ""
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 || !strings.HasPrefix(parts[0], "task-daemon-") {
+			continue
+		}
+		id, name := parts[1], parts[2]
+		if (name != windowName && name != windowName+"-shell") || seen[id] {
+			continue
+		}
+		seen[id] = true
+		windows = append(windows, window{id, name})
+		if name == windowName && (canonical == "" || id == savedID) {
+			canonical = id
+		}
+	}
+	if canonical == "" {
+		return "", nil
+	}
+	var duplicates []string
+	for _, window := range windows {
+		if window.id != canonical {
+			duplicates = append(duplicates, window.id)
+		}
+	}
+	return canonical, duplicates
 }
 
 // GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
@@ -2808,7 +3137,7 @@ func GetTasksWithRunningShellProcess() map[int64]bool {
 
 	// List all panes across all sessions with their command and window name
 	// Format: session:window:pane_index pane_current_command
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_current_command}").Output()
+	out, err := tmuxCmd(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_current_command}").Output()
 	if err != nil {
 		return result
 	}
@@ -2881,7 +3210,7 @@ func HasRunningProcessInTaskUI() bool {
 	defer cancel()
 
 	// Find task-ui session
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{pane_index} #{pane_current_command}").Output()
+	out, err := tmuxCmd(ctx, "list-panes", "-a", "-F", "#{session_name}:#{pane_index} #{pane_current_command}").Output()
 	if err != nil {
 		return false
 	}
@@ -2937,7 +3266,7 @@ func ensureTmuxDaemon() (string, error) {
 	daemonSession := getDaemonSessionName()
 
 	// Create it with a placeholder window that stays alive (empty windows exit immediately)
-	cmd := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null")
+	cmd := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Check if it failed because session already exists (race condition with another process)
@@ -2948,7 +3277,7 @@ func ensureTmuxDaemon() (string, error) {
 	}
 
 	// Verify the session was actually created
-	if exec.CommandContext(ctx, "tmux", "has-session", "-t", daemonSession).Run() != nil {
+	if tmuxCmd(ctx, "has-session", "-t", daemonSession).Run() != nil {
 		return "", fmt.Errorf("session %s not found after creation", daemonSession)
 	}
 
@@ -2996,7 +3325,7 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "tmux", "new-window", "-d", "-t", daemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
+	cmd := tmuxCmd(ctx, "new-window", "-d", "-t", daemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return daemonSession, nil
@@ -3015,7 +3344,7 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 		retryCtx, retryCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer retryCancel()
 
-		retryCmd := exec.CommandContext(retryCtx, "tmux", "new-window", "-d", "-t", newSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
+		retryCmd := tmuxCmd(retryCtx, "new-window", "-d", "-t", newSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
 		retryOutput, retryErr := retryCmd.CombinedOutput()
 		if retryErr != nil {
 			return "", fmt.Errorf("new-window retry failed: %v (output: %s)", retryErr, string(retryOutput))
@@ -3622,7 +3951,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -3830,7 +4159,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -3936,7 +4265,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 
 	// Automatically send "continue working" to resume the task
 	// This tells Codex to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
@@ -4044,7 +4373,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 
 	// Automatically send "continue working" to resume the task
 	// This tells Gemini to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
@@ -4192,11 +4521,28 @@ func (w *windowMissTracker) record(windowExists bool) (gone bool) {
 // NOTE: We intentionally do NOT kill tmux windows here - they're kept around so
 // users can review Claude's work. Windows are only killed on task deletion.
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
-	ticker := time.NewTicker(1 * time.Second)
+	// Where this task's tmux server is. "" is every task on an install with no
+	// placement handler, and every locally-placed task: the interval, the probe
+	// timeout and the probe's own classification below are then exactly what they
+	// have always been.
+	remoteHost := RunnerFrom(ctx).Target()
+	interval, probeTimeout := 1*time.Second, 3*time.Second
+	if remoteHost != "" {
+		interval, probeTimeout = remotePollInterval, remoteProbeTimeout
+	}
+	reach := hostReachability{host: remoteHost}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	const missingThreshold = 3
 	misses := windowMissTracker{threshold: missingThreshold}
+
+	// A remotely placed agent cannot signal completion — its MCP server is stdio
+	// and so talks to its own host's database, not this one. Infer it from the
+	// screen instead: an agent that has stopped working stops repainting.
+	// Local tasks never consult this; they get the real signal.
+	idle := idleTracker{threshold: remoteIdleChecks}
 
 	for {
 		select {
@@ -4228,15 +4574,118 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				}
 			}
 
-			// Check if tmux window still exists (with timeout to prevent blocking)
-			tmuxCtx, tmuxCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			windowExists := exec.CommandContext(tmuxCtx, "tmux", "list-panes", "-t", sessionName).Run() == nil
-			tmuxCancel()
+			// Check if tmux window still exists (with timeout to prevent blocking).
+			// The probe gets its own deadline rather than the task's, but must keep
+			// the task's runner: a remotely-placed task lives in a tmux server on
+			// another host, and probing this machine's would say it had vanished.
+			// A signal beats every inference below it. An agent that said what
+			// happened is the only source here that is not a guess, so it is read
+			// first and returns immediately — no waiting for the idle timer to agree.
+			if ev, ok := e.taskSignal(remoteHost, taskID); ok {
+				return e.applyHostSignal(taskID, ev)
+			}
 
-			// Also check task-ui (pane might be joined there)
-			if !windowExists {
-				checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				checkCmd := exec.CommandContext(checkCtx, "tmux", "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
+			// A placed host answers for all of its tasks at once over one standing
+			// connection; only fall back to a per-task round trip when that channel
+			// has nothing fresh to say. See hostchannel.go.
+			probe, hostView, viaChannel := e.channelProbe(remoteHost, sessionName)
+			if !viaChannel {
+				tmuxCtx, tmuxCancel := context.WithTimeout(detachedRunnerCtx(ctx), probeTimeout)
+				probe = probeWindow(tmuxCtx, sessionName, remoteHost != "")
+				tmuxCancel()
+			}
+
+			// A host we could not reach says nothing about the task. Do NOT feed it
+			// to the miss tracker: three network blips in a row would park a task
+			// whose agent is still working, on a machine we merely cannot see. Say so
+			// where the user will find it, and keep checking.
+			if probe == windowUnreachable {
+				if line := reach.unreachable(time.Now()); line != "" {
+					e.logLine(taskID, "system", line)
+					e.logger.Warn("cannot reach the host a task was placed on",
+						"taskID", taskID, "host", remoteHost)
+				}
+				continue
+			}
+			if line := reach.reachable(time.Now()); line != "" {
+				e.logLine(taskID, "system", line)
+			}
+			windowExists := probe == windowLive
+
+			// Remote only: a live window whose pane has not changed in a long
+			// while is a finished agent sitting at its prompt. Park it for review
+			// exactly as a vanished window would, since to the user those are the
+			// same event — the work is over and nobody has looked at it yet.
+			if windowExists && remoteHost != "" {
+				// An empty pane read off the channel means the text has not arrived
+				// yet, not that the screen is blank and still. Feeding "" to the idle
+				// tracker would be a perfectly stable fingerprint, and would park a
+				// working agent after remoteIdleChecks ticks of knowing nothing.
+				content, ok := hostView.Content, viaChannel && hostView.Content != ""
+				if !viaChannel {
+					content, ok = capturePaneRemote(detachedRunnerCtx(ctx), sessionName, remoteHost)
+				}
+
+				// An executor whose login has expired paints a login screen and
+				// then never repaints again, so the idle tracker below would
+				// eventually park it as "needs review" — two minutes late and with
+				// the wrong reason, which is how a logged-out host looks like a
+				// mysteriously unfinished task. The screen says exactly what is
+				// wrong; read it. This costs nothing extra: it is the capture the
+				// idle check already paid for, and the patterns it matches belong
+				// to whichever executor is running, not to Claude.
+				if reason, stuck := DetectAuthPrompt(content); ok && stuck {
+					task, gerr := e.db.GetTask(taskID)
+					if gerr == nil && task != nil {
+						e.reportAuthRequired(task, fmt.Sprintf("%s (on %s)", reason, remoteHost))
+						// The status is already blocked; the finalizer's blocked
+						// branch respects it rather than writing over it.
+						return execResult{}
+					}
+				}
+
+				// A dialog waiting on a keystroke is not a finished agent and must
+				// not wait out the idle window to be noticed: no work is happening
+				// behind it and none will, so the remaining ticks would only
+				// re-confirm that. Say what it is asking, so the answer is obvious
+				// without attaching to the pane to look.
+				if reason, blocked := DetectBlockingPrompt(content); ok && blocked {
+					e.logLine(taskID, "system", fmt.Sprintf("%s (on %s)", reason, remoteHost))
+					return execResult{NeedsInput: true, Message: reason}
+				}
+
+				// A still screen is not always a stopped agent. A provider retry
+				// loop repaints the same frame between attempts and a long tool
+				// call may not repaint at all, so the idle run is reset rather than
+				// advanced while the screen says a turn is in flight.
+				if DetectBusy(content) {
+					idle.reset()
+					continue
+				}
+
+				if idle.record(paneSum(content), ok) {
+					// The agent really has stopped, so parking it is right — but the
+					// screen usually says why, and "Task needs review" throws that
+					// away. Carry the reason through to the board.
+					message := "Task needs review"
+					detail := ""
+					if reason, stalled := DetectStallNotice(content); stalled {
+						message = "Task stopped: " + reason
+						detail = " Last screen says: " + reason + "."
+					}
+					e.logLine(taskID, "system", fmt.Sprintf(
+						"Agent on %s has been idle for %s — parking for review.%s",
+						remoteHost, (time.Duration(remoteIdleChecks)*remotePollInterval).String(), detail))
+					return execResult{NeedsInput: true, Message: message}
+				}
+			}
+
+			// Also check task-ui (pane might be joined there). Local only: task-ui is
+			// THIS machine's TUI session, and asking a placed host about it is an ssh
+			// round trip that can only ever answer "no such session".
+			if !windowExists && remoteHost == "" {
+				checkCtx, checkCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
+				checkCmd := tmuxCmd(checkCtx, "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
 				if out, err := checkCmd.Output(); err == nil {
 					if strings.Contains(string(out), "claude") {
 						windowExists = true
@@ -4282,19 +4731,19 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Check if pane .1 already exists by counting panes (shell might already be there from previous session)
 	// IMPORTANT: We can't just try to access .1 because tmux returns success even if .1 doesn't exist!
 	// It just returns the ID of pane .0 instead. We must check window_panes count.
-	countCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
+	countCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget, "-p", "#{window_panes}")
 	countOut, err := countCmd.Output()
 	if err == nil && strings.TrimSpace(string(countOut)) == "2" {
 		// Pane .1 already exists, just ensure it's in the right directory and has env vars set
-		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
 		// Set environment variables in the existing shell pane
 		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
 		if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 		}
-		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
-		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
+		tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 		// Save pane IDs to database for deterministic identification
 		e.savePaneIDs(ctx, windowTarget, taskID)
 		return
@@ -4306,7 +4755,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
-	splitCmd := exec.CommandContext(ctx, "tmux", "split-window",
+	splitCmd := tmuxCmd(ctx, "split-window",
 		"-h",                    // horizontal split (side by side)
 		"-t", windowTarget+".0", // split from Claude pane
 		"-c", workDir, // start in task workdir
@@ -4319,7 +4768,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	}
 
 	// Verify the split actually created a second pane
-	verifyCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
+	verifyCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget, "-p", "#{window_panes}")
 	verifyOut, _ := verifyCmd.Output()
 	if strings.TrimSpace(string(verifyOut)) != "2" {
 		e.logger.Warn("split-window did not create a second pane", "windowTarget", windowTarget)
@@ -4327,8 +4776,8 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	}
 
 	// Set pane titles
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 
 	// Set environment variables in the shell pane
 	// Use export commands so they persist for all commands in the shell
@@ -4336,12 +4785,12 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 		envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 	}
-	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+	tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 	// Clear the screen so the export command doesn't clutter the shell
-	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
+	tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 
 	// Select Claude pane so it's active (user sees Claude output)
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0").Run()
 
 	// Save pane IDs to database for deterministic identification
 	e.savePaneIDs(ctx, windowTarget, taskID)
@@ -4353,7 +4802,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 // This enables deterministic pane identification when joining/breaking panes.
 func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID int64) {
 	// Get Claude pane ID (pane .0)
-	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".0", "-p", "#{pane_id}")
+	claudePaneCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget+".0", "-p", "#{pane_id}")
 	claudePaneOut, err := claudePaneCmd.Output()
 	if err != nil {
 		e.logger.Warn("failed to get Claude pane ID", "window", windowTarget, "error", err)
@@ -4362,7 +4811,7 @@ func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID 
 	claudePaneID := strings.TrimSpace(string(claudePaneOut))
 
 	// Get Shell pane ID (pane .1)
-	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".1", "-p", "#{pane_id}")
+	shellPaneCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget+".1", "-p", "#{pane_id}")
 	shellPaneOut, err := shellPaneCmd.Output()
 	if err != nil {
 		e.logger.Warn("failed to get Shell pane ID", "window", windowTarget, "error", err)
@@ -4387,11 +4836,11 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	daemonSession := getDaemonSessionName()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status", "on").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status", "on").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
 
 func (e *Executor) logLine(taskID int64, lineType, content string) {
@@ -4447,6 +4896,80 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	return sb.String()
 }
 
+// EnsureLocalWorktree gives a task its isolated worktree on THIS machine,
+// returning the directory and whether this call created it.
+//
+// It exists so a task can be prepared at the moment it is placed here rather
+// than only at the moment the daemon happens to start it. `ty place <id> local`
+// used to write a placement and stop: the task arrived with an empty
+// worktree_path, and every start path that is not the daemon — the TUI, the
+// GUI, the HTTP API — refused it with "task has no worktree yet: refusing to
+// start outside an isolated worktree". The guard was right; nothing had done
+// the provisioning it was guarding.
+func (e *Executor) EnsureLocalWorktree(task *db.Task) (string, bool, error) {
+	e.adoptCarriedBranch(task)
+	return e.setupWorktree(task)
+}
+
+// adoptCarriedBranch points a task with no recorded branch at its own branch on
+// origin, when origin has one.
+//
+// A task's branch name is derived from its id, so a branch by that name on
+// origin is not a coincidence — it is this task's own work, pushed from wherever
+// it last ran. Without this, worktree setup sees no branch to attach to and does
+// the only other thing it can: cut a fresh one from the default branch. That
+// looks completely correct (right name, clean checkout) and contains none of the
+// work, which is how a carried task arrives empty.
+//
+// It fetches, because the whole premise is work that lives on another machine
+// and cannot be seen from here until it is fetched. That cost is why this hangs
+// off EnsureLocalWorktree — the landing path, walked once when a task arrives —
+// and not off setupWorktree, which every ordinary task start goes through.
+func (e *Executor) adoptCarriedBranch(task *db.Task) {
+	if task == nil || strings.TrimSpace(task.SourceBranch) != "" {
+		return
+	}
+	// An existing worktree is the work; there is nothing to go and find.
+	if strings.TrimSpace(task.WorktreePath) != "" {
+		return
+	}
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		return
+	}
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return
+	}
+
+	branch := newWorktreeBranchName(task, slugify(task.Title, 40))
+	// A local branch is already found by setupWorktree, which checks it out
+	// rather than recreating it. Leaving that path alone keeps this to the one
+	// case it is for.
+	if gitRefExists(projectDir, "refs/heads/"+branch) {
+		return
+	}
+
+	// The explicit refspec is deliberate: a bare `git fetch origin <branch>`
+	// leaves the answer in FETCH_HEAD, and what the check below needs is the
+	// remote-tracking ref itself.
+	ref := "refs/remotes/origin/" + branch
+	fetch := gitCmd(context.Background(), projectDir, "fetch", "origin",
+		"refs/heads/"+branch+":"+ref)
+	if out, err := fetch.CombinedOutput(); err != nil {
+		// Not an error worth surfacing: the overwhelmingly common case is a task
+		// that has simply never run anywhere, so origin has no such branch.
+		e.logger.Debug("no carried branch on origin", "task", task.ID, "branch", branch,
+			"error", err, "output", string(out))
+		return
+	}
+	if !gitRefExists(projectDir, ref) {
+		return
+	}
+
+	task.SourceBranch = branch
+	e.logLine(task.ID, "system", fmt.Sprintf("Found this task's work on origin at %s; checking it out here", branch))
+}
+
 // setupWorktree creates a git worktree for the task if the project is a git repo.
 // Returns the working directory to use (worktree path or project path) and whether
 // this call created the worktree fresh (false when an existing or restored worktree
@@ -4481,37 +5004,31 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		// Initialize git repo so we can create worktrees
 		e.logger.Warn("Project missing git repo - initializing (legacy project?)", "project", task.Project, "path", projectDir)
-		cmd := exec.Command("git", "init")
-		cmd.Dir = projectDir
+		cmd := gitCmd(context.Background(), projectDir, "init")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", false, fmt.Errorf("failed to initialize git repo: %v\n%s", err, string(output))
 		}
 
 		// Create initial commit so we have a branch to create worktrees from
-		cmd = exec.Command("git", "add", "-A")
-		cmd.Dir = projectDir
+		cmd = gitCmd(context.Background(), projectDir, "add", "-A")
 		cmd.Run() // Ignore errors - might be empty repo
 
-		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
-		cmd.Dir = projectDir
+		cmd = gitCmd(context.Background(), projectDir, "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 		}
 	} else {
 		// Git repo exists, but check if it has any commits
 		// Worktrees require at least one commit to have a base branch
-		cmd := exec.Command("git", "rev-parse", "HEAD")
-		cmd.Dir = projectDir
+		cmd := gitCmd(context.Background(), projectDir, "rev-parse", "HEAD")
 		if err := cmd.Run(); err != nil {
 			// No commits exist - create an initial commit
 			e.logger.Warn("Git repo has no commits - creating initial commit", "project", task.Project, "path", projectDir)
 
-			cmd = exec.Command("git", "add", "-A")
-			cmd.Dir = projectDir
+			cmd = gitCmd(context.Background(), projectDir, "add", "-A")
 			cmd.Run() // Ignore errors - might be empty repo
 
-			cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
-			cmd.Dir = projectDir
+			cmd = gitCmd(context.Background(), projectDir, "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
 			if output, err := cmd.CombinedOutput(); err != nil {
 				return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 			}
@@ -4611,8 +5128,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 		// remote) can still resolve the branch locally, and pipelines whose
 		// early steps are document phases build the shared branch locally and
 		// never push it.
-		fetchCmd := exec.Command("git", "fetch", "origin")
-		fetchCmd.Dir = projectDir
+		fetchCmd := gitCmd(context.Background(), projectDir, "fetch", "origin")
 		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
 			e.logger.Warn("git fetch origin failed; will resolve source branch locally",
 				"task", task.ID, "branch", task.SourceBranch, "error", fetchErr, "output", string(fetchOutput))
@@ -4821,7 +5337,7 @@ export WORKTREE_PATH=%q
 // trustMiseConfig trusts mise config files in a directory (no-op if mise not installed).
 func trustMiseConfig(dir string) {
 	if _, err := exec.LookPath("mise"); err == nil {
-		exec.Command("mise", "trust", dir).Run()
+		command(context.Background(), "", "mise", "trust", dir).Run()
 	}
 }
 
@@ -5085,8 +5601,7 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 // .claude. It reads the index rather than the working tree, so it still answers
 // true for a worktree whose .claude was already replaced by a symlink.
 func claudeIsTracked(worktreePath string) bool {
-	cmd := exec.Command("git", "ls-files", "--", ".claude")
-	cmd.Dir = worktreePath
+	cmd := gitCmd(context.Background(), worktreePath, "ls-files", "--", ".claude")
 	output, err := cmd.Output()
 	return err == nil && len(output) > 0
 }
@@ -5107,8 +5622,7 @@ func mergeClaudeConfig(projectDir, worktreePath string) error {
 		if err := os.Remove(worktreeClaudeDir); err != nil {
 			return fmt.Errorf("remove stale .claude symlink: %w", err)
 		}
-		restore := exec.Command("git", "checkout", "--", ".claude")
-		restore.Dir = worktreePath
+		restore := gitCmd(context.Background(), worktreePath, "checkout", "--", ".claude")
 		if out, err := restore.CombinedOutput(); err != nil {
 			return fmt.Errorf("restore tracked .claude: %w: %s", err, strings.TrimSpace(string(out)))
 		}
@@ -5181,8 +5695,7 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 
 	// Check if .mcp.json is tracked by git - if so, don't create symlink
 	// The worktree already has the file from checkout
-	cmd := exec.Command("git", "ls-files", ".mcp.json")
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "ls-files", ".mcp.json")
 	if output, err := cmd.Output(); err == nil && len(output) > 0 {
 		return nil // File is tracked by git, don't replace with symlink
 	}
@@ -5538,8 +6051,7 @@ func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *
 			shell = userShell
 		}
 	}
-	cmd := exec.Command(shell, "-l", "-i", "-c", scriptPath)
-	cmd.Dir = worktreePath
+	cmd := command(context.Background(), worktreePath, shell, "-l", "-i", "-c", scriptPath)
 
 	// Set environment variables as specified in the feature request
 	cmd.Env = append(os.Environ(),
@@ -5622,8 +6134,7 @@ func (e *Executor) runWorktreeTeardownScript(projectDir, worktreePath string, ta
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree teardown script: %s", scriptPath))
 
-	cmd := exec.Command(scriptPath)
-	cmd.Dir = worktreePath
+	cmd := command(context.Background(), worktreePath, scriptPath)
 
 	// Set environment variables
 	cmd.Env = append(os.Environ(),
@@ -5768,8 +6279,7 @@ func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranc
 		// commits and force-moving it would discard them.
 		if remoteExists && gitIsAncestor(projectDir, sourceBranch, remoteRef) &&
 			!gitIsAncestor(projectDir, remoteRef, sourceBranch) {
-			ff := exec.Command("git", "update-ref", "refs/heads/"+sourceBranch, remoteRef)
-			ff.Dir = projectDir
+			ff := gitCmd(context.Background(), projectDir, "update-ref", "refs/heads/"+sourceBranch, remoteRef)
 			if out, err := ff.CombinedOutput(); err != nil {
 				// Not fatal: worst case the step starts from slightly older local work.
 				e.logger.Warn("could not fast-forward source branch to origin",
@@ -5797,22 +6307,19 @@ func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranc
 
 // gitRefExists reports whether a fully-qualified ref resolves in projectDir.
 func gitRefExists(projectDir, ref string) bool {
-	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "rev-parse", "--verify", "--quiet", ref)
 	return cmd.Run() == nil
 }
 
 // gitIsAncestor reports whether ancestor is reachable from descendant.
 func gitIsAncestor(projectDir, ancestor, descendant string) bool {
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "merge-base", "--is-ancestor", ancestor, descendant)
 	return cmd.Run() == nil
 }
 
 // gitCurrentBranch returns the checked-out branch name, or "HEAD" when detached.
 func gitCurrentBranch(dir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
+	cmd := gitCmd(context.Background(), dir, "rev-parse", "--abbrev-ref", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -5823,8 +6330,7 @@ func gitCurrentBranch(dir string) (string, error) {
 // getDefaultBranch returns the default branch name for a git repo.
 func (e *Executor) getDefaultBranch(projectDir string) string {
 	// Try to get default branch from remote
-	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if output, err := cmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(output))
 		// refs/remotes/origin/main -> main
@@ -5836,16 +6342,14 @@ func (e *Executor) getDefaultBranch(projectDir string) string {
 
 	// Fallback: check if main or master exists
 	for _, branch := range []string{"main", "master"} {
-		cmd := exec.Command("git", "rev-parse", "--verify", branch)
-		cmd.Dir = projectDir
+		cmd := gitCmd(context.Background(), projectDir, "rev-parse", "--verify", branch)
 		if err := cmd.Run(); err == nil {
 			return branch
 		}
 	}
 
 	// Fallback: get current branch name (whatever branch HEAD points to)
-	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = projectDir
+	cmd = gitCmd(context.Background(), projectDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if output, err := cmd.Output(); err == nil {
 		branch := strings.TrimSpace(string(output))
 		if branch != "" && branch != "HEAD" {
@@ -5905,16 +6409,14 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
 
 	// Remove worktree
-	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "worktree", "remove", "--force", task.WorktreePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove worktree: %v\n%s", err, string(output))
 	}
 
 	// Optionally delete the branch too
 	if task.BranchName != "" {
-		cmd = exec.Command("git", "branch", "-D", task.BranchName)
-		cmd.Dir = projectDir
+		cmd = gitCmd(context.Background(), projectDir, "branch", "-D", task.BranchName)
 		cmd.Run() // Ignore errors - branch might have been merged/deleted
 	}
 
@@ -5963,8 +6465,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	paths := e.claudePathsForTask(task)
 
 	// Get current HEAD commit
-	headCmd := exec.Command("git", "rev-parse", "HEAD")
-	headCmd.Dir = task.WorktreePath
+	headCmd := gitCmd(context.Background(), task.WorktreePath, "rev-parse", "HEAD")
 	headOutput, err := headCmd.Output()
 	if err != nil {
 		return fmt.Errorf("get HEAD commit: %w", err)
@@ -5975,22 +6476,19 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	archiveRef := fmt.Sprintf("refs/task-archive/%d", task.ID)
 
 	// Check if there are any changes to save (staged, unstaged, or untracked)
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = task.WorktreePath
+	statusCmd := gitCmd(context.Background(), task.WorktreePath, "status", "--porcelain")
 	statusOutput, _ := statusCmd.Output()
 	hasChanges := len(strings.TrimSpace(string(statusOutput))) > 0
 
 	if hasChanges {
 		// Add all files including untracked ones to the index
-		addCmd := exec.Command("git", "add", "-A")
-		addCmd.Dir = task.WorktreePath
+		addCmd := gitCmd(context.Background(), task.WorktreePath, "add", "-A")
 		if output, err := addCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add all files: %v\n%s", err, string(output))
 		}
 
 		// Create a tree from the index
-		writeTreeCmd := exec.Command("git", "write-tree")
-		writeTreeCmd.Dir = task.WorktreePath
+		writeTreeCmd := gitCmd(context.Background(), task.WorktreePath, "write-tree")
 		treeOutput, err := writeTreeCmd.Output()
 		if err != nil {
 			return fmt.Errorf("write tree: %w", err)
@@ -5998,9 +6496,8 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		tree := strings.TrimSpace(string(treeOutput))
 
 		// Create a commit object with the tree (this doesn't advance any branch)
-		commitTreeCmd := exec.Command("git", "commit-tree", tree, "-p", headCommit, "-m",
+		commitTreeCmd := gitCmd(context.Background(), task.WorktreePath, "commit-tree", tree, "-p", headCommit, "-m",
 			fmt.Sprintf("Task archive: #%d - %s", task.ID, task.Title))
-		commitTreeCmd.Dir = task.WorktreePath
 		commitOutput, err := commitTreeCmd.Output()
 		if err != nil {
 			return fmt.Errorf("commit tree: %w", err)
@@ -6008,15 +6505,13 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		archiveCommit := strings.TrimSpace(string(commitOutput))
 
 		// Create a ref pointing to this commit
-		updateRefCmd := exec.Command("git", "update-ref", archiveRef, archiveCommit)
-		updateRefCmd.Dir = task.WorktreePath
+		updateRefCmd := gitCmd(context.Background(), task.WorktreePath, "update-ref", archiveRef, archiveCommit)
 		if output, err := updateRefCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("update ref: %v\n%s", err, string(output))
 		}
 
 		// Reset the index (undo the add -A) so the worktree is clean for removal
-		resetCmd := exec.Command("git", "reset", "HEAD")
-		resetCmd.Dir = task.WorktreePath
+		resetCmd := gitCmd(context.Background(), task.WorktreePath, "reset", "HEAD")
 		resetCmd.Run() // Ignore errors
 
 		// Save archive state to database
@@ -6026,8 +6521,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	} else {
 		// No changes, just save the current state for reference
 		// Create a ref pointing to HEAD
-		updateRefCmd := exec.Command("git", "update-ref", archiveRef, headCommit)
-		updateRefCmd.Dir = task.WorktreePath
+		updateRefCmd := gitCmd(context.Background(), task.WorktreePath, "update-ref", archiveRef, headCommit)
 		if output, err := updateRefCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("update ref: %v\n%s", err, string(output))
 		}
@@ -6042,8 +6536,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
 
 	// Remove worktree
-	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "worktree", "remove", "--force", task.WorktreePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove worktree: %v\n%s", err, string(output))
 	}
@@ -6122,8 +6615,7 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 	// Check if branch still exists locally
 	branchExists := false
 	if branchName != "" {
-		checkBranchCmd := exec.Command("git", "rev-parse", "--verify", branchName)
-		checkBranchCmd.Dir = projectDir
+		checkBranchCmd := gitCmd(context.Background(), projectDir, "rev-parse", "--verify", branchName)
 		if err := checkBranchCmd.Run(); err == nil {
 			branchExists = true
 		}
@@ -6132,8 +6624,7 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 	// Check if another worktree is using this branch
 	branchInUse := false
 	if branchExists && branchName != "" {
-		listCmd := exec.Command("git", "worktree", "list", "--porcelain")
-		listCmd.Dir = projectDir
+		listCmd := gitCmd(context.Background(), projectDir, "worktree", "list", "--porcelain")
 		if output, err := listCmd.Output(); err == nil {
 			// Check if any worktree has this branch
 			for _, line := range strings.Split(string(output), "\n") {
@@ -6149,69 +6640,60 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 
 	if branchExists && !branchInUse {
 		// Branch exists and is available - use it
-		addCmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+		addCmd = gitCmd(context.Background(), projectDir, "worktree", "add", worktreePath, branchName)
 	} else if branchInUse {
 		// Branch is in use by another worktree - create detached worktree from archive commit
-		addCmd = exec.Command("git", "worktree", "add", "--detach", worktreePath, task.ArchiveCommit)
+		addCmd = gitCmd(context.Background(), projectDir, "worktree", "add", "--detach", worktreePath, task.ArchiveCommit)
 	} else {
 		// Branch doesn't exist - create new branch from archive commit
 		if branchName == "" {
 			branchName = fmt.Sprintf("task/%d-restored", task.ID)
 		}
-		addCmd = exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, task.ArchiveCommit)
+		addCmd = gitCmd(context.Background(), projectDir, "worktree", "add", "-b", branchName, worktreePath, task.ArchiveCommit)
 	}
 
-	addCmd.Dir = projectDir
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create worktree: %v\n%s", err, string(output))
 	}
 
 	// If the archive commit differs from the current HEAD (meaning there were uncommitted changes),
 	// we need to restore those changes without committing
-	headCmd := exec.Command("git", "rev-parse", "HEAD")
-	headCmd.Dir = worktreePath
+	headCmd := gitCmd(context.Background(), worktreePath, "rev-parse", "HEAD")
 	headOutput, _ := headCmd.Output()
 	currentHead := strings.TrimSpace(string(headOutput))
 
 	if currentHead == task.ArchiveCommit {
 		// We're at the archive commit which includes the uncommitted changes as a commit
 		// We need to "soft reset" to the parent to get those changes back as uncommitted
-		parentCmd := exec.Command("git", "rev-parse", task.ArchiveCommit+"^")
-		parentCmd.Dir = worktreePath
+		parentCmd := gitCmd(context.Background(), worktreePath, "rev-parse", task.ArchiveCommit+"^")
 		parentOutput, err := parentCmd.Output()
 		if err == nil {
 			parentCommit := strings.TrimSpace(string(parentOutput))
 			// Soft reset to parent - this keeps the changes from the archive commit as staged changes
-			resetCmd := exec.Command("git", "reset", "--soft", parentCommit)
-			resetCmd.Dir = worktreePath
+			resetCmd := gitCmd(context.Background(), worktreePath, "reset", "--soft", parentCommit)
 			resetCmd.Run()
 
 			// Unstage the changes (so they're just modified files, not staged)
-			unstageCmd := exec.Command("git", "reset", "HEAD")
-			unstageCmd.Dir = worktreePath
+			unstageCmd := gitCmd(context.Background(), worktreePath, "reset", "HEAD")
 			unstageCmd.Run()
 		}
 	} else {
 		// The branch has new commits since archiving
 		// Cherry-pick the changes from the archive commit
 		// First, check if there's a diff between the archive commit and its parent
-		diffCmd := exec.Command("git", "diff", "--quiet", task.ArchiveCommit+"^", task.ArchiveCommit)
-		diffCmd.Dir = worktreePath
+		diffCmd := gitCmd(context.Background(), worktreePath, "diff", "--quiet", task.ArchiveCommit+"^", task.ArchiveCommit)
 		if err := diffCmd.Run(); err != nil {
 			// There are differences - apply them
 			// Use format-patch and apply to get the changes without committing
-			patchCmd := exec.Command("git", "format-patch", "-1", "--stdout", task.ArchiveCommit)
-			patchCmd.Dir = worktreePath
+			patchCmd := gitCmd(context.Background(), worktreePath, "format-patch", "-1", "--stdout", task.ArchiveCommit)
 			patch, err := patchCmd.Output()
 			if err == nil && len(patch) > 0 {
-				applyCmd := exec.Command("git", "apply", "--index")
-				applyCmd.Dir = worktreePath
+				applyCmd := gitCmd(context.Background(), worktreePath, "apply", "--index")
 				applyCmd.Stdin = strings.NewReader(string(patch))
 				applyCmd.Run() // Ignore errors - patch may not apply cleanly if branch diverged
 
 				// Unstage the changes
-				unstageCmd := exec.Command("git", "reset", "HEAD")
-				unstageCmd.Dir = worktreePath
+				unstageCmd := gitCmd(context.Background(), worktreePath, "reset", "HEAD")
 				unstageCmd.Run()
 			}
 		}

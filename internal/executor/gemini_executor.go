@@ -364,9 +364,11 @@ func findGeminiSessionID(workDir string) string {
 		return ""
 	}
 
-	// Gemini uses a hash of the project path
-	// The sessions are stored in ~/.gemini/tmp/<hash>/chats/
-	geminiTmpDir := filepath.Join(home, ".gemini", "tmp")
+	return findGeminiSessionIDInDir(workDir, filepath.Join(home, ".gemini", "tmp"))
+}
+
+// findGeminiSessionIDInDir scans an explicit directory so tests never touch the user's history.
+func findGeminiSessionIDInDir(workDir, geminiTmpDir string) string {
 	if _, err := os.Stat(geminiTmpDir); os.IsNotExist(err) {
 		return ""
 	}

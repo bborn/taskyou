@@ -155,7 +155,7 @@
         "POST /api/tasks/{id}/shell",
         "GET /api/tasks/{id}/terminal"
       ],
-      "note": "Shell tab in the detail terminal panel — own xterm attached to the task's workdir shell pane"
+      "note": "Shell tab in the detail terminal panel — local or remotely placed workdir shell; remote desktop and browser input/output use the host-aware terminal API"
     },
     "Up": {
       "note": "Arrow keys move board selection"

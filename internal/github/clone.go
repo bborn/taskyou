@@ -164,8 +164,17 @@ type CloneDestination struct {
 	Renamed bool
 }
 
+// CommandBuilder builds a command to run in workDir. It is the signature of
+// executor.Runner's Command method, restated here because internal/executor
+// imports this package and the dependency can only point one way.
+//
+// A clone has to happen wherever the checkout is going to live, so the git
+// binary is invoked through one of these rather than directly. Nil means the
+// local machine, which is what it has always been.
+type CommandBuilder func(ctx context.Context, workDir, name string, args ...string) *exec.Cmd
+
 // Cloner clones repos into a root directory. The zero value clones into
-// ~/Projects using the git binary; tests substitute the two seams.
+// ~/Projects using the git binary on this machine; tests substitute the seams.
 type Cloner struct {
 	// Root is where clones land. Empty means ~/Projects.
 	Root string
@@ -173,6 +182,25 @@ type Cloner struct {
 	RemoteURL func(dir string) (string, error)
 	// Run performs the clone itself. Nil means run `git clone`.
 	Run func(ctx context.Context, cloneURL, dest string) error
+	// Command builds the git invocations. Nil means run them locally.
+	Command CommandBuilder
+}
+
+// command returns the builder to use, defaulting to local execution.
+func (c Cloner) command() CommandBuilder {
+	if c.Command != nil {
+		return c.Command
+	}
+	return localCommand
+}
+
+// localCommand is the default CommandBuilder: a plain local command.
+func localCommand(ctx context.Context, workDir, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	return cmd
 }
 
 // DefaultCloneRoot is where clones land unless told otherwise: ~/Projects.
@@ -195,7 +223,7 @@ func (c Cloner) remoteURL(dir string) (string, error) {
 	if c.RemoteURL != nil {
 		return c.RemoteURL(dir)
 	}
-	return gitOriginURL(dir)
+	return gitOriginURL(c.command(), dir)
 }
 
 // maxDestinationAttempts bounds the "repo-2, repo-3, …" search so a wedged
@@ -338,7 +366,10 @@ func (c Cloner) Clone(ctx context.Context, ref RepoRef, dest string) error {
 
 	run := c.Run
 	if run == nil {
-		run = gitClone
+		build := c.command()
+		run = func(ctx context.Context, cloneURL, dest string) error {
+			return gitClone(ctx, build, cloneURL, dest)
+		}
 	}
 	if err := run(ctx, ref.CloneURL(), dest); err != nil {
 		cleanupPartialClone(dest, preExisted)
@@ -359,12 +390,12 @@ func cleanupPartialClone(dest string, preExisted bool) {
 }
 
 // gitClone is the real clone: `git clone <url> <dest>`, with stderr captured.
-func gitClone(ctx context.Context, cloneURL, dest string) error {
+func gitClone(ctx context.Context, build CommandBuilder, cloneURL, dest string) error {
 	if _, err := exec.LookPath("git"); err != nil {
 		return errors.New("git not found — install git, then try again")
 	}
 	var stderr strings.Builder
-	cmd := exec.CommandContext(ctx, "git", "clone", cloneURL, dest)
+	cmd := build(ctx, "", "git", "clone", cloneURL, dest)
 	cmd.Stderr = &stderr
 	// Never let git stop for a credentials prompt: there's no terminal to
 	// answer it, and a hung clone looks like a hung TUI.
@@ -379,8 +410,8 @@ func gitClone(ctx context.Context, cloneURL, dest string) error {
 }
 
 // gitOriginURL reads dir's origin remote.
-func gitOriginURL(dir string) (string, error) {
-	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+func gitOriginURL(build CommandBuilder, dir string) (string, error) {
+	out, err := build(context.Background(), dir, "git", "remote", "get-url", "origin").Output()
 	if err != nil {
 		return "", err
 	}

@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -146,6 +147,7 @@ func isShellCommand(cmd string) bool {
 
 // DetailModel represents the task detail view.
 type DetailModel struct {
+	paneWork sync.WaitGroup
 	task     *db.Task
 	logs     []*db.TaskLog
 	database *db.DB
@@ -228,8 +230,9 @@ type DetailModel struct {
 	viewportContentVersion uint64
 
 	// Log count tracking for smarter refreshes
-	lastLogCount int
-	logsLoading  bool // true while async log loading is in progress
+	lastLogCount    int
+	logsLoading     bool // true while async log loading is in progress
+	refreshInFlight bool
 
 	// Memory check throttling (don't check every refresh)
 	lastMemoryCheck time.Time
@@ -242,12 +245,24 @@ type DetailModel struct {
 	lastShellProcessPoll time.Time
 
 	// Pane join check throttling
-	lastPaneCheck time.Time
+	lastPaneCheck      time.Time
+	paneHealthInFlight bool
 
 	// Async pane loading state
 	paneLoading      bool      // true while panes are being set up asynchronously
 	paneLoadingStart time.Time // when loading started (for spinner animation)
 	paneError        string    // user-visible error when panes fail to open
+	// paneNotice explains, without blaming anything, why there are no panes to
+	// show — today only "this task is running on another machine". It is styled
+	// as information, not as a failure, because nothing failed.
+	paneNotice string
+
+	// remotePaneID is the LOCAL pane holding an ssh client attached to a remotely
+	// placed task's tmux session. It is not a joined daemon pane and must never be
+	// broken back to one: nothing on this machine owns it, so it is created and
+	// killed outright. Empty for every local task.
+	remotePaneID      string
+	remoteShellPaneID string
 
 	// waitingForExecutor is true when we're passively waiting for the daemon's
 	// executor to create the tmux window (e.g. a freshly created+queued task with
@@ -288,6 +303,21 @@ type panesJoinedMsg struct {
 // showing the loading spinner and let ensureTmuxPanesJoined poll the executor's
 // panes in once the daemon creates them.
 type paneWaitForExecutorMsg struct{}
+
+// paneRemoteMsg is returned by the pane setup when the task was placed on
+// another machine. The detail view's pane machinery is entirely local — there is
+// no pane here to join, and starting one would be a second agent on a second
+// machine — so the view says where the task is and how to reach it instead.
+type paneRemoteMsg struct{ message string }
+
+// paneRemoteAttachedMsg is returned when a remotely placed task's live tmux
+// session was rendered into a LOCAL pane. paneID is that pane; notice is the
+// line shown beside it, which documents the nested-tmux prefix.
+type paneRemoteAttachedMsg struct {
+	paneID      string
+	notice      string
+	shellHidden bool
+}
 
 // logsLoadedMsg is sent when async log loading completes.
 type logsLoadedMsg struct {
@@ -572,6 +602,7 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 	m.paneLoading = true
 	m.paneLoadingStart = time.Now()
 	m.paneError = ""
+	m.paneNotice = ""
 
 	// Clear stale session ID (belongs to old executor)
 	m.database.UpdateTaskClaudeSessionID(m.task.ID, "")
@@ -585,7 +616,7 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 	taskID := m.task.ID
 	newExecutor := m.task.Executor
 
-	return func() tea.Msg {
+	return m.paneCommand(func() tea.Msg {
 		// Build handoff context from captured pane content
 		handoffContext := executor.FormatSessionHandoff(prevExecutor, capturedContent)
 
@@ -622,7 +653,7 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 			daemonSessionID: m.daemonSessionID,
 			windowTarget:    windowTarget,
 		}
-	}
+	})
 }
 
 // SetPosition updates the task's position in its column.
@@ -648,72 +679,7 @@ func (m *DetailModel) Refresh() tea.Cmd {
 		return nil
 	}
 
-	prevTask := m.task
-
-	// Reload task
-	task, err := m.database.GetTask(m.task.ID)
-	if err == nil && task != nil {
-		m.task = task
-	}
-
-	if m.ready && prevTask != nil && m.task != nil {
-		if prevTask.Status != m.task.Status ||
-			prevTask.DangerousMode != m.task.DangerousMode ||
-			prevTask.PermissionMode != m.task.PermissionMode ||
-			prevTask.Pinned != m.task.Pinned ||
-			prevTask.Project != m.task.Project ||
-			prevTask.Type != m.task.Type ||
-			prevTask.Title != m.task.Title {
-			m.setViewportContent()
-		}
-	}
-
-	// Check log count first to avoid loading all logs if unchanged.
-	// Load logs asynchronously to avoid blocking the UI event loop.
-	var cmd tea.Cmd
-	logCount, err := m.database.GetTaskLogCount(m.task.ID)
-	if err == nil && logCount != m.lastLogCount && !m.logsLoading {
-		m.logsLoading = true
-		taskID := m.task.ID
-		database := m.database
-		cmd = func() tea.Msg {
-			logs, _ := database.GetTaskLogs(taskID, 500)
-			return logsLoadedMsg{taskID: taskID, logs: logs, logCount: logCount}
-		}
-	}
-
-	// Throttle memory checks to every 3 seconds (expensive: 3 shell commands)
-	if time.Since(m.lastMemoryCheck) >= 3*time.Second {
-		m.claudeMemoryMB = m.getClaudeMemoryMB()
-		m.lastMemoryCheck = time.Now()
-
-		// Update Claude pane title with memory info
-		if m.claudePaneID != "" {
-			title := m.executorDisplayName()
-			if m.claudeMemoryMB > 0 {
-				title = fmt.Sprintf("%s (%d MB)", title, m.claudeMemoryMB)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", title).Run()
-			cancel()
-		}
-	}
-
-	// Note: Focus state is checked by focusTick every 200ms, no need to duplicate here
-
-	// Throttle server port checks to every 2 seconds
-	if time.Since(m.lastServerCheck) >= 2*time.Second {
-		m.checkServerListening()
-		m.lastServerCheck = time.Now()
-	}
-
-	// Throttle the shell-process indicator check to every 2 seconds. This shells
-	// out to tmux, so we cache the result here instead of querying it from
-	// renderHeader() on every frame.
-	if time.Since(m.lastShellProcessPoll) >= 2*time.Second {
-		m.hasRunningShellProc = m.HasRunningShellProcess()
-		m.lastShellProcessPoll = time.Now()
-	}
+	cmd := m.refreshSnapshotCmd()
 
 	// Throttle pane join checks (runs tmux commands)
 	// Poll faster (1s) while loading to reduce latency for "create and execute" flow,
@@ -724,25 +690,107 @@ func (m *DetailModel) Refresh() tea.Cmd {
 	}
 	if time.Since(m.lastPaneCheck) >= paneCheckInterval {
 		m.lastPaneCheck = time.Now()
-		// Ensure tmux panes are joined if available (handles external close/detach)
-		m.ensureTmuxPanesJoined()
-
-		// Bounded wait: if we've been waiting for the daemon's executor window to
-		// appear past waitForExecutorTimeout and it still hasn't, the daemon isn't
-		// going to create it (e.g. it died, leaving the task stuck "processing").
-		// Start the executor ourselves rather than spin forever. Safe from the
-		// double-spawn this whole change prevents: startPanesAsync goes through
-		// EnsureTaskWindow's spawn lock, which re-checks for an existing window.
-		// Only when the task actually has a worktree to start in — see
-		// shouldFallBackToStart.
-		if shouldFallBackToStart(m.waitingForExecutor, m.claudePaneID != "", m.task.WorktreePath != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
-			GetLogger().Info("Refresh: waited %s for daemon executor on task %d with no window; starting it ourselves", waitForExecutorTimeout, m.task.ID)
-			m.waitingForExecutor = false
-			return tea.Batch(cmd, m.startPanesAsync())
-		}
+		return tea.Batch(cmd, m.paneHealthCmd())
 	}
 
 	return cmd
+}
+
+// detailRefreshMsg carries read-only observations from a private snapshot.
+// The owner prevents a late result from updating another detail view.
+type detailRefreshMsg struct {
+	owner                                      *DetailModel
+	previousTask                               *db.Task
+	task                                       *db.Task
+	previousLogCount                           int
+	logs                                       []*db.TaskLog
+	logCount                                   int
+	memoryChecked, serverChecked, shellChecked bool
+	memoryMB                                   int
+	serverListening, shellRunning              bool
+	claudePaneID, shellPaneID                  string
+}
+
+func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
+	if m.refreshInFlight {
+		return nil
+	}
+	m.refreshInFlight = true
+	previous := m.task
+	taskCopy := *previous
+	worker := &DetailModel{task: &taskCopy, database: m.database, claudePaneID: m.claudePaneID, workdirPaneID: m.workdirPaneID, cachedWindowTarget: m.cachedWindowTarget}
+	result := detailRefreshMsg{owner: m, previousTask: previous, previousLogCount: m.lastLogCount, claudePaneID: m.claudePaneID, shellPaneID: m.workdirPaneID}
+	result.memoryChecked = time.Since(m.lastMemoryCheck) >= 3*time.Second
+	result.serverChecked = time.Since(m.lastServerCheck) >= 2*time.Second
+	result.shellChecked = time.Since(m.lastShellProcessPoll) >= 2*time.Second
+	lastLogCount, logsLoading := m.lastLogCount, m.logsLoading
+	return func() tea.Msg {
+		result.task, _ = worker.database.GetTask(taskCopy.ID)
+		count, err := worker.database.GetTaskLogCount(taskCopy.ID)
+		if err == nil && count != lastLogCount && !logsLoading {
+			result.logs, _ = worker.database.GetTaskLogs(taskCopy.ID, 500)
+			result.logCount = count
+		}
+		if result.memoryChecked {
+			result.memoryMB = worker.getClaudeMemoryMB()
+		}
+		if result.serverChecked {
+			worker.checkServerListening()
+			result.serverListening = worker.serverListening
+		}
+		if result.shellChecked {
+			result.shellRunning = worker.HasRunningShellProcess()
+		}
+		return result
+	}
+}
+
+func (m *DetailModel) handleRefreshSnapshot(msg detailRefreshMsg) tea.Cmd {
+	if msg.owner != m {
+		return nil
+	}
+	m.refreshInFlight = false
+	if m.task == nil || msg.previousTask == nil || m.task.ID != msg.previousTask.ID {
+		return nil
+	}
+	// Task events can replace the task while the read is in flight. Preserve
+	// that newer state instead of restoring a stale database snapshot.
+	if msg.task != nil && m.task == msg.previousTask {
+		m.task = msg.task
+	}
+	if msg.logs != nil && m.lastLogCount == msg.previousLogCount {
+		m.logs = msg.logs
+		m.lastLogCount = msg.logCount
+	}
+	if msg.serverChecked && m.task.Port == msg.previousTask.Port {
+		m.serverListening = msg.serverListening
+		m.lastServerCheck = time.Now()
+	}
+	if msg.shellChecked && m.workdirPaneID == msg.shellPaneID {
+		m.hasRunningShellProc = msg.shellRunning
+		m.lastShellProcessPoll = time.Now()
+	}
+	var titleCmd tea.Cmd
+	if msg.memoryChecked && m.claudePaneID == msg.claudePaneID {
+		m.claudeMemoryMB = msg.memoryMB
+		m.lastMemoryCheck = time.Now()
+		if m.claudePaneID != "" {
+			paneID, title := m.claudePaneID, m.executorDisplayName()
+			if msg.memoryMB > 0 {
+				title = fmt.Sprintf("%s (%d MB)", title, msg.memoryMB)
+			}
+			titleCmd = func() tea.Msg {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T", title).Run()
+				return nil
+			}
+		}
+	}
+	if m.ready {
+		m.setViewportContent()
+	}
+	return titleCmd
 }
 
 // HandleLogsLoaded processes the result of async log loading.
@@ -767,6 +815,9 @@ func (m *DetailModel) Task() *db.Task {
 
 // ClaudePaneID returns the tmux pane ID where Claude is running.
 func (m *DetailModel) ClaudePaneID() string {
+	if m.remotePaneID != "" {
+		return m.remotePaneID
+	}
 	return m.claudePaneID
 }
 
@@ -821,6 +872,7 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// paneWaitForExecutorMsg.
 	m.paneLoading = true
 	m.paneError = ""
+	m.paneNotice = ""
 	m.paneLoadingStart = time.Now()
 	log.Info("NewDetailModel: completed for task %d (async pane setup pending)", t.ID)
 	return m, tea.Batch(m.setupPanesAsync(), m.spinnerTick())
@@ -836,10 +888,29 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 	taskID := m.task.ID
 	sessionID := m.task.ClaudeSessionID
 	action := pendingPaneAction(m.task)
+	remoteLoc, isRemote := m.remoteTaskLocation()
 
-	return func() tea.Msg {
+	return m.paneCommand(func() tea.Msg {
 		log := GetLogger()
 		log.Info("setupPanesAsync: starting for task %d", taskID)
+
+		// Placed on another machine: there is no local window to join, and every
+		// tmux call below would search this machine's server for one that only
+		// exists on the host the task runs on. Its session is shown by attaching to
+		// THAT host's tmux inside a local pane instead.
+		if isRemote {
+			log.Info("setupPanesAsync: task %d is placed on %s; attaching to its session", taskID, remoteLoc.Host)
+			return m.setupRemotePane(remoteLoc)
+		}
+
+		// Cleanup and resume can invoke tmux/process checks. Keep them with the
+		// asynchronous pane setup so the detail view can paint immediately.
+		if m.executor != nil {
+			m.executor.CleanupDuplicateWindows(taskID)
+			if m.executor.IsSuspended(taskID) {
+				m.executor.ResumeTask(taskID)
+			}
+		}
 
 		// Resolve the actual UI session name (avoid prefix-matching the wrong session).
 		if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
@@ -897,14 +968,196 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 			// Slow path: no window yet — start the executor session, then join.
 			return m.startAndJoinSession(sessionID)
 		}
-	}
+	})
 }
 
 // startPanesAsync returns a command that starts the Claude session and joins panes in the background.
 func (m *DetailModel) startPanesAsync() tea.Cmd {
 	sessionID := m.task.ClaudeSessionID
-	return func() tea.Msg {
+	remoteLoc, isRemote := m.remoteTaskLocation()
+	return m.paneCommand(func() tea.Msg {
+		// Never start a second agent here for a task that is already running
+		// somewhere else — show the one that is running there.
+		if isRemote {
+			return m.setupRemotePane(remoteLoc)
+		}
 		return m.startAndJoinSession(sessionID)
+	})
+}
+
+// remoteTaskLocation returns where a remotely placed task is running, and false
+// for an ordinary local task.
+func (m *DetailModel) remoteTaskLocation() (executor.RemoteTaskLocation, bool) {
+	if m.task == nil || m.executor == nil {
+		return executor.RemoteTaskLocation{}, false
+	}
+	return m.executor.RemoteLocation(m.task)
+}
+
+// setupRemotePane shows a remotely placed task's session where a local task's
+// pane would be.
+//
+// ty already knows the exact ssh+tmux command that reaches the agent; printing
+// it for the user to copy was never the best it could do. tmux nests, so
+// attaching that session inside a local pane renders it live and takes keystrokes
+// like any other pane.
+//
+// The three answers a probe can give are all handled, and none of them blanks the
+// pane: live attaches, ended says so and keeps the manual command visible, and
+// unreachable says the host cannot be seen — which is emphatically NOT the same
+// as the task being over.
+//
+// Runs in the pane-setup goroutine: every branch here makes an ssh round trip.
+func (m *DetailModel) setupRemotePane(loc executor.RemoteTaskLocation) tea.Msg {
+	log := GetLogger()
+	if m.task == nil || m.executor == nil {
+		return paneRemoteMsg{message: executor.RemoteTaskMessage(loc)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	switch m.executor.RemoteSessionState(ctx, m.task) {
+	case executor.RemoteSessionLive:
+		if paneID := m.attachRemotePane(loc); paneID != "" {
+			return paneRemoteAttachedMsg{paneID: paneID, notice: executor.RemoteAttachNotice(loc), shellHidden: m.remoteShellPaneID == ""}
+		}
+		// Attaching failed locally (no tmux, split refused). Never leave the user
+		// with nothing: fall back to the text that tells them how to get there.
+		log.Error("setupRemotePane: could not create an attach pane for task %d", m.task.ID)
+		return paneRemoteMsg{message: executor.RemoteTaskMessage(loc)}
+	case executor.RemoteSessionUnreachable:
+		return paneRemoteMsg{message: executor.RemoteUnreachableMessage(loc)}
+	default:
+		return paneRemoteMsg{message: executor.RemoteEndedMessage(loc)}
+	}
+}
+
+// attachRemotePane creates the local pane that runs the ssh attach, and returns
+// its pane id ("" if it could not be created).
+//
+// It is deliberately much smaller than joinTmuxPanes. There is no daemon pane to
+// borrow, no ownership guard to run and nothing to break back afterwards: the
+// pane holds an ssh client this view started, so it is created here and killed
+// in closeRemotePane.
+func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
+	log := GetLogger()
+	if os.Getenv("TMUX") == "" {
+		return ""
+	}
+
+	// Same serialization as a local join: these commands mutate the shared
+	// task-ui layout.
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if m.uiSessionName == "" {
+		if out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
+			m.uiSessionName = strings.TrimSpace(string(out))
+		} else {
+			m.uiSessionName = "task-ui"
+		}
+	}
+
+	tuiPaneOut, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+	if err != nil {
+		log.Error("attachRemotePane: could not read the TUI pane id: %v", err)
+		return ""
+	}
+	tuiPaneID := strings.TrimSpace(string(tuiPaneOut))
+	m.tuiPaneID = tuiPaneID
+
+	// Clear any panes left behind by the previously viewed task, exactly as the
+	// local join path does, so the remote pane is not stacked under them.
+	if paneList, err := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.uiSessionName, "-F", "#{pane_id}").Output(); err == nil {
+		for _, paneID := range strings.Split(strings.TrimSpace(string(paneList)), "\n") {
+			if paneID != "" && paneID != tuiPaneID {
+				m.killPaneWithProcess(ctx, paneID)
+			}
+		}
+		osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", "100%").Run()
+	}
+
+	script := executor.RemoteAttachScript(m.task, loc)
+	out, err := osExec.CommandContext(ctx, "tmux", "split-window",
+		"-v", "-d",
+		"-t", tuiPaneID,
+		"-P", "-F", "#{pane_id}",
+		script).Output()
+	if err != nil {
+		log.Error("attachRemotePane: split-window failed: %v", err)
+		return ""
+	}
+	paneID := strings.TrimSpace(string(out))
+	if paneID == "" {
+		return ""
+	}
+	log.Info("attachRemotePane: attached task %d to %s in pane %s", m.task.ID, loc.Host, paneID)
+
+	// Say where the pane goes and which prefix reaches its tmux, in the two places
+	// a user actually looks: the pane's own border title and the status bar.
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T",
+		fmt.Sprintf("%s (remote) — prefix %s", loc.Host, executor.RemoteInnerPrefixHuman)).Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status", "on").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right-length", "80").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right",
+		fmt.Sprintf(" remote pane: %s is its tmux prefix ", executor.RemoteInnerPrefixHuman)).Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-lines", "heavy").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-indicators", "arrows").Run()
+
+	// Give the TUI its configured share of the window and keep the keyboard,
+	// matching what a local join leaves behind.
+	osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", m.getDetailPaneHeight()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
+	m.remotePaneID = paneID // Cleanup must see it even before the result is delivered.
+	m.bindPaneNavigation(ctx)
+	if !m.shellPaneHidden {
+		if err := m.showRemoteShellPane(ctx, loc); err != nil {
+			m.logExecutorFailure(err.Error())
+		}
+	}
+	if m.focusExecutorOnJoin {
+		osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID).Run()
+	}
+	return paneID
+}
+
+// closeRemotePane kills the attach pane, which drops the ssh client, which
+// detaches the grouped view session on the host — where destroy-unattached then
+// disposes of it. The remote agent and workdir shell keep running.
+func (m *DetailModel) closeRemotePane(resizeTUI bool) {
+	if m.remotePaneID == "" && m.remoteShellPaneID == "" {
+		return
+	}
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if m.remoteShellPaneID != "" {
+		m.killPaneWithProcess(ctx, m.remoteShellPaneID)
+		m.remoteShellPaneID = ""
+	}
+	m.killPaneWithProcess(ctx, m.remotePaneID)
+	m.remotePaneID = ""
+	runTmuxBatch(ctx, [][]string{
+		{"unbind-key", "-T", "root", "S-Down"},
+		{"unbind-key", "-T", "root", "S-Right"},
+		{"unbind-key", "-T", "root", "S-Up"},
+		{"unbind-key", "-T", "root", "S-Left"},
+		{"unbind-key", "-T", "root", "M-S-Up"},
+		{"unbind-key", "-T", "root", "M-S-Down"},
+	})
+
+	if m.uiSessionName != "" {
+		osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " ").Run()
+	}
+	if resizeTUI {
+		osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 	}
 }
 
@@ -1029,6 +1282,22 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case remoteShellToggledMsg:
+		m.paneLoading = false
+		m.shellPaneHidden = msg.hidden
+		m.paneError = ""
+		if msg.err != nil {
+			m.paneError = msg.err.Error()
+		}
+		m.setViewportContent()
+		return m, nil
+	case paneHealthMsg:
+		return m, m.applyPaneHealth(msg)
+	case detailPaneResultMsg:
+		if msg.owner != m {
+			return m, nil
+		}
+		return m.Update(msg.result)
 	case panesJoinedMsg:
 		// Async pane setup completed
 		log := GetLogger()
@@ -1049,11 +1318,35 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			m.daemonSessionID = msg.daemonSessionID
 			m.cachedWindowTarget = msg.windowTarget
 			m.paneError = ""
+			m.paneNotice = ""
 			// Focus executor pane if requested (e.g., when jumping from notification)
 			if m.focusExecutorOnJoin && m.claudePaneID != "" {
 				m.focusExecutorPane()
 			}
 		}
+		m.setViewportContent()
+		return m, nil
+
+	case paneRemoteMsg:
+		// Not a failure: the task is running, just not here. Stop the spinner, show
+		// where it is, and leave the pane state empty.
+		m.paneLoading = false
+		m.waitingForExecutor = false
+		m.paneError = ""
+		m.paneNotice = msg.message
+		m.setViewportContent()
+		return m, nil
+
+	case paneRemoteAttachedMsg:
+		// The remote session is rendering in a local pane. It is not a joined
+		// daemon pane, so claudePaneID stays empty and none of the join/break
+		// machinery touches it.
+		m.paneLoading = false
+		m.waitingForExecutor = false
+		m.paneError = ""
+		m.remotePaneID = msg.paneID
+		m.shellPaneHidden = msg.shellHidden
+		m.paneNotice = msg.notice
 		m.setViewportContent()
 		return m, nil
 
@@ -1063,6 +1356,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.paneLoading = true
 		m.waitingForExecutor = true
 		m.paneError = ""
+		m.paneNotice = ""
 		m.setViewportContent()
 		return m, m.spinnerTick()
 
@@ -1109,9 +1403,25 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	return m, cmd
 }
 
+// Pane workers are registered before the command is launched. A closing view
+// can wait for every outstanding operation, even if a command has not started.
+type detailPaneResultMsg struct {
+	owner  *DetailModel
+	result tea.Msg
+}
+
+func (m *DetailModel) paneCommand(work tea.Cmd) tea.Cmd {
+	m.paneWork.Add(1)
+	return func() tea.Msg {
+		defer m.paneWork.Done()
+		return detailPaneResultMsg{owner: m, result: work()}
+	}
+}
+
 // Cleanup should be called when leaving detail view.
 // It saves the current pane height before breaking the panes.
 func (m *DetailModel) Cleanup() {
+	m.closeRemotePane(true)
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(true, true) // saveHeight=true, resizeTUI=true
 	}
@@ -1124,6 +1434,7 @@ func (m *DetailModel) Cleanup() {
 // Use this during task transitions (prev/next) to avoid rounding errors
 // that accumulate with each transition and cause the pane to shrink.
 func (m *DetailModel) CleanupWithoutSaving() {
+	m.closeRemotePane(true)
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
 	}
@@ -1133,6 +1444,7 @@ func (m *DetailModel) CleanupWithoutSaving() {
 // ClearPaneState clears the cached pane state without breaking panes.
 // Use this when the tmux window has been recreated externally (e.g., dangerous mode toggle).
 func (m *DetailModel) ClearPaneState() {
+	m.closeRemotePane(false)
 	m.claudePaneID = ""
 	m.workdirPaneID = ""
 	m.daemonSessionID = ""
@@ -1143,11 +1455,11 @@ func (m *DetailModel) ClearPaneState() {
 // RefreshPanesCmd returns a command to refresh the tmux panes.
 // Use this after ClearPaneState() to rejoin panes to a recreated window.
 func (m *DetailModel) RefreshPanesCmd() tea.Cmd {
-	return func() tea.Msg {
+	return m.paneCommand(func() tea.Msg {
 		// Small delay to allow the new tmux window to be created
 		time.Sleep(300 * time.Millisecond)
 		return panesRefreshMsg{}
-	}
+	})
 }
 
 // panesRefreshMsg triggers a pane refresh in the detail view.
@@ -1294,14 +1606,6 @@ func (m *DetailModel) hasActiveTmuxSession() bool {
 	return m.cachedWindowTarget != ""
 }
 
-// refreshTmuxWindowTarget re-checks for available tmux sessions.
-// This is useful when the user wants to open tmux panes that were created
-// after the detail view was opened, or if panes were closed externally.
-func (m *DetailModel) refreshTmuxWindowTarget() bool {
-	m.cachedWindowTarget = m.findTaskWindow()
-	return m.cachedWindowTarget != ""
-}
-
 // paneJoinBlockedByLoad reports whether ensureTmuxPanesJoined should stay out of
 // the way because another code path is actively setting up the panes.
 //
@@ -1316,63 +1620,62 @@ func (m *DetailModel) paneJoinBlockedByLoad() bool {
 	return m.paneLoading && !m.waitingForExecutor
 }
 
-// ensureTmuxPanesJoined checks if tmux panes should be joined and joins them if needed.
-// This handles cases where panes were externally closed or a session was created after opening the view.
-func (m *DetailModel) ensureTmuxPanesJoined() {
-	if os.Getenv("TMUX") == "" {
-		return
-	}
+// Probe a private snapshot; joining still runs as tracked pane work so cleanup
+// can wait for it. No tmux command executes while scheduling or applying a probe.
+type paneHealthMsg struct {
+	claudePaneID, remotePaneID string
+	alive, hasWindow           bool
+}
 
-	// Don't interfere while an executor switch or active async pane setup is in
-	// progress (startPanesAsync/restartForExecutorSwitch start the session in a
-	// goroutine and report back via panesJoinedMsg). When we're merely waiting for
-	// the daemon's executor to create the window, keep polling so we can join the
-	// panes as soon as they appear.
-	if m.paneJoinBlockedByLoad() {
-		return
+func (m *DetailModel) paneHealthCmd() tea.Cmd {
+	if os.Getenv("TMUX") == "" || m.task == nil || m.paneHealthInFlight || m.paneJoinBlockedByLoad() || time.Now().Before(m.joinPaneFailedUntil) {
+		return nil
 	}
-
-	// Don't retry if join recently failed (5s cooldown to avoid spam, but allows recovery)
-	if !m.joinPaneFailedUntil.IsZero() && time.Now().Before(m.joinPaneFailedUntil) {
-		return
-	}
-
-	// Check if we think we have panes joined but they no longer exist
-	if m.claudePaneID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		// Verify the pane still exists
-		err := osExec.CommandContext(ctx, "tmux", "display-message", "-t", m.claudePaneID, "-p", "#{pane_id}").Run()
-		if err != nil {
-			// Pane no longer exists, clear our state
-			m.claudePaneID = ""
-			m.workdirPaneID = ""
+	m.paneHealthInFlight = true
+	task := *m.task
+	worker := &DetailModel{task: &task}
+	result := paneHealthMsg{claudePaneID: m.claudePaneID, remotePaneID: m.remotePaneID}
+	return func() tea.Msg {
+		paneID := result.claudePaneID
+		if task.PlacementTarget != "" {
+			paneID = result.remotePaneID
 		}
-	}
-
-	// If panes are already joined and valid, nothing to do
-	if m.claudePaneID != "" {
-		return
-	}
-
-	// Refresh the cache to check for available sessions
-	m.refreshTmuxWindowTarget()
-
-	// If we have a session available, join it
-	if m.hasActiveTmuxSession() {
-		m.joinTmuxPanes()
-		// If join succeeded, clear the loading state
-		if m.claudePaneID != "" {
-			m.paneLoading = false
-			m.waitingForExecutor = false
-			m.paneError = ""
-		} else if m.executorBusyElsewhere {
-			// Another ty instance owns this executor: stop spinning and show why.
-			m.paneLoading = false
-			m.waitingForExecutor = false
-			m.paneError = executorBusyMessage
+		if paneID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			result.alive = osExec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_id}").Run() == nil
+			cancel()
 		}
+		if task.PlacementTarget == "" && !result.alive {
+			result.hasWindow = worker.findTaskWindow() != ""
+		}
+		return detailPaneResultMsg{owner: m, result: result}
 	}
+}
+
+func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
+	m.paneHealthInFlight = false
+	if m.claudePaneID != msg.claudePaneID || m.remotePaneID != msg.remotePaneID || m.paneJoinBlockedByLoad() {
+		return nil
+	}
+	if m.task.PlacementTarget != "" {
+		if !msg.alive {
+			m.remotePaneID = ""
+		}
+		return nil
+	}
+	if msg.alive {
+		return nil
+	}
+	m.claudePaneID, m.workdirPaneID = "", ""
+	if msg.hasWindow {
+		m.paneLoading, m.waitingForExecutor = true, false
+		return m.setupPanesAsync()
+	}
+	if shouldFallBackToStart(m.waitingForExecutor, false, m.task.WorktreePath != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
+		m.waitingForExecutor = false
+		return m.startPanesAsync()
+	}
+	return nil
 }
 
 // getPaneTitle returns the title for the detail pane (e.g., "Task 123: some task title (2/5)").
@@ -1402,13 +1705,37 @@ func (m *DetailModel) getPaneTitle() string {
 }
 
 // updateTmuxPaneTitle updates the tmux pane title to show task info.
+//
+// m.tuiPaneID is only filled in by a successful pane join or remote attach, and
+// switching tasks builds a fresh DetailModel — so on every switch this ran with
+// an empty id and returned without doing anything, leaving the pane border
+// advertising the PREVIOUS task. A task whose panes never arrive (placed on a
+// host whose session has ended, say) never corrected it, so the border named one
+// task while the body showed another.
+//
+// $TMUX_PANE is the pane this process is running in, by definition. It needs no
+// tmux round trip and cannot name somebody else's pane the way asking tmux for
+// the "current" one can.
 func (m *DetailModel) updateTmuxPaneTitle() {
-	if m.tuiPaneID == "" || os.Getenv("TMUX") == "" {
+	if os.Getenv("TMUX") == "" {
+		return
+	}
+	paneID := m.titlePaneID()
+	if paneID == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID, "-T", m.getPaneTitle()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T", m.getPaneTitle()).Run()
+}
+
+// titlePaneID is the pane whose border title names the task on screen: the one
+// the join/attach path found, or failing that the pane this process runs in.
+func (m *DetailModel) titlePaneID() string {
+	if m.tuiPaneID != "" {
+		return m.tuiPaneID
+	}
+	return os.Getenv("TMUX_PANE")
 }
 
 // getDetailPaneHeight returns the configured detail pane height percentage.
@@ -1443,6 +1770,63 @@ func (m *DetailModel) getShellPaneWidth() string {
 		}
 	}
 	return "50%"
+}
+
+// Read all dimensions from the same window snapshot. Cleanup used to read
+// these separately, then repeat the same subprocesses when saving preferences.
+func (m *DetailModel) readPaneLayout(ctx context.Context) (heightPercent, shellPercent int) {
+	if m.tuiPaneID == "" {
+		return 0, 0
+	}
+	out, err := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.tuiPaneID,
+		"-F", "#{pane_id} #{pane_width} #{pane_height} #{window_height}").Output()
+	if err != nil {
+		return 0, 0
+	}
+	var shellWidth, executorWidth int
+	for _, line := range strings.Split(string(out), "\n") {
+		var id string
+		var width, height, totalHeight int
+		if n, _ := fmt.Sscanf(line, "%s %d %d %d", &id, &width, &height, &totalHeight); n != 4 {
+			continue
+		}
+		if id == m.tuiPaneID && height > 0 && totalHeight > 0 {
+			heightPercent = (height*100 + totalHeight/2) / totalHeight
+		}
+		if id == m.workdirPaneID {
+			shellWidth = width
+		}
+		if id == m.claudePaneID {
+			executorWidth = width
+		}
+	}
+	if shellWidth > 0 && executorWidth > 0 {
+		shellPercent = (shellWidth*100 + (shellWidth+executorWidth)/2) / (shellWidth + executorWidth)
+	}
+	return
+}
+
+// tmux accepts command separators as argv entries; no shell interpolation is
+// involved. A failed batch falls back to the original best-effort commands.
+func runTmuxBatch(ctx context.Context, commands [][]string) {
+	var args []string
+	for _, command := range commands {
+		if len(args) > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, command...)
+	}
+	if len(args) == 0 {
+		return
+	}
+	if osExec.CommandContext(ctx, "tmux", args...).Run() != nil {
+		for _, command := range commands {
+			if ctx.Err() != nil {
+				return
+			}
+			osExec.CommandContext(ctx, "tmux", command...).Run()
+		}
+	}
 }
 
 // getCurrentDetailPaneHeight returns the current detail pane height as a percentage (0-100).
@@ -1543,44 +1927,6 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 	totalWidth := shellWidth + claudeWidth
 	// Use proper rounding to avoid truncation errors
 	return (shellWidth*100 + totalWidth/2) / totalWidth
-}
-
-// saveDetailPaneHeight saves the current detail pane height to settings.
-func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	// Get the current height of the TUI pane
-	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
-	heightOut, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	paneHeight, err := strconv.Atoi(strings.TrimSpace(string(heightOut)))
-	if err != nil || paneHeight <= 0 {
-		return
-	}
-
-	// Get the total window height
-	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
-	totalHeightOut, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	totalHeight, err := strconv.Atoi(strings.TrimSpace(string(totalHeightOut)))
-	if err != nil || totalHeight <= 0 {
-		return
-	}
-
-	// Calculate the percentage with proper rounding to avoid truncation errors
-	// that cause the pane to progressively shrink over time
-	percentage := (paneHeight*100 + totalHeight/2) / totalHeight
-	if percentage >= 1 && percentage <= 50 {
-		heightStr := fmt.Sprintf("%d%%", percentage)
-		m.database.SetSetting(config.SettingDetailPaneHeight, heightStr)
-	}
 }
 
 // saveShellPaneWidth saves the current shell pane width to settings.
@@ -2045,21 +2391,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	log.Debug("joinTmuxPanes: resizing TUI pane to %q", detailHeight)
 	osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 
-	// Bind Shift+Arrow keys to cycle through panes from any pane
-	// Down/Right = next pane, Up/Left = previous pane
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
-
-	// Bind Alt+Shift+Up/Down to jump to prev/next task while focusing executor pane
-	// This allows quick task navigation from any pane (especially useful from Claude pane)
-	// Using Alt+Shift mirrors the Shift+Arrow pane switching, and doesn't produce printable chars
-	// The sequence: select TUI pane -> send navigation key -> wait for re-join -> select executor pane
-	prevTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Up && sleep 0.3 && tmux select-pane -t :.1"
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up", "run-shell", prevTaskCmd).Run()
-	nextTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Down && sleep 0.3 && tmux select-pane -t :.1"
-	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down", "run-shell", nextTaskCmd).Run()
+	m.bindPaneNavigation(ctx)
 
 	// Capture initial dimensions so we can detect user resizing later
 	// This allows us to save only when the user has actually dragged to resize
@@ -2090,14 +2422,15 @@ func (m *DetailModel) joinTmuxPanes() {
 
 // focusExecutorPane focuses the executor (Claude) pane.
 func (m *DetailModel) focusExecutorPane() {
-	if m.claudePaneID == "" {
+	paneID := m.ClaudePaneID()
+	if paneID == "" {
 		return
 	}
 	log := GetLogger()
-	log.Info("focusExecutorPane: focusing Claude pane %q", m.claudePaneID)
+	log.Info("focusExecutorPane: focusing Claude pane %q", paneID)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
+	err := osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID).Run()
 	if err != nil {
 		log.Error("focusExecutorPane: select-pane failed: %v", err)
 	} else {
@@ -2105,10 +2438,38 @@ func (m *DetailModel) focusExecutorPane() {
 	}
 }
 
+// bindPaneNavigation installs the same navigation for local and SSH panes.
+func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
+	// Bind Shift+Arrow keys to cycle through panes from any pane
+	// Down/Right = next pane, Up/Left = previous pane
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
+
+	// Forward an internal navigation key to the TUI. The task loader focuses
+	// the executor after pane setup completes, including slow SSH attachments.
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up",
+		"select-pane", "-t", ":.0", ";", "send-keys", "-t", ":.0", "C-Up").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down",
+		"select-pane", "-t", ":.0", ";", "send-keys", "-t", ":.0", "C-Down").Run()
+
+}
+
 // ToggleShellPane toggles the visibility of the shell pane.
 // When hidden, the shell pane is moved to the daemon window and Claude expands to full width.
 // When shown, the shell pane is rejoined from the daemon or a new one is created.
-func (m *DetailModel) ToggleShellPane() {
+func (m *DetailModel) ToggleShellPane() tea.Cmd {
+	if loc, remote := m.remoteTaskLocation(); remote {
+		if m.paneLoading {
+			return nil
+		}
+		m.paneLoading = true
+		return tea.Batch(m.spinnerTick(), m.paneCommand(func() tea.Msg {
+			err := m.toggleRemoteShellPane(loc)
+			return remoteShellToggledMsg{err: err, hidden: m.remoteShellPaneID == ""}
+		}))
+	}
 	log := GetLogger()
 	log.Info("ToggleShellPane: shellPaneHidden=%v, workdirPaneID=%q, claudePaneID=%q",
 		m.shellPaneHidden, m.workdirPaneID, m.claudePaneID)
@@ -2131,6 +2492,7 @@ func (m *DetailModel) ToggleShellPane() {
 	}
 	m.database.SetSetting(config.SettingShellPaneHidden, hiddenStr)
 	log.Info("ToggleShellPane: saved shellPaneHidden=%v", m.shellPaneHidden)
+	return nil
 }
 
 // hideShellPane moves the shell pane to a hidden background window (preserves process).
@@ -2315,8 +2677,15 @@ func (m *DetailModel) findOrCreateTaskWindow(ctx context.Context, daemonSession,
 		"-c", workDir,
 		"tail", "-f", "/dev/null").Run()
 	if createErr != nil {
-		log.Error("findOrCreateTaskWindow: failed to create placeholder window: %v", createErr)
-		return ""
+		// Moving the daemon's last pane into the UI removes its session. Recreate
+		// that destination instead of treating the running pane as an orphan.
+		createErr = osExec.CommandContext(ctx, "tmux", "new-session", "-d",
+			"-s", daemonSession, "-n", windowName, "-c", workDir,
+			"tail", "-f", "/dev/null").Run()
+		if createErr != nil {
+			log.Error("findOrCreateTaskWindow: failed to restore daemon destination: %v", createErr)
+			return ""
+		}
 	}
 
 	// Get the ID of the newly created window
@@ -2371,8 +2740,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	defer cancel()
 
 	// Get current dimensions to check if user has resized
-	currentHeight := m.getCurrentDetailPaneHeight(m.tuiPaneID)
-	currentWidth := m.getCurrentShellPaneWidth()
+	currentHeight, currentWidth := m.readPaneLayout(ctx)
 	log.Debug("breakTmuxPanes: currentHeight=%d, currentWidth=%d, initialHeight=%d, initialWidth=%d",
 		currentHeight, currentWidth, m.initialDetailHeight, m.initialShellWidth)
 
@@ -2385,8 +2753,8 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 
 	// Save pane positions before breaking (must save width before killing workdir pane)
 	// Save shell width if explicitly requested OR if user has resized
-	if saveHeight || widthChanged {
-		m.saveShellPaneWidth()
+	if m.database != nil && (saveHeight || widthChanged) && currentWidth >= 10 && currentWidth <= 90 {
+		m.database.SetSetting(config.SettingShellPaneWidth, fmt.Sprintf("%d%%", currentWidth))
 	}
 
 	// Save detail pane height if explicitly requested OR if user has resized
@@ -2395,33 +2763,29 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		// Use the stored TUI pane ID, not the currently focused pane.
 		// The user may have Tab'd to Claude or Shell pane before pressing Escape,
 		// so #{pane_id} could return the wrong pane.
-		m.saveDetailPaneHeight(m.tuiPaneID)
+		if m.database != nil && currentHeight >= 1 && currentHeight <= 50 {
+			m.database.SetSetting(config.SettingDetailPaneHeight, fmt.Sprintf("%d%%", currentHeight))
+		}
 	}
 
 	// Reset status bar and pane styling
 	log.Debug("breakTmuxPanes: resetting status bar and pane styling")
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " ").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-lines", "single").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-indicators", "off").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF").Run()
-
-	// Reset window styling (remove inactive pane de-emphasis)
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-style", "default").Run()
-	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-active-style", "default").Run()
-
-	// Unbind Shift+Arrow keybindings that were set in joinTmuxPanes
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Down").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Right").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Up").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Left").Run()
-
-	// Unbind Alt+Shift+Arrow task navigation keybindings
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Up").Run()
-	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
-
-	// Reset pane title back to main view label
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.uiSessionName+":.0", "-T", "Tasks").Run()
+	runTmuxBatch(ctx, [][]string{
+		{"set-option", "-t", m.uiSessionName, "status-right", " "},
+		{"set-option", "-t", m.uiSessionName, "pane-border-lines", "single"},
+		{"set-option", "-t", m.uiSessionName, "pane-border-indicators", "off"},
+		{"set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151"},
+		{"set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF"},
+		{"set-option", "-t", m.uiSessionName, "window-style", "default"},
+		{"set-option", "-t", m.uiSessionName, "window-active-style", "default"},
+		{"unbind-key", "-T", "root", "S-Down"},
+		{"unbind-key", "-T", "root", "S-Right"},
+		{"unbind-key", "-T", "root", "S-Up"},
+		{"unbind-key", "-T", "root", "S-Left"},
+		{"unbind-key", "-T", "root", "M-S-Up"},
+		{"unbind-key", "-T", "root", "M-S-Down"},
+		{"select-pane", "-t", m.uiSessionName + ":.0", "-T", "Tasks"},
+	})
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
@@ -2457,18 +2821,8 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	targetWindowID := m.findOrCreateTaskWindow(ctx, daemonSession, windowName)
 	if targetWindowID == "" {
 		log.Error("breakTmuxPanes: could not find or create task window")
-		// Fallback: kill panes AND their processes to avoid orphans
-		m.killPaneWithProcess(ctx, m.claudePaneID)
-		if m.workdirPaneID != "" {
-			m.killPaneWithProcess(ctx, m.workdirPaneID)
-			m.workdirPaneID = ""
-		}
-		m.claudePaneID = ""
-		m.daemonSessionID = ""
-		if resizeTUI {
-			osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
-		}
-		log.Info("breakTmuxPanes: completed with error cleanup")
+		// A failed destination lookup must never terminate the running executor.
+		// Leave its panes in place, as we do when join-pane/break-pane fails below.
 		return
 	}
 	log.Debug("breakTmuxPanes: using window ID %q", targetWindowID)
@@ -2700,32 +3054,26 @@ func (m *DetailModel) IsFocused() bool {
 	return m.focused
 }
 
-// RefreshFocusState is a lightweight refresh that only updates focus state.
-// Used by the fast focus tick for responsive dimming without full refresh overhead.
-func (m *DetailModel) RefreshFocusState() {
-	m.checkFocusState()
+type focusStateMsg struct {
+	detail  *DetailModel
+	focused bool
 }
 
-// checkFocusState checks if the TUI pane is the active pane in tmux.
-func (m *DetailModel) checkFocusState() {
-	// Default to focused if not in tmux or no panes joined
-	if os.Getenv("TMUX") == "" || m.tuiPaneID == "" {
-		m.focused = true
-		return
+// Capture inputs before launching the command: no mutable model reads in workers.
+func (m *DetailModel) focusStateCmd() tea.Cmd {
+	paneID, inTmux := m.tuiPaneID, os.Getenv("TMUX") != ""
+	return func() tea.Msg {
+		focused := true
+		if inTmux && paneID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+			if err == nil {
+				focused = strings.TrimSpace(string(out)) == paneID
+			}
+		}
+		return focusStateMsg{detail: m, focused: focused}
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	// Get the currently active pane ID
-	out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
-	if err != nil {
-		m.focused = true // Default to focused on error
-		return
-	}
-
-	activePaneID := strings.TrimSpace(string(out))
-	m.focused = activePaneID == m.tuiPaneID
 }
 
 // View renders the detail view.
@@ -3077,17 +3425,12 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(loadingStyle.Render(loadingText))
 	}
 
-	// Executor failure indicator
-	if m.paneError != "" {
-		meta.WriteString("  ")
-		var errorStyle lipgloss.Style
-		if m.focused {
-			errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-		} else {
-			errorStyle = lipgloss.NewStyle().Foreground(dimmedFg)
-		}
-		meta.WriteString(errorStyle.Render("⚠ " + m.paneError))
-	}
+	// The pane notice and the executor failure are NOT badges. They are prose —
+	// a host, a worktree path, an ssh command to copy, a reason a spawn failed —
+	// and they get their own full-width lines below, built after maxW is known.
+	// Putting them on the meta line meant competing with the badges for a
+	// right-aligned row, where the only outcomes are wrapping (which strands the
+	// tail on a line of its own) or truncating a path away to an ellipsis.
 
 	// PR link if available
 	var prLine string
@@ -3109,8 +3452,19 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	// Build the first line
+	// Build the first line. The meta line is one line by contract: it is
+	// right-aligned as a block below, and lipgloss word-wraps anything wider than
+	// the header, which strands the last few words alone on their own
+	// right-aligned row. Truncate instead — ANSI-aware, so the badges' colour
+	// escapes are not cut in half.
 	metaStr := meta.String()
+	metaWidth := m.width - 4
+	if metaWidth < 1 {
+		metaWidth = 1
+	}
+	if lipgloss.Width(metaStr) > metaWidth {
+		metaStr = ansi.Truncate(metaStr, metaWidth, "…")
+	}
 
 	// Create a block for the right-aligned content
 	rightContent := []string{metaStr}
@@ -3128,22 +3482,45 @@ func (m *DetailModel) renderHeader() string {
 		Align(lipgloss.Right).
 		Render(rightBlock)
 
-	stand := tasksummary.DisplayStand(t.Summary)
-	if stand == "" {
-		return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
-	}
 	maxW := m.width - 4
 	if maxW < 8 {
 		maxW = 8
 	}
-	stand = truncateRunes(stand, maxW)
-	standColor := ColorMuted
-	if m.focused && t.Status == db.StatusBlocked {
-		standColor = ColorWarning
-	} else if !m.focused {
-		standColor = dimmedTextFg
+
+	lines := []string{headerLayout}
+
+	// Where a remotely placed task actually is. Informational, not an error, and
+	// left-aligned on its own line so a worktree path or an ssh command survives
+	// long enough to be read and copied.
+	if m.paneNotice != "" {
+		noticeStyle := lipgloss.NewStyle().Foreground(dimmedFg)
+		if m.focused {
+			noticeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+		}
+		lines = append(lines, noticeStyle.Render(truncateRunes("⇄ "+m.paneNotice, maxW)))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, FgStyle(standColor).Render(stand), "")
+
+	// Executor failure. Same treatment: the reason a spawn failed is the whole
+	// value of the line, so it does not go in a badge slot.
+	if m.paneError != "" {
+		errorStyle := lipgloss.NewStyle().Foreground(dimmedFg)
+		if m.focused {
+			errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		}
+		lines = append(lines, errorStyle.Render(truncateRunes("⚠ "+m.paneError, maxW)))
+	}
+
+	if stand := tasksummary.DisplayStand(t.Summary); stand != "" {
+		standColor := ColorMuted
+		if m.focused && t.Status == db.StatusBlocked {
+			standColor = ColorWarning
+		} else if !m.focused {
+			standColor = dimmedTextFg
+		}
+		lines = append(lines, FgStyle(standColor).Render(truncateRunes(stand, maxW)))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, append(lines, "")...)
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.
@@ -3463,7 +3840,7 @@ func (m *DetailModel) renderHelp() string {
 		keys = append(keys, helpKey{"X", "execute dangerous", false, false})
 	}
 
-	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
+	hasPanes := m.claudePaneID != "" || m.workdirPaneID != "" || (!m.paneLoading && m.remotePaneID != "")
 
 	keys = append(keys, helpKey{"e", "edit", false, true})
 

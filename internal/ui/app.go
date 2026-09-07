@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -363,10 +364,16 @@ func LoadKeyMap() KeyMap {
 
 // AppModel is the main application model.
 type AppModel struct {
-	db       *db.DB
-	executor *executor.Executor
-	keys     KeyMap
-	help     help.Model
+	reloadWrites                                                                   atomic.Int64
+	reloadSelectionID                                                              int64
+	reloadEnabled, reloadCheckInFlight, reloadPending, reloadPrepared, reloadReady bool
+	reloadToken                                                                    string
+	reloadSnapshot                                                                 ReloadState
+	reloadRestoring                                                                *ReloadState
+	db                                                                             *db.DB
+	executor                                                                       *executor.Executor
+	keys                                                                           KeyMap
+	help                                                                           help.Model
 
 	// Working directory context (for project detection)
 	workingDir string
@@ -375,13 +382,18 @@ type AppModel struct {
 	previousView View
 
 	// Dashboard state
-	tasks        []*db.Task
-	kanban       *KanbanBoard
-	loading      bool
-	err          error
-	notification string    // Notification banner text
-	notifyUntil  time.Time // When to hide notification
-	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
+	tasks                []*db.Task
+	kanban               *KanbanBoard
+	loading              bool
+	tasksLoadInFlight    bool
+	terminalLoadInFlight bool
+	focusLoadInFlight    bool
+	promptRevisions      map[int64]uint64
+	tasksLoadPending     bool
+	err                  error
+	notification         string    // Notification banner text
+	notifyUntil          time.Time // When to hide notification
+	notifyTaskID         int64     // Task ID that triggered the notification (for jumping to it)
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
@@ -409,6 +421,9 @@ type AppModel struct {
 	detailView   *DetailModel
 	// Prevent rapid arrow key navigation from causing duplicate panes
 	taskTransitionInProgress bool
+	detailCleanupInFlight    bool
+	pendingDetailLoad        *taskLoadedMsg
+	taskLoadRevision         uint64
 	// Grace period after task transition to prevent focus flashing
 	taskTransitionGraceUntil time.Time
 
@@ -494,6 +509,8 @@ type AppModel struct {
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
 	filterText         string // Current filter text (persists when not typing)
+	filterRevision     uint64
+	filterInFlight     bool
 	filterAutocomplete *FilterAutocompleteModel
 	showFilterDropdown bool // Whether to show the project autocomplete dropdown
 
@@ -514,6 +531,10 @@ type AppModel struct {
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
 	latestRelease  *github.LatestRelease // Latest release from GitHub (nil if not checked yet or same version)
+
+	// pendingFocusTaskID is a task to select once the board has loaded, set by
+	// --task. Zero means no request.
+	pendingFocusTaskID int64
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -724,7 +745,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg, reloadTokenMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -920,6 +941,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tasksLoadedMsg:
+		m.tasksLoadInFlight = false
+		var nextLoad tea.Cmd
+		if m.tasksLoadPending {
+			m.tasksLoadPending = false
+			nextLoad = m.loadTasks()
+			cmds = append(cmds, nextLoad)
+		}
+		if msg.err == nil && !m.terminalLoadInFlight {
+			m.terminalLoadInFlight = true
+			cmds = append(cmds, m.loadBoardTerminals(msg.choicePrompts))
+		}
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
@@ -932,7 +964,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 1. In a real project folder we don't yet track? Offer to set it up
 			//    (LLM-enriched). Works on every launch, until dismissed per-path.
 			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
-				return model, cmd
+				return model, tea.Batch(append(cmds, cmd)...)
 			}
 
 			// 2. No real projects yet (only "personal") and we're in a junk folder:
@@ -941,7 +973,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
 				m.previousView = m.currentView
 				m.currentView = ViewWelcome
-				return m, nil
+				return m, tea.Batch(cmds...)
 			}
 		}
 
@@ -969,7 +1001,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Handles external approval (e.g. from tmux) where PreToolUse
 				// logs "Agent resumed working" and transitions to processing.
 				if m.tasksNeedingInput[t.ID] {
-					if prompt, isQ := m.latestChoicePrompt(t.ID); prompt == "" {
+					if prompt, isQ := msg.latestChoicePrompt(t.ID); prompt == "" {
 						delete(m.tasksNeedingInput, t.ID)
 						delete(m.questionPrompts, t.ID)
 						delete(m.executorPrompts, t.ID)
@@ -991,6 +1023,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		for id := range m.promptRevisions {
+			m.promptRevisions[id]++
+		}
+
 		// Sync permission prompt state for all active tasks from DB hook logs.
 		// This is status-agnostic: detects pending prompts on any task, and
 		// clears stale entries when prompts are resolved. Only queries tasks
@@ -1005,7 +1041,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.tasksNeedingInput[t.ID] {
 				// Re-validate: if task is no longer blocked, the user provided input
 				// (e.g., from the detail view tmux pane). Also re-check permission prompts.
-				if prompt, isQ := m.latestChoicePrompt(t.ID); t.Status != db.StatusBlocked && prompt == "" {
+				if prompt, isQ := msg.latestChoicePrompt(t.ID); t.Status != db.StatusBlocked && prompt == "" {
 					delete(m.tasksNeedingInput, t.ID)
 					delete(m.questionPrompts, t.ID)
 					delete(m.executorPrompts, t.ID)
@@ -1014,13 +1050,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				continue
 			}
-			if prompt, isQ := m.latestChoicePrompt(t.ID); prompt != "" {
+			if prompt, isQ := msg.latestChoicePrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
 				m.questionPrompts[t.ID] = isQ
 				// Capture the tmux pane content for richer display of the prompt.
 				// This shows the actual executor output (including multiple choice options)
 				// rather than just the hook log summary.
-				paneContent := executor.CapturePaneContent(executor.TmuxSessionName(t.ID), 15)
+				paneContent := msg.choicePrompts[t.ID].paneContent
 				if paneContent != "" {
 					m.executorPrompts[t.ID] = paneContent
 				} else {
@@ -1035,20 +1071,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Reapply filter if one is active
-		m.applyFilter()
-		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
-		// Refresh running process indicators for all tasks
-		running := executor.GetTasksWithRunningShellProcess()
-		// Also check currently viewed task (its panes are in task-ui, not daemon)
-		if m.selectedTask != nil && executor.HasRunningProcessInTaskUI() {
-			running[m.selectedTask.ID] = true
+		cmds = append(cmds, m.applyFilter())
+
+		// A task named with --task is selected here rather than at construction:
+		// the board holds no tasks until applyFilter has run, so selecting any
+		// earlier is a silent no-op and the user lands on whatever sorts first.
+		// Attempted once and then cleared, so a task that is filtered out or no
+		// longer exists cannot keep grabbing the selection on later refreshes.
+		if m.pendingFocusTaskID > 0 {
+			m.kanban.SelectTask(m.pendingFocusTaskID)
+			m.pendingFocusTaskID = 0
 		}
-		m.kanban.SetRunningProcesses(running)
+
+		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
-		// Refresh per-agent activity lines for live mode (cheap no-op when off).
-		m.refreshLatestActivity()
+		if msg.activityErr == nil {
+			m.kanban.SetLatestActivity(msg.latestActivity)
+		}
 
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
@@ -1059,10 +1100,104 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.reloadRestoring != nil {
+			state := *m.reloadRestoring
+			m.reloadRestoring = nil
+			if state.Detail && state.TaskID > 0 {
+				cmds = append(cmds, m.loadTask(state.TaskID))
+			}
+		}
+
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
+		}
+
+	case detailPaneResultMsg:
+		if m.detailView != nil && m.detailView == msg.owner {
+			var cmd tea.Cmd
+			m.detailView, cmd = m.detailView.Update(msg.result)
+			cmds = append(cmds, cmd)
+		}
+
+	case reloadTokenMsg:
+		m.reloadCheckInFlight = false
+		if msg.err == nil && msg.token != "" && msg.token != m.reloadToken {
+			m.reloadToken = msg.token
+			m.reloadPending = true
+			cmds = append(cmds, m.beginReload())
+		}
+
+	case detailCleanupMsg:
+		m.detailCleanupInFlight = false
+		if msg.failed != nil {
+			m.detailView = msg.failed
+			m.reloadPending = false
+			m.reloadPrepared = false
+			m.currentView = ViewDetail
+			m.pendingDetailLoad = nil
+			m.taskLoadRevision++
+			m.taskTransitionInProgress = false
+			m.notification = "Could not return task panes to the daemon; the running process was preserved. Try Back again."
+			m.detailView.paneError = m.notification
+			if m.detailView.task != nil {
+				m.kanban.SelectTask(m.detailView.task.ID)
+			}
+			m.notifyUntil = time.Now().Add(10 * time.Second)
+			return m, nil
+		}
+		if m.pendingDetailLoad != nil {
+			pending := *m.pendingDetailLoad
+			m.pendingDetailLoad = nil
+			return m.Update(pending)
+		}
+		cmds = append(cmds, m.beginReload())
+
+	case detailRefreshMsg:
+		if m.detailView != nil && m.detailView == msg.owner {
+			cmds = append(cmds, m.detailView.handleRefreshSnapshot(msg))
+		}
+
+	case boardFilterMsg:
+		cmds = append(cmds, m.finishBoardFilter(msg))
+
+	case boardTerminalsMsg:
+		m.terminalLoadInFlight = false
+		if msg.runningUITaskID != 0 && m.selectedTask != nil && m.selectedTask.ID == msg.runningUITaskID {
+			msg.runningProcesses[msg.runningUITaskID] = true
+		}
+		m.kanban.SetRunningProcesses(msg.runningProcesses)
+		for id, prompt := range msg.prompts {
+			// A hook or refresh may have resolved/replaced the prompt meanwhile.
+			if m.tasksNeedingInput[id] && m.executorPrompts[id] == prompt.text && prompt.paneContent != "" {
+				m.executorPrompts[id] = prompt.paneContent
+			}
+		}
+
+	case eventPromptMsg:
+		if m.promptRevisions[msg.taskID] != msg.revision {
+			break
+		}
+		if msg.prompt.text == "" {
+			delete(m.tasksNeedingInput, msg.taskID)
+			delete(m.questionPrompts, msg.taskID)
+			delete(m.executorPrompts, msg.taskID)
+		} else {
+			if !m.terminalLoadInFlight {
+				m.terminalLoadInFlight = true
+				cmds = append(cmds, m.loadBoardTerminals(map[int64]taskChoicePrompt{msg.taskID: msg.prompt}))
+			}
+			m.tasksNeedingInput[msg.taskID] = true
+			m.questionPrompts[msg.taskID] = msg.prompt.isQuestion
+			m.executorPrompts[msg.taskID] = strings.TrimPrefix(msg.prompt.text, "Waiting for permission: ")
+		}
+		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+
+	case focusStateMsg:
+		m.focusLoadInFlight = false
+		if m.detailView != nil && m.detailView == msg.detail && m.currentView == ViewDetail {
+			m.detailView.focused = msg.focused
 		}
 
 	case projectInferredMsg:
@@ -1079,6 +1214,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskLoadedMsg:
+		if msg.revision != m.taskLoadRevision {
+			return m, nil
+		}
+		if m.detailCleanupInFlight {
+			m.pendingDetailLoad = &msg
+			return m, nil
+		}
 		// Reset transition flag now that task is loaded
 		m.taskTransitionInProgress = false
 		// Set grace period to prevent focus flashing during task switch
@@ -1097,12 +1239,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.tasks[i].LastAccessedAt = &nowLocal
 					break
 				}
-			}
-			// Clean up any duplicate tmux windows for this task before switching
-			m.executor.CleanupDuplicateWindows(msg.task.ID)
-			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
-			if m.executor.IsSuspended(msg.task.ID) {
-				m.executor.ResumeTask(msg.task.ID)
 			}
 			var initCmd tea.Cmd
 			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height, msg.focusExecutor)
@@ -1401,32 +1537,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
 						}
-						// Sync cached prompt state on any status change.
-						// Re-validate existing entries, and detect new prompts for
-						// newly-blocked tasks so the user can approve/deny immediately
-						// without waiting for the next loadTasks poll.
-						if m.tasksNeedingInput[event.TaskID] {
-							if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt == "" {
-								delete(m.tasksNeedingInput, event.TaskID)
-								delete(m.questionPrompts, event.TaskID)
-								delete(m.executorPrompts, event.TaskID)
-							} else {
-								m.questionPrompts[event.TaskID] = isQ
-							}
-						} else if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt != "" {
-							m.tasksNeedingInput[event.TaskID] = true
-							m.questionPrompts[event.TaskID] = isQ
-							paneContent := executor.CapturePaneContent(executor.TmuxSessionName(event.TaskID), 15)
-							if paneContent != "" {
-								m.executorPrompts[event.TaskID] = paneContent
-							} else {
-								displayPrompt := prompt
-								if strings.HasPrefix(prompt, "Waiting for permission: ") {
-									displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
-								}
-								m.executorPrompts[event.TaskID] = displayPrompt
-							}
-						}
+						cmds = append(cmds, m.loadEventPrompt(event.TaskID, event.Task.Status))
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
 					break
@@ -1436,7 +1547,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// tasks — otherwise a real-time event repopulates the board with the
 			// full task list while a filter is active, making the filtered column
 			// jump under the user mid-navigation.
-			m.applyFilter()
+			cmds = append(cmds, m.applyFilter())
 			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
@@ -1453,6 +1564,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForTaskEvent())
 
 	case tickMsg:
+		cmds = append(cmds, m.checkReload(), m.beginReload())
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
@@ -1467,13 +1579,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Poll database for task changes (hooks run in separate process)
 		if m.currentView == ViewDashboard && !m.loading {
 			cmds = append(cmds, m.loadTasks())
-			// Refresh running process indicators
-			running := executor.GetTasksWithRunningShellProcess()
-			// Also check currently viewed task (its panes are in task-ui, not daemon)
-			if m.selectedTask != nil && executor.HasRunningProcessInTaskUI() {
-				running[m.selectedTask.ID] = true
-			}
-			m.kanban.SetRunningProcesses(running)
 		}
 		cmds = append(cmds, m.tick())
 
@@ -1482,8 +1587,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewDetail && m.detailView != nil {
 			// Skip focus checking during task transitions to prevent visual flashing
 			// The grace period allows the new task to settle before checking focus
-			if !m.taskTransitionInProgress && time.Now().After(m.taskTransitionGraceUntil) {
-				m.detailView.RefreshFocusState()
+			if !m.taskTransitionInProgress && time.Now().After(m.taskTransitionGraceUntil) && !m.focusLoadInFlight {
+				m.focusLoadInFlight = true
+				cmds = append(cmds, m.detailView.focusStateCmd())
 			}
 			cmds = append(cmds, m.focusTick())
 		}
@@ -1587,6 +1693,7 @@ func (m *AppModel) View() string {
 		if m.detailView != nil {
 			return m.detailView.View()
 		}
+		return m.viewDashboard()
 	case ViewNewTask:
 		if m.newTaskForm != nil {
 			return m.newTaskForm.View()
@@ -2181,10 +2288,10 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterInput.SetValue(newValue)
 				m.filterInput.SetCursor(openBracket)
 				m.filterText = newValue
-				m.applyFilter()
+				cmd := m.applyFilter()
 				m.showFilterDropdown = false
 				m.filterAutocomplete.Reset()
-				return m, nil
+				return m, cmd
 			}
 		}
 
@@ -2204,10 +2311,10 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterInput.SetValue(prefix + "[" + name + "] ")
 				m.filterInput.SetCursor(len(m.filterInput.Value()))
 				m.filterText = m.filterInput.Value()
-				m.applyFilter()
+				cmd := m.applyFilter()
 				m.showFilterDropdown = false
 				m.filterAutocomplete.Reset()
-				return m, nil
+				return m, cmd
 			}
 		}
 		if keyMsg.String() == "tab" {
@@ -2263,7 +2370,7 @@ func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if newText := m.filterInput.Value(); newText != m.filterText {
 		m.filterText = newText
-		m.applyFilter()
+		cmd = tea.Batch(cmd, m.applyFilter())
 
 		// Update autocomplete: show when the last "[" is unclosed (no matching "]")
 		if lastBracket := strings.LastIndex(newText, "["); lastBracket >= 0 {
@@ -2326,7 +2433,46 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
-func (m *AppModel) applyFilter() {
+func (m *AppModel) applyFilter() tea.Cmd {
+	m.filterRevision++
+	kind, text := parseFilterKind(m.filterText)
+	if text == "" {
+		m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(m.tasks, kind)))
+		return nil
+	}
+	if m.filterInFlight {
+		return nil
+	}
+	m.filterInFlight = true
+	// Copy task values before leaving the input loop; events can mutate the
+	// live task objects while a database search is running.
+	snapshot := &AppModel{db: m.db, filterText: m.filterText, tasks: snapshotSearchTasks(m.tasks)}
+	revision := m.filterRevision
+	return func() tea.Msg {
+		return boardFilterMsg{revision: revision, query: snapshot.filterText, tasks: snapshot.filteredBoardTasks()}
+	}
+}
+
+type boardFilterMsg struct {
+	revision uint64
+	query    string
+	tasks    []*db.Task
+}
+
+func (m *AppModel) finishBoardFilter(msg boardFilterMsg) tea.Cmd {
+	m.filterInFlight = false
+	if msg.revision != m.filterRevision || msg.query != m.filterText {
+		return m.applyFilter()
+	}
+	m.kanban.SetTasks(m.collapseForBoard(msg.tasks))
+	if m.reloadSelectionID > 0 {
+		m.kanban.SelectTask(m.reloadSelectionID)
+		m.reloadSelectionID = 0
+	}
+	return nil
+}
+
+func (m *AppModel) filteredBoardTasks() []*db.Task {
 	// A board mixes workflow steps and standalone tasks, and there was no way to
 	// look at just one population. `is:workflow` / `is:task` splits them, and is
 	// stripped from the query before fuzzy matching so it never pollutes scoring.
@@ -2334,14 +2480,13 @@ func (m *AppModel) applyFilter() {
 
 	if filterText == "" {
 		// No keyword left: show everything, or just the requested kind.
-		m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(m.tasks, kind)))
-		return
+		return filterTasksByKind(m.tasks, kind)
 	}
 
 	queryLower := strings.ToLower(filterText)
 
 	// Resolve project aliases in "[project]" filter syntax (supports multiple tags)
-	if strings.Contains(queryLower, "[") {
+	if m.db != nil && strings.Contains(queryLower, "[") {
 		queryLower = m.resolveProjectAliases(queryLower)
 	}
 
@@ -2392,7 +2537,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(filtered, kind)))
+	return filterTasksByKind(filtered, kind)
 }
 
 // filterKind values for the `is:` filter token.
@@ -2549,6 +2694,33 @@ func scoreTaskFields(task *db.Task, query string, includeProject bool) int {
 	return best
 }
 
+type detailCleanupMsg struct {
+	failed *DetailModel
+}
+
+// Detach ownership immediately so board input can continue. New detail loads
+// wait for the handoff, and old pane results cannot reach the next detail view.
+func (m *AppModel) detachDetail(saveHeight bool) tea.Cmd {
+	if m.detailView == nil {
+		return nil
+	}
+	detail := m.detailView
+	m.detailView = nil
+	m.detailCleanupInFlight = true
+	return func() tea.Msg {
+		detail.paneWork.Wait()
+		detail.closeRemotePane(true)
+		if detail.claudePaneID != "" || detail.workdirPaneID != "" {
+			detail.breakTmuxPanes(saveHeight, true)
+		}
+		if detail.claudePaneID != "" {
+			return detailCleanupMsg{failed: detail}
+		}
+		detail.releaseExecutorLock()
+		return detailCleanupMsg{}
+	}
+}
+
 func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If detail view is in feedback mode, route all messages there
 	if m.detailView != nil && m.detailView.InFeedbackMode() {
@@ -2570,14 +2742,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
+		m.taskLoadRevision++
+		m.pendingDetailLoad = nil
+		m.taskTransitionInProgress = false
 		m.currentView = ViewDashboard
 		// Clear origin column when exiting detail view
 		m.kanban.ClearOriginColumn()
-		if m.detailView != nil {
-			m.detailView.Cleanup()
-			m.detailView = nil
-		}
-		return m, nil
+		return m, m.detachDetail(true)
 	}
 
 	// Handle queue/close/retry from detail view
@@ -2691,8 +2862,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openPR(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
-		m.detailView.ToggleShellPane()
-		return m, nil
+		return m, m.detailView.ToggleShellPane()
 	}
 	if key.Matches(keyMsg, m.keys.Actions) && m.selectedTask != nil {
 		return m.openActionPicker()
@@ -2704,7 +2874,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// Arrow key navigation to prev/next task in the same column
 	// j/k keys are passed through to the viewport for scrolling
-	if key.Matches(keyMsg, m.keys.Up) {
+	if key.Matches(keyMsg, m.keys.Up) || keyMsg.String() == "ctrl+up" {
 		// Ignore if no previous task exists
 		if !m.kanban.HasPrevTask() {
 			return m, nil
@@ -2715,20 +2885,17 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.taskTransitionInProgress = true
 		// Clean up current detail view before switching (without saving height)
-		if m.detailView != nil {
-			m.detailView.CleanupWithoutSaving()
-			m.detailView = nil
-		}
+		cleanup := m.detachDetail(false)
 		// Move selection up in the kanban
 		m.kanban.MoveUp()
 		// Load the new task
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.loadTask(task.ID)
+			return m, tea.Batch(cleanup, m.loadTaskWithOptions(task.ID, keyMsg.String() == "ctrl+up"))
 		}
 		m.taskTransitionInProgress = false
-		return m, nil
+		return m, cleanup
 	}
-	if key.Matches(keyMsg, m.keys.Down) {
+	if key.Matches(keyMsg, m.keys.Down) || keyMsg.String() == "ctrl+down" {
 		// Ignore if no next task exists
 		if !m.kanban.HasNextTask() {
 			return m, nil
@@ -2739,18 +2906,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.taskTransitionInProgress = true
 		// Clean up current detail view before switching (without saving height)
-		if m.detailView != nil {
-			m.detailView.CleanupWithoutSaving()
-			m.detailView = nil
-		}
+		cleanup := m.detachDetail(false)
 		// Move selection down in the kanban
 		m.kanban.MoveDown()
 		// Load the new task
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.loadTask(task.ID)
+			return m, tea.Batch(cleanup, m.loadTaskWithOptions(task.ID, keyMsg.String() == "ctrl+down"))
 		}
 		m.taskTransitionInProgress = false
-		return m, nil
+		return m, cleanup
 	}
 
 	if m.detailView != nil {
@@ -3833,9 +3997,11 @@ func (m *AppModel) updateChangeStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Just set the requested status directly. Don't auto-queue to avoid
 		// restarting the executor. Users can explicitly retry/requeue if they
 		// want to restart execution.
@@ -4142,14 +4308,29 @@ func inferProjectCmd(path, configDir string) tea.Cmd {
 }
 
 // Messages
+type taskChoicePrompt struct {
+	text        string
+	isQuestion  bool
+	paneContent string
+}
+
 type tasksLoadedMsg struct {
+	choicePrompts   map[int64]taskChoicePrompt
+	latestActivity  map[int64]*db.TaskLog
+	activityErr     error
 	tasks           []*db.Task
 	err             error
 	hiddenDoneCount int           // Number of done tasks not shown in kanban (older ones)
 	blockedByDeps   map[int64]int // Tasks blocked by dependencies (task ID -> open blocker count)
 }
 
+func (msg tasksLoadedMsg) latestChoicePrompt(taskID int64) (string, bool) {
+	prompt := msg.choicePrompts[taskID]
+	return prompt.text, prompt.isQuestion
+}
+
 type taskLoadedMsg struct {
+	revision      uint64
 	task          *db.Task
 	err           error
 	focusExecutor bool // Focus executor pane after entering detail view (e.g., from notification jump)
@@ -4243,33 +4424,40 @@ const maxDoneTasksInKanban = 20
 // Matches the command palette's SearchTasks limit for consistency.
 const boardFilterDBSearchLimit = 100
 
-// refreshLatestActivity loads the most recent log line for each active task and
-// feeds it to the board for the per-card activity sub-line.
-func (m *AppModel) refreshLatestActivity() {
-	if m.db == nil {
-		return
+type eventPromptMsg struct {
+	taskID   int64
+	revision uint64
+	prompt   taskChoicePrompt
+}
+
+func (m *AppModel) loadEventPrompt(id int64, status string) tea.Cmd {
+	if m.promptRevisions == nil {
+		m.promptRevisions = make(map[int64]uint64)
 	}
-	var ids []int64
-	for _, t := range m.tasks {
-		if t.Status == db.StatusProcessing || t.Status == db.StatusBlocked {
-			ids = append(ids, t.ID)
+	m.promptRevisions[id]++
+	revision, database := m.promptRevisions[id], m.db
+	return func() tea.Msg {
+		var text string
+		var question bool
+		if status != db.StatusDone && status != db.StatusBacklog && status != db.StatusArchived {
+			text, question = loadChoicePrompt(database, id)
 		}
+		return eventPromptMsg{taskID: id, revision: revision, prompt: taskChoicePrompt{text: text, isQuestion: question}}
 	}
-	if len(ids) == 0 {
-		m.kanban.SetLatestActivity(nil)
-		return
-	}
-	activity, err := m.db.GetLatestLogPerTask(ids)
-	if err != nil {
-		return
-	}
-	m.kanban.SetLatestActivity(activity)
 }
 
 func (m *AppModel) loadTasks() tea.Cmd {
+	// Coalesce filesystem notifications and polling while a refresh is running.
+	// Keep one follow-up so a mutation during the query is not lost.
+	if m.tasksLoadInFlight {
+		m.tasksLoadPending = true
+		return nil
+	}
+	m.tasksLoadInFlight = true
+	database := m.db
 	return func() tea.Msg {
 		// Load all non-done tasks (no limit)
-		activeTasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 0, IncludeClosed: false})
+		activeTasks, err := database.ListTasks(db.ListTasksOptions{Limit: -1, IncludeClosed: false})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
@@ -4277,13 +4465,13 @@ func (m *AppModel) loadTasks() tea.Cmd {
 		// Load limited done tasks (most recently completed). OrderByRecency keeps
 		// old pinned tasks from crowding newer ones out of the capped slice; the
 		// kanban still floats pinned tasks to the top of the visible column.
-		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban, OrderByRecency: true})
+		doneTasks, err := database.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban, OrderByRecency: true})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
 
 		// Count total done tasks to show "more" message
-		totalDone, err := m.db.CountTasksByStatus(db.StatusDone)
+		totalDone, err := database.CountTasksByStatus(db.StatusDone)
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
@@ -4298,7 +4486,7 @@ func (m *AppModel) loadTasks() tea.Cmd {
 		// Load dependency blocker counts for each task
 		blockedByDeps := make(map[int64]int)
 		for _, task := range tasks {
-			count, err := m.db.GetOpenBlockerCount(task.ID)
+			count, err := database.GetOpenBlockerCount(task.ID)
 			if err == nil && count > 0 {
 				blockedByDeps[task.ID] = count
 			}
@@ -4306,7 +4494,69 @@ func (m *AppModel) loadTasks() tea.Cmd {
 
 		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
 		// to avoid spawning processes for every task on every tick
-		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps}
+		prompts := make(map[int64]taskChoicePrompt)
+		for _, task := range tasks {
+			if task.Status == db.StatusDone || task.Status == db.StatusBacklog {
+				continue
+			}
+			text, isQuestion := loadChoicePrompt(database, task.ID)
+			prompt := taskChoicePrompt{text: text, isQuestion: isQuestion}
+			prompts[task.ID] = prompt
+		}
+		var activityIDs []int64
+		for _, task := range tasks {
+			if task.Status == db.StatusProcessing || task.Status == db.StatusBlocked {
+				activityIDs = append(activityIDs, task.ID)
+			}
+		}
+		activity, activityErr := database.GetLatestLogPerTask(activityIDs)
+		return tasksLoadedMsg{
+			tasks: tasks, choicePrompts: prompts, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps,
+			latestActivity: activity, activityErr: activityErr,
+		}
+	}
+}
+
+// Terminal enrichment must never delay the first board paint or database refreshes.
+// Only one check runs at a time; missing sessions use the hook summary immediately.
+type boardTerminalsMsg struct {
+	runningProcesses map[int64]bool
+	runningUITaskID  int64
+	prompts          map[int64]taskChoicePrompt
+}
+
+func (m *AppModel) loadBoardTerminals(prompts map[int64]taskChoicePrompt) tea.Cmd {
+	// Capture newly detected prompts once, as before; cached prompts need no process.
+	pending := make(map[int64]taskChoicePrompt)
+	for id, prompt := range prompts {
+		if prompt.text != "" && !m.tasksNeedingInput[id] {
+			pending[id] = prompt
+		}
+	}
+	var selectedTaskID int64
+	if m.selectedTask != nil {
+		selectedTaskID = m.selectedTask.ID
+	}
+	return func() tea.Msg {
+		running := executor.GetTasksWithRunningShellProcess()
+		msg := boardTerminalsMsg{runningProcesses: running, prompts: make(map[int64]taskChoicePrompt)}
+		if selectedTaskID != 0 && executor.HasRunningProcessInTaskUI() {
+			msg.runningUITaskID = selectedTaskID
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for id, prompt := range pending {
+			if ctx.Err() != nil {
+				break
+			}
+			if prompt.text == "" {
+				continue
+			}
+			prompt.paneContent = executor.CapturePaneContentContext(ctx, executor.TmuxSessionName(id), 15)
+			prompt.text = strings.TrimPrefix(prompt.text, "Waiting for permission: ")
+			msg.prompts[id] = prompt
+		}
+		return msg
 	}
 }
 
@@ -4321,6 +4571,9 @@ func (m *AppModel) loadTaskWithFocus(id int64) tea.Cmd {
 }
 
 func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
+	m.taskLoadRevision++
+	revision := m.taskLoadRevision
+	database := m.db
 	// Update last accessed timestamp (async, don't block UI)
 	if m.db != nil {
 		database := m.db
@@ -4328,16 +4581,18 @@ func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		task, err := m.db.GetTask(id)
-		return taskLoadedMsg{task: task, err: err, focusExecutor: focusExecutor}
+		task, err := database.GetTask(id)
+		return taskLoadedMsg{task: task, err: err, focusExecutor: focusExecutor, revision: revision}
 	}
 }
 
 // updateTaskWithRename updates a task and renames the Claude session if the title changed.
 func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		err := database.UpdateTask(newTask)
 		if err == nil {
 			exec.NotifyTaskChange("updated", newTask)
@@ -4352,9 +4607,11 @@ func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.C
 }
 
 func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string) tea.Cmd {
+	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Generate title from body if title is empty but body is provided
 		if strings.TrimSpace(t.Title) == "" && strings.TrimSpace(t.Body) != "" {
 			// Try to generate title using LLM
@@ -4409,8 +4666,10 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 // title/body as the goal and its project/permission mode for every phase. The
 // task itself is not persisted — it is only the goal carrier.
 func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		goal := strings.TrimSpace(t.Title)
 		if body := strings.TrimSpace(t.Body); body != "" {
 			if goal == "" {
@@ -4434,9 +4693,11 @@ func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) t
 }
 
 func (m *AppModel) queueTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
@@ -4448,9 +4709,11 @@ func (m *AppModel) queueTask(id int64) tea.Cmd {
 }
 
 func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Set dangerous mode before queueing (writes permission_mode, the source of
 		// truth, keeping the dangerous_mode bool in sync).
 		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
@@ -4467,9 +4730,11 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 }
 
 func (m *AppModel) closeTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		err := database.UpdateTaskStatus(id, db.StatusDone)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
@@ -4510,9 +4775,11 @@ func (m *AppModel) summarizeTask(id int64, force bool) tea.Cmd {
 }
 
 func (m *AppModel) archiveTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Get the task first
 		task, err := database.GetTask(id)
 		if err != nil {
@@ -4551,9 +4818,11 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 }
 
 func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Get the task first
 		task, err := database.GetTask(id)
 		if err != nil {
@@ -4586,7 +4855,9 @@ func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
 // old one-shot destructive delete that made incidents like the lost Creator Commerce
 // session unrecoverable.
 func (m *AppModel) deleteTask(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Kill Claude process to free memory
 		m.executor.KillClaudeProcess(id)
 
@@ -4757,7 +5028,11 @@ func (m *AppModel) openPR(task *db.Task) tea.Cmd {
 // Only matches "Waiting for permission" and "question" entries, NOT
 // "Waiting for user input" (generic idle/end_turn scenarios).
 func (m *AppModel) latestChoicePrompt(taskID int64) (string, bool) {
-	logs, err := m.db.GetTaskLogs(taskID, 10)
+	return loadChoicePrompt(m.db, taskID)
+}
+
+func loadChoicePrompt(database *db.DB, taskID int64) (string, bool) {
+	logs, err := database.GetTaskLogs(taskID, 10)
 	if err != nil {
 		return "", false
 	}
@@ -4799,9 +5074,11 @@ type taskMovedMsg struct {
 // moveTaskToProject moves a task to a different project by creating a new task
 // in the target project and deleting the old task (including its worktree).
 func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// First, clean up the old task's resources
 
 		// Kill Claude process to free memory
@@ -4862,9 +5139,11 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 }
 
 func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
 			return taskPermissionModeCycledMsg{err: fmt.Errorf("failed to get task")}
@@ -4883,8 +5162,10 @@ func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
 }
 
 func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
 			return taskPinnedMsg{err: fmt.Errorf("failed to get task")}
@@ -4900,9 +5181,11 @@ func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
 }
 
 func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string, dangerous bool) tea.Cmd {
+	m.reloadWrites.Add(1)
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		defer m.reloadWrites.Add(-1)
 		// Set dangerous mode if requested (writes permission_mode, the source of
 		// truth, keeping the dangerous_mode bool in sync).
 		if dangerous {
@@ -5305,4 +5588,12 @@ func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
 func (m *AppModel) getProjects() []*db.Project {
 	projects, _ := m.db.ListProjects()
 	return projects
+}
+
+// FocusTaskOnLoad selects taskID once the board finishes loading.
+//
+// Used by `ty --task <id>` so a session can be reopened where it left off,
+// rather than on whatever the board happens to sort first.
+func (m *AppModel) FocusTaskOnLoad(taskID int64) {
+	m.pendingFocusTaskID = taskID
 }

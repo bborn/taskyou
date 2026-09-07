@@ -34,6 +34,7 @@ import (
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/routine"
+	"github.com/bborn/workflow/internal/tuireload"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -141,12 +142,13 @@ func main() {
 				return
 			}
 
+			focusTaskID, _ := cmd.Flags().GetInt64("task")
 			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
 			cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
 			memProfilePath, _ := cmd.Flags().GetString("memprofile")
 
 			// Run locally
-			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath); err != nil {
+			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath, focusTaskID); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -157,6 +159,9 @@ func main() {
 `)
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
+	// Not persistent: subcommands have their own meaning for a task argument, and
+	// this only affects the TUI's initial selection.
+	rootCmd.Flags().Int64("task", 0, "Open the TUI with this task selected")
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
 	rootCmd.PersistentFlags().String("cpuprofile", "", "Write a CPU profile here while the TUI runs (analyze with: go tool pprof)")
 	rootCmd.PersistentFlags().String("memprofile", "", "Write a heap profile here when the TUI exits")
@@ -329,8 +334,10 @@ Examples:
 	var hardRestart bool
 	restartCmd := &cobra.Command{
 		Use:   "restart",
-		Short: "Restart the daemon and TUI (preserves agent sessions)",
-		Long: `Restarts the daemon and TUI while preserving running agent sessions.
+		Short: "Restart the daemon and safely reload open TUIs",
+		Long: `Restarts the daemon and asks open TUIs to reload in their existing terminals.
+Unfinished forms are preserved until saved or cancelled. Agent sessions are preserved.
+Older TUIs that do not support cooperative reload are left running.
 Use --hard to kill all tmux sessions for a complete reset.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(dimStyle.Render("Stopping daemon..."))
@@ -347,16 +354,13 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 					}
 				}
 			} else {
-				// Soft restart: only kill the task-ui session, preserve task-daemon sessions with agent windows
-				fmt.Println(dimStyle.Render("Preserving agent sessions..."))
-				out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
-				for _, session := range strings.Split(string(out), "\n") {
-					session = strings.TrimSpace(session)
-					// Only kill task-ui sessions, keep task-daemon sessions with Claude windows
-					if strings.HasPrefix(session, "task-ui-") {
-						osexec.Command("tmux", "kill-session", "-t", session).Run()
-					}
+				if err := restartWithLiveTUIs(dangerous || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
 				}
+				fmt.Println(successStyle.Render("Daemon restarted; open TUIs requested to reload safely."))
+				fmt.Println(dimStyle.Render("Unfinished forms wait until saved or cancelled. Older TUIs remain running and need one manual reopen."))
+				return
 			}
 
 			fmt.Println(successStyle.Render("Restarting..."))
@@ -545,6 +549,7 @@ Examples:
 	// (verify gate, human gate parking, PR routing), unlike `ty close` which is a
 	// plain status write that skips all of it.
 	rootCmd.AddCommand(newCompleteCmd())
+	rootCmd.AddCommand(newPlaceCmd())
 
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
@@ -1654,6 +1659,8 @@ Examples:
 					"claude_pane_id": task.ClaudePaneID,
 					"shell_pane_id":  task.ShellPaneID,
 					"summary":        task.Summary,
+					"ran_on":         task.PlacementTarget,
+					"ran_on_reason":  task.PlacementReason,
 					"created_at":     task.CreatedAt.Time.Format(time.RFC3339),
 					"updated_at":     task.UpdatedAt.Time.Format(time.RFC3339),
 				}
@@ -1718,6 +1725,33 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					fmt.Printf("Completed: %s\n", task.CompletedAt.Time.Format("2006-01-02 15:04:05"))
+				}
+
+				// Where it ran. Only shown once a placement handler has answered for
+				// this task — a locally-run task on a machine with no placement
+				// plugin prints exactly what it always has.
+				if task.PlacementTarget != "" {
+					fmt.Printf("Ran on:   %s\n", task.PlacementTarget)
+				} else if task.PlacementReason != "" {
+					fmt.Printf("Ran on:   %s\n", dimStyle.Render("local"))
+				}
+				if task.PlacementReason != "" {
+					fmt.Printf("Because:  %s\n", dimStyle.Render(task.PlacementReason))
+				}
+				// A remotely placed task's worktree is on that host, not in
+				// worktree_path — which names a directory on THIS machine.
+				if task.PlacementTarget != "" {
+					if rpath, rbranch, err := database.GetTaskRemoteWorktree(taskID); err == nil && rpath != "" {
+						fmt.Printf("Remote worktree: %s\n", rpath)
+						if rbranch != "" {
+							fmt.Printf("Remote branch:   %s\n", rbranch)
+						}
+						if task.DaemonSession != "" {
+							fmt.Printf("Attach:   %s\n", dimStyle.Render(fmt.Sprintf(
+								"ssh %s -t tmux attach -t %s:task-%d",
+								task.PlacementTarget, task.DaemonSession, task.ID)))
+						}
+					}
 				}
 
 				// Worktree info
@@ -2327,10 +2361,18 @@ Examples:
 		ValidArgsFunction: completeTaskIDs,
 		Long: `Retry a task that is blocked or failed, optionally with feedback.
 
+A task that was placed on another machine stays on it: the worktree, branch and
+executor session from the first attempt all live there. --replace forgets that
+decision so the placement resolver is asked again; --on names the host yourself
+and is the same thing "ty place" writes, applied on the way into the retry.
+
 Examples:
   task retry 42
   task retry 42 --feedback "Try a different approach"
-  task retry 42 -m "Focus on the error handling"`,
+  task retry 42 -m "Focus on the error handling"
+  task retry 42 --replace          # ask the placement resolver again
+  task retry 42 --on local         # bring it back to this machine and retry
+  task retry 42 --on ol-agents --dir ~/projects/engineering`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -2360,6 +2402,43 @@ Examples:
 				os.Exit(1)
 			}
 
+			on, _ := cmd.Flags().GetString("on")
+			replace, _ := cmd.Flags().GetBool("replace")
+			if on != "" && replace {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(
+					"--on names a host and --replace asks for one; use one or the other"))
+				os.Exit(1)
+			}
+			if on != "" {
+				current, perr := database.GetTaskPlacementDecision(taskID)
+				if perr != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+perr.Error()))
+					os.Exit(1)
+				}
+				dir, _ := cmd.Flags().GetString("dir")
+				force, _ := cmd.Flags().GetBool("force")
+				// Same path as `ty place`: a retry on another host carries the work
+				// there, rather than restarting from whatever reached origin.
+				if err := carryAndPlace(cmd.Context(), database, task, current, on, dir, force); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+			}
+
+			if replace {
+				placement, perr := database.GetTaskPlacementDecision(taskID)
+				if err := database.ClearTaskPlacement(taskID); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				if perr == nil && placement.Decided && placement.Target != "" {
+					fmt.Println(dimStyle.Render(fmt.Sprintf(
+						"Forgot the placement on %s; the resolver will be asked again.", placement.Target)))
+				} else {
+					fmt.Println(dimStyle.Render("Forgot this task's placement; the resolver will be asked again."))
+				}
+			}
+
 			if err := database.RetryTask(taskID, feedback); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2369,6 +2448,10 @@ Examples:
 		},
 	}
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
+	retryCmd.Flags().Bool("replace", false, "Forget where this task was placed and ask the placement resolver again")
+	retryCmd.Flags().String("on", "", "Run this retry on the named host (\"local\" for this machine) — same as ty place")
+	retryCmd.Flags().String("dir", "", "With --on, the task's directory on that host")
+	retryCmd.Flags().Bool("force", false, "With --on, move even though it strands a worktree or session on the current host")
 	rootCmd.AddCommand(retryCmd)
 
 	// Input subcommand - send input directly to a running task's executor
@@ -3777,7 +3860,12 @@ External frontends (like ty-web) can build on top of this API.
 The server shares the same SQLite database the daemon writes to (WAL mode).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			port, _ := cmd.Flags().GetInt("port")
-			addr := fmt.Sprintf(":%d", port)
+			host, _ := cmd.Flags().GetString("host")
+			addr, err := serveListenAddr(host, port)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
 
 			dbPath := db.DefaultPath()
 			database, err := openTaskDB(dbPath)
@@ -3810,6 +3898,12 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 				srv.Shutdown(ctx)
 			}()
 
+			if host == "" {
+				fmt.Printf("Binding %s (all interfaces - reachable from your local network)\n", addr)
+			} else {
+				fmt.Printf("Binding %s\n", addr)
+			}
+
 			if err := srv.Start(); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Server error: "+err.Error()))
 				os.Exit(1)
@@ -3817,6 +3911,7 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 		},
 	}
 	serveCmd.Flags().Int("port", 8080, "Port to listen on")
+	serveCmd.Flags().String("host", "", "Address to bind to (e.g. 127.0.0.1 or a Tailscale IP). Empty binds all interfaces")
 	rootCmd.AddCommand(serveCmd)
 
 	// Bulk operations
@@ -4156,7 +4251,7 @@ func setupProfiling(cpuPath, memPath string) func() {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string) error {
+func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string, focusTaskID int64) error {
 	// Optional performance profiling. The CPU profile captures the whole
 	// interactive session (including every render); the heap profile is written
 	// on exit. Analyze with `go tool pprof <binary> <profile>`.
@@ -4196,6 +4291,21 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 
 	// Create and run TUI
 	model := ui.NewAppModel(database, exec, cwd, version)
+	token, err := tuireload.Token(database)
+	if err != nil {
+		return fmt.Errorf("read TUI reload state: %w", err)
+	}
+	model.EnableReload(token)
+	if focusTaskID > 0 {
+		model.FocusTaskOnLoad(focusTaskID)
+	}
+	if saved := os.Getenv("TASKYOU_TUI_RELOAD_STATE"); saved != "" {
+		os.Unsetenv("TASKYOU_TUI_RELOAD_STATE")
+		var state ui.ReloadState
+		if json.Unmarshal([]byte(saved), &state) == nil {
+			model.RestoreReloadState(state)
+		}
+	}
 	if debugStatePath != "" {
 		model.SetDebugStatePath(debugStatePath)
 	}
@@ -4203,6 +4313,7 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 		model,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
+		tea.WithFPS(120), // Keep selection latency below a 60 Hz frame while scrolling.
 	)
 
 	if _, err := p.Run(); err != nil {
@@ -4212,6 +4323,23 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	// Bells are debounced, so one may still be scheduled when the user quits.
 	// Deliver it instead of dropping it on the floor.
 	ui.FlushBell()
+
+	if state, ready := model.ReloadState(); ready {
+		// Bubble Tea has restored the terminal and the model returned borrowed
+		// panes first. Replace this process without destroying its tmux session.
+		stopProfiling()
+		database.Close()
+		data, _ := json.Marshal(state)
+		executable, reloadErr := os.Executable()
+		if reloadErr == nil {
+			reloadErr = syscall.Exec(executable, os.Args, append(os.Environ(), "TASKYOU_TUI_RELOAD_STATE="+string(data)))
+		}
+		// A missing/unusable replacement must not strand the terminal. Resume
+		// the currently loaded build instead, acknowledging the request token.
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Reload failed; resuming current TUI: "+reloadErr.Error()))
+		os.Setenv("TASKYOU_TUI_RELOAD_STATE", string(data))
+		return runLocal(dangerousMode, debugStatePath, cpuProfilePath, memProfilePath, focusTaskID)
+	}
 
 	// Flush profiles now, before the tmux cleanup below may kill our own session
 	// (which would SIGKILL this process and skip the deferred flush).
@@ -4230,6 +4358,40 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	}
 
 	return nil
+}
+
+// The daemon has already been stopped by the command. Cooperative clients read
+// the request from their own database; unrelated databases and old clients stay up.
+func restartWithLiveTUIs(dangerousMode bool) error {
+	// The old daemon owns this lock until shutdown finishes. Waiting for it
+	// avoids launching a replacement that immediately exits on lock contention.
+	lock, err := os.OpenFile(getPidFilePath()+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			lock.Close()
+			return fmt.Errorf("daemon is still stopping; TUIs were left running")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	lock.Close()
+
+	if err := ensureDaemonRunning(dangerousMode); err != nil {
+		return err
+	}
+	database, err := openTaskDB(db.DefaultPath())
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return tuireload.Request(database)
 }
 
 // ensureDaemonForQueuedWork makes sure work queued from the CLI will actually
@@ -6098,9 +6260,10 @@ func quotedWindowList(windows map[string]bool) string {
 // being visible to ps / pgrep.
 func cleanupOrphanedSessions(force bool) {
 	type windowRef struct {
-		session string
-		window  string
-		taskID  int
+		session   string
+		window    string
+		taskID    int
+		ownedByUs bool
 	}
 
 	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
@@ -6110,11 +6273,31 @@ func cleanupOrphanedSessions(force bool) {
 	}
 
 	var allWindows []windowRef
+	var foreignSessions []string
+	localOwner := executor.LocalOwnerTag()
 	for _, session := range strings.Split(string(sessionsOut), "\n") {
 		session = strings.TrimSpace(session)
 		if !strings.HasPrefix(session, "task-daemon-") {
 			continue
 		}
+		// A session another machine owns holds ITS tasks, which are absent from
+		// OUR database by definition. Judging them here says "deleted" about
+		// every one of them and kills live agents: a placed host running this
+		// (directly, or through the test suite) tore down the very window the
+		// running agent lived in. Not ours, not our call.
+		owner := tmuxSessionOwner(session)
+		if owner != "" && owner != localOwner {
+			foreignSessions = append(foreignSessions, session+" (owned by "+owner+")")
+			continue
+		}
+		// An UNTAGGED session is unknown, not ours. Every session created before
+		// the tag existed is untagged, including the long-lived daemon session on
+		// a placed host — which is precisely the one that kept getting its live
+		// agent window killed. Unknown sessions are still scanned, because a
+		// window whose task we can see is provably ours to clean, but they are
+		// never allowed to have a window killed merely for being ABSENT from the
+		// database: absence is what a foreign task looks like.
+		ownedByUs := owner == localOwner
 		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
 		if err != nil {
 			continue
@@ -6128,7 +6311,7 @@ func cleanupOrphanedSessions(force bool) {
 			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err != nil {
 				continue
 			}
-			allWindows = append(allWindows, windowRef{session: session, window: window, taskID: taskID})
+			allWindows = append(allWindows, windowRef{session: session, window: window, taskID: taskID, ownedByUs: ownedByUs})
 		}
 	}
 
@@ -6151,13 +6334,26 @@ func cleanupOrphanedSessions(force bool) {
 			}
 		}
 	} else {
-		fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not open database (%v); falling back to tmux-only orphan check", err)))
+		// Without the database every task ID looks missing, and the loop below
+		// reads missing as deleted — so the old "tmux-only orphan check" fallback
+		// was a kill-everything path that fired precisely when we knew least.
+		// Refuse instead: absence of evidence is not evidence of an orphan.
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf(
+			"Could not open the database (%v) — refusing to judge any window orphaned without it.", err)))
+		return
 	}
 
 	var deletedWindows, oldDoneWindows []windowRef
+	var unknownWindows []string
 	for _, w := range allWindows {
 		if !existingTaskIDs[w.taskID] {
-			deletedWindows = append(deletedWindows, w)
+			// Only a session we can prove is ours may have a window killed for a
+			// task we cannot see. Anywhere else that reasoning is backwards.
+			if w.ownedByUs {
+				deletedWindows = append(deletedWindows, w)
+			} else {
+				unknownWindows = append(unknownWindows, w.session+":"+w.window)
+			}
 			continue
 		}
 		if oldDoneTaskIDs[w.taskID] {
@@ -6166,6 +6362,16 @@ func cleanupOrphanedSessions(force bool) {
 	}
 
 	totalToKill := len(deletedWindows) + len(oldDoneWindows)
+	if len(unknownWindows) > 0 {
+		fmt.Println(dimStyle.Render(fmt.Sprintf(
+			"Left %d window(s) alone: their task is not in this database and their session is not tagged as this machine's (%s)",
+			len(unknownWindows), strings.Join(unknownWindows, ", "))))
+	}
+	if len(foreignSessions) > 0 {
+		fmt.Println(dimStyle.Render(fmt.Sprintf(
+			"Skipped %d session(s) owned by another machine: %s",
+			len(foreignSessions), strings.Join(foreignSessions, ", "))))
+	}
 	if totalToKill == 0 {
 		fmt.Println(successStyle.Render("No orphaned agent windows found"))
 		return
@@ -6662,7 +6868,7 @@ func cloneRepoForCLI(repo string) string {
 		os.Exit(1)
 	}
 
-	cloner := github.Cloner{}
+	cloner := github.Cloner{Command: executor.DefaultRunner().Command}
 	dest, err := cloner.Resolve(ref)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -7016,4 +7222,18 @@ func parseKeyEvents(input string) []tea.Msg {
 		msgs = append(msgs, msg)
 	}
 	return msgs
+}
+
+// tmuxSessionOwner reads the machine tag ty writes on the daemon sessions it
+// creates, or "" when the session predates the tag or tmux cannot be asked.
+//
+// An empty answer deliberately does NOT mean "mine": it means unknown, and the
+// caller treats unknown the same as its own only for windows whose task it can
+// actually see in the database.
+func tmuxSessionOwner(session string) string {
+	out, err := osexec.Command("tmux", "show-options", "-qv", "-t", session, executor.TmuxOwnerOption).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

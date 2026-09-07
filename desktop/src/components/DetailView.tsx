@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
@@ -7,6 +7,7 @@ import { openExternal, openInEditor } from "../tauri";
 import { store, useAppState } from "../store";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { LogList } from "./LogList";
+import { mergeRecentLogs } from "../lib/logs";
 import { Markdown } from "./Markdown";
 import { TerminalPane } from "./TerminalPane";
 import { Badge } from "@/components/ui/badge";
@@ -90,6 +91,13 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [deps, setDeps] = useState<Dependencies | null>(null);
   const [showLogs, setShowLogs] = useState(false);
+  const [history, setHistory] = useState<LogLine[] | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyEnd, setHistoryEnd] = useState(false);
+  const historyRevision = useRef(0);
+  const currentTaskId = useRef(taskId);
+  currentTaskId.current = taskId;
+  const displayedLogs = history ?? logs;
 
   // Detail/terminal split: drag the divider to resize, double-click to reset.
   const splitRef = useRef<HTMLDivElement>(null);
@@ -126,36 +134,48 @@ export function DetailView({ taskId }: { taskId: number }) {
     if (storeTask) setTask(storeTask);
   }, [storeTask]);
 
-  const loadDetail = useCallback(async () => {
-    try {
-      const detail = await api.taskDetail(taskId);
+  useEffect(() => {
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+    historyRevision.current++;
+    setTask((current) => current?.id === taskId ? current : null);
+    setLogs([]);
+    setHistory(null);
+    setHistoryEnd(false);
+    setHistoryBusy(false);
+    // Establish the initial cursor before subscribing; never replay from zero
+    // while the latest-history request is still in flight.
+    api.taskDetail(taskId).then((detail) => {
+      if (!active) return;
       setTask(detail.task);
-      setLogs(detail.logs);
-    } catch (e) {
-      store.toast({
-        title: `Failed to load #${taskId}`,
-        body: e instanceof Error ? e.message : String(e),
-        kind: "error",
+      setLogs(mergeRecentLogs([], detail.logs));
+      const since = detail.logs[detail.logs.length - 1]?.id ?? 0;
+      unsubscribe = subscribeTaskLogs(taskId, since, (batch) => {
+        if (active) setLogs((prev) => mergeRecentLogs(prev, batch));
       });
-    }
-    api.deps(taskId).then(setDeps).catch(() => setDeps(null));
+    }).catch((e) => {
+      if (active) store.toast({title: `Failed to load #${taskId}`, body: String(e), kind: "error"});
+    });
+    api.deps(taskId).then((value) => { if (active) setDeps(value); }).catch(() => { if (active) setDeps(null); });
+    return () => { active = false; unsubscribe?.(); };
   }, [taskId]);
 
-  useEffect(() => {
-    void loadDetail();
-  }, [loadDetail]);
-
-  // Live log stream (SSE), starting after the last loaded log.
-  useEffect(() => {
-    if (logs.length === 0 && !task) return undefined;
-    const since = logs.length ? logs[logs.length - 1].id : 0;
-    const unsubscribe = subscribeTaskLogs(taskId, since, (log) => {
-      setLogs((prev) => (prev.some((l) => l.id === log.id) ? prev : [...prev, log]));
-    });
-    return unsubscribe;
-    // Re-subscribe only per task; `since` is captured from the initial load.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, logs.length > 0]);
+  async function loadOlderLogs() {
+    if (!displayedLogs.length || historyBusy) return;
+    const id = taskId;
+    const revision = ++historyRevision.current;
+    setHistoryBusy(true);
+    try {
+      const page = await api.taskLogsBefore(id, displayedLogs[0].id);
+      if (currentTaskId.current !== id || historyRevision.current !== revision) return;
+      setHistoryEnd(page.length < 200);
+      if (page.length) setHistory(page);
+    } catch (e) {
+      if (currentTaskId.current === id) store.toast({title: "Could not load older logs", body: String(e), kind: "error"});
+    } finally {
+      if (currentTaskId.current === id && historyRevision.current === revision) setHistoryBusy(false);
+    }
+  }
 
   if (!task) {
     return (
@@ -328,9 +348,17 @@ export function DetailView({ taskId }: { taskId: number }) {
 
           <SectionTitle onClick={() => setShowLogs(!showLogs)}>
             {showLogs ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            Execution log <span className="font-normal">({logs.length})</span>
+            Execution log <span className="font-normal">({displayedLogs.length})</span>
           </SectionTitle>
-          {showLogs && <LogList logs={logs} />}
+          {showLogs && <>
+            <div className="mb-2 flex gap-2">
+              <Button size="sm" variant="outline" disabled={historyBusy || historyEnd || displayedLogs.length === 0} onClick={() => void loadOlderLogs()}>
+                {historyBusy ? "Loading…" : "Older logs"}
+              </Button>
+              {history && <Button size="sm" variant="outline" onClick={() => { historyRevision.current++; setHistoryBusy(false); setHistory(null); setHistoryEnd(false); }}>Back to live</Button>}
+            </div>
+            <LogList logs={displayedLogs} follow={history === null} />
+          </>}
         </div>
 
         <div

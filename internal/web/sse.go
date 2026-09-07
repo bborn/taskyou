@@ -24,6 +24,11 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// EventSource sends this on reconnect, advancing beyond the initial URL.
+	if last, err := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64); err == nil && last > sinceID {
+		sinceID = last
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -51,7 +56,7 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "event: heartbeat\ndata: {}\n\n")
 			flusher.Flush()
 		case <-ticker.C:
-			logs, err := s.db.GetTaskLogsSince(id, sinceID)
+			logs, err := s.db.GetTaskLogsSinceLimit(id, sinceID, 500)
 			if err != nil {
 				fmt.Fprintf(w, "event: error\ndata: {\"error\":\"db error\"}\n\n")
 				flusher.Flush()
@@ -65,7 +70,7 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 					CreatedAt: apiTime(l.CreatedAt.Time),
 				}
 				data, _ := json.Marshal(entry)
-				fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+				fmt.Fprintf(w, "id: %d\nevent: log\ndata: %s\n\n", l.ID, data)
 				sinceID = l.ID
 			}
 			if len(logs) > 0 {
@@ -90,13 +95,23 @@ func (s *Server) handleBoardStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Send initial board snapshot immediately
-	s.sendBoardEvent(w, flusher)
-
-	// Track last seen event ID
+	// Consumers needing their own richer payload can request a cheap change
+	// signal rather than make us build a snapshot they immediately discard.
+	signalOnly := r.URL.Query().Get("signal") == "true"
+	send := func() {
+		if signalOnly {
+			fmt.Fprint(w, "event: board\ndata: {}\n\n")
+			flusher.Flush()
+		} else {
+			s.sendBoardEvent(w, flusher)
+		}
+	}
+	// Read the cursor BEFORE the snapshot. A mutation during serialization
+	// must still be observed by the next poll.
 	var lastEventID int64
 	row := s.db.QueryRow("SELECT COALESCE(MAX(id), 0) FROM event_log")
 	row.Scan(&lastEventID)
+	send()
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -121,7 +136,7 @@ func (s *Server) handleBoardStream(w http.ResponseWriter, r *http.Request) {
 			}
 			if maxID > lastEventID {
 				lastEventID = maxID
-				s.sendBoardEvent(w, flusher)
+				send()
 			}
 		}
 	}

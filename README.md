@@ -331,6 +331,19 @@ make build
 ./bin/ty daemon status  # Check daemon status
 ```
 
+### Restarting without closing terminals
+
+`ty restart` restarts the daemon and asks local TUIs using the same database to
+reload the current binary in place. Their tmux sessions stay open. Task selection,
+board filter, and the open detail view are restored, and borrowed agent panes are
+returned before reloading. Unsaved forms and pending task saves defer the reload.
+
+TUIs started with an older build that lacks cooperative reload remain running;
+reopen those once with the updated build to enable future automatic reloads.
+`POST /api/tui/reload` requests the same cooperative TUI reload through the HTTP API.
+`ty daemon restart` only restarts the daemon. `ty restart --hard` remains an explicit
+destructive reset that kills TaskYou tmux sessions.
+
 ### Maintenance commands
 
 ```bash
@@ -700,6 +713,30 @@ A **plugin** is a self-contained directory under `~/.config/task/plugins/` with 
 - **hooks** — scripts that fire on task events. Unlike the one-script-per-event hooks
   dir above, any number of plugins can handle the same event and **all of them run**
 - **actions** — user-invoked commands (`ty plugins run <plugin> <action>`)
+
+One event is different: `task.placement` is **consulted**, not merely notified.
+Just before an executor spawns, ty asks any installed placement handler where the
+task should run — request on stdin, answer on stdout — and runs it there. An empty
+answer (and every way a handler can fail) means "run locally", which is what
+happens for everyone who has no placement plugin installed: nothing is asked, and
+nothing changes.
+
+A placed task is watched over **one standing connection per host** rather than one
+poller per task, so a fleet of hundreds costs a handful of connections. ty holds
+that connection outbound — nothing listens on your machine and no port is opened.
+The agent reports its own outcome through it (`.ty/signal done "…"`), so a remote
+task finishes when it says it has finished, rather than when it has been quiet
+long enough to look finished.
+
+Remote tasks support the workdir shell in every interface: `\` toggles it in
+TUI detail view, and the desktop/browser terminal has a **Shell** tab. The shell
+runs on the placed host with the task's environment and survives closing the
+view. Shift-arrow keys cycle the TUI, agent, and shell panes; Alt-Shift-Up/Down
+switch tasks. Inside an attached remote pane, **Ctrl-a** is the remote tmux
+prefix. Desktop and browser remote terminals use the HTTP terminal bridge.
+
+See [docs/plugins.md](docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)
+and the reference resolver in [extensions/ty-on](extensions/ty-on/README.md).
 
 Install one — or a whole collection, since a single git repo can hold many plugins —
 with one command:

@@ -50,13 +50,11 @@ func (c *CodexExecutor) IsAvailable() bool {
 //
 //	printenv OPENAI_API_KEY | codex login --with-api-key
 func (c *CodexExecutor) ensureAuthenticated() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Running 'codex login status' checks auth and may trigger token refresh
-	cmd := exec.CommandContext(ctx, "codex", "login", "status")
-	err := cmd.Run()
-	return err == nil
+	// One implementation of "is this executor logged in", shared with the check
+	// the remote spawn path runs against a placed host. Running 'codex login
+	// status' checks auth and may trigger token refresh.
+	state, _ := checkExecutorAuth(context.Background(), db.ExecutorCodex)
+	return state != authLoggedOut
 }
 
 // Execute runs a task using Codex CLI.
@@ -429,7 +427,11 @@ func findCodexSessionID(workDir string) string {
 		return ""
 	}
 
-	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	return findCodexSessionIDInDir(workDir, filepath.Join(home, ".codex", "sessions"))
+}
+
+// findCodexSessionIDInDir scans an explicit directory so tests never touch the user's installation.
+func findCodexSessionIDInDir(workDir, sessionsDir string) string {
 	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
 		return ""
 	}

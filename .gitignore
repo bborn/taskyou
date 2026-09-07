@@ -63,3 +63,4 @@ ty-chrome.zip
 
 # Plugin user config (copied from *.example.env)
 examples/plugins/**/config.env
+.task-worktrees-manual/

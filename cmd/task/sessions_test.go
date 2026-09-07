@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 // requireTmux skips the test if tmux is not available.
@@ -211,6 +212,28 @@ func setupCleanupTest(t *testing.T, idTag string) (sessionName string) {
 	t.Setenv("WORKTREE_DB_PATH", dbPath)
 	t.Setenv("WORKTREE_SESSION_ID", "")
 
+	// Run against a PRIVATE tmux server. cleanupOrphanedSessions walks every
+	// task-daemon-* session it can see and kills windows whose task IDs are
+	// missing from the DB — so on the default socket, with this test's empty DB,
+	// it happily killed the live agent windows of the machine running the suite.
+	// That is exactly what happened on a placed host: the agent ran the test
+	// suite, the suite killed the agent's own window, and its shell command came
+	// back "exit code 137".
+	//
+	// TMUX_TMPDIR moves the socket, and both this test's tmux calls and the ones
+	// inside cleanupOrphanedSessions inherit it, so the isolation needs no
+	// production seam. Kept short deliberately: a socket path is capped near 104
+	// bytes and t.TempDir() on darwin is already long.
+	socketDir, err := os.MkdirTemp("/tmp", "tytmux")
+	if err != nil {
+		t.Fatalf("socket dir: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() {
+		osexec.Command("tmux", "kill-server").Run()
+		_ = os.RemoveAll(socketDir)
+	})
+
 	if got := db.DefaultPath(); got != dbPath {
 		t.Skipf("db.DefaultPath() does not honor WORKTREE_DB_PATH (got %q)", got)
 	}
@@ -233,6 +256,13 @@ func TestCleanupOrphanedSessions_KillsWindowForDeletedTask(t *testing.T) {
 	// Task ID has no row in the (empty) DB — pure orphan.
 	const orphanID = 992001
 	makeDaemonSessionWithName(t, sessionName, orphanID)
+	// Killing a window for a task we cannot see is only defensible on a session
+	// we can prove is ours, so the session has to say so. Untagged is unknown,
+	// and unknown windows are left alone — see the untagged case in
+	// cleanup_ownership_test.go.
+	if err := osexec.Command("tmux", "set-option", "-t", sessionName, executor.TmuxOwnerOption, executor.LocalOwnerTag()).Run(); err != nil {
+		t.Fatalf("tag session as ours: %v", err)
+	}
 
 	cleanupOrphanedSessions(false)
 

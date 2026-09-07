@@ -146,9 +146,172 @@ system. The ones dispatched today:
 | `task.blocked` | Task needs input |
 | `task.failed` | Agent execution failed |
 | `task.auth_required` | Executor session needs re-authentication |
+| `task.route` | **Consulted** before a task spawns: which profile runs it. See [Routing](#routing-pre-spawn) |
+| `task.placement` | **Consulted** before a task spawns: which machine runs it. See below |
 
 A plugin may declare any event string; it only runs for events TaskYou actually
 emits, so unknown events are harmless.
+
+## Routing (pre-spawn)
+
+Every other hook is a notification — it fires after the fact and nothing waits for
+it. `task.route` fires *before* a task spawns, TaskYou waits for it, and reads the
+script's **stdout back as a decision**. Stdout is the decision channel; put
+diagnostics on stderr.
+
+```sh
+#!/bin/sh
+echo "CLAUDE_CONFIG_DIR=$HOME/.claude-work"   # run this task under that profile
+echo "REASON=7% of its limits used"           # optional, for the task log
+```
+
+| Key | Effect |
+|-----|--------|
+| `CLAUDE_CONFIG_DIR` | Run the task under that Claude profile (config dir) |
+| `HOLD=1` | Don't start yet; leave it queued and reconsider next tick |
+| `REASON=…` | Free text for the task log |
+
+Unrecognized lines are ignored. Timeout is 15s. Plugins are consulted in name
+order and the first non-empty decision wins.
+
+Failing is safe: no router, a script that errors or prints nothing, or a timeout
+all spawn the task exactly as it would have. A config dir already set by hand, by
+a workflow step, or on the **project** is never overruled — pinning a project's
+config dir is how you opt it out of routing, which matters because a config dir
+carries that account's MCP connectors and their per-profile OAuth logins, and a routed task keeps its profile on
+resume (its Claude session lives in that config dir). `HOLD` leaves a task
+**queued**, never blocked, and is ignored for a manually started task. Only
+Claude tasks are routed — `CLAUDE_CONFIG_DIR` means nothing to the other
+executors.
+
+Routing hooks also get `TASK_EXECUTOR` and `TASK_CLAUDE_CONFIG_DIR`.
+
+Worked example: **claude-profile-router** in the
+[community collection](https://github.com/taskyou/plugins).
+
+## `task.placement` — which machine a task runs on
+
+Most events are fire-and-forget: the script runs in the background and nothing
+waits for it or reads what it says. `task.placement` is one of the two
+exceptions, alongside `task.route` below — ty asks it a question and uses the
+answer.
+Where a task runs has to be decided **before** the executor spawns, and the
+answer has to come back — so this hook is synchronous, bounded by a short
+timeout, and its stdout is parsed.
+
+ty writes the request to the handler's **stdin**:
+
+```json
+{"event":"task.placement",
+ "task":{"id":5228,"title":"Add a consulted task.placement hook",
+         "project":"taskyou","repo_path":"/Users/you/Projects/workflow",
+         "executor":"claude"}}
+```
+
+and reads the answer from its **stdout**:
+
+```json
+{"target":"ol-agents","workdir":"~/projects/engineering",
+ "reason":"most free memory of 2 hosts serving offerlab"}
+```
+
+- **`target`** — the ssh destination to run on. **Empty means run locally.**
+- **`workdir`** — the task's directory *on that host*. A remote path, so a
+  leading `~` is passed through for the remote shell to expand.
+- **`reason`** — why. Always shown to the user (`ty show`, the task log), so
+  write it to explain a surprising placement without further digging.
+
+ty never learns what a host *is*. It asks the question, and runs the answer:
+an empty target uses the local runner — byte for byte what ty has always done —
+and a named target starts the task's tmux session on that host over ssh, in that
+directory. Where it ran is recorded on the task and shown by `ty show` and on the
+board, so a result can be traced back to the machine that produced it.
+
+### Failure behaviour
+
+Failing to *decide* where to run falls back to local. Failing to *run* where you
+were told does not.
+
+| Situation | What ty does |
+|-----------|--------------|
+| No `task.placement` plugin installed | Local. Silent. Nothing is asked, logged or recorded. |
+| Handler answers with an empty target | Local, and the reason is recorded so you can see why. |
+| Handler is slow (over 5s), crashes, exits non-zero, or writes malformed JSON | Local, logged loudly. A hook in the spawn path must never hang a task. |
+| Handler names a host ty cannot reach | **The task fails, visibly.** It is *not* quietly run locally — that would put the load straight back on the machine placement exists to unload, on the days you are least likely to notice. |
+
+If several plugins declare `task.placement` they are consulted in name order and
+the first to name a host wins; a handler that answers "local" lets the next one
+try.
+
+### The reference handler
+
+[`extensions/ty-on`](../extensions/ty-on/README.md) is a working resolver: it
+reads the [`on`](https://github.com/bborn/on) CLI's host inventory and answers
+with the host that serves the task's project (picking the one with the most free
+memory when several do). Build and install it with:
+
+```bash
+make install-ty-on     # builds the binary and installs it as a plugin
+make uninstall-ty-on   # every task goes back to running locally
+```
+
+### How ty watches a placed task
+
+ty holds **one standing connection per host**, not one per task. A small POSIX
+shell agent runs on the host, walks every ty window each tick, and streams back a
+single snapshot covering all of them, so the cost of watching a fleet is
+`O(hosts)` rather than `O(tasks)`. Before this, each task cost two ssh round
+trips per tick — one for its window, one to capture its pane — which is a
+thousand ssh spawns every fifteen seconds at a few hundred agents.
+
+The agent is a shell script rather than a ty binary on purpose: it needs no
+install, no cross-compilation for the host's architecture, and no version
+agreement between the two ends. It requires only `tmux`.
+
+The direction matters as much as the cost. **ty holds the connection outbound**,
+exactly as it does for every other remote command. Nothing listens on your
+machine, no port is opened, no reverse tunnel exists, and no host is given a way
+to reach back on its own initiative — the agent speaks only by writing to the
+stdout of a process ty started.
+
+If the channel cannot speak for a host — none started yet, or its last snapshot
+is stale — it reports "I don't know" and ty falls back to probing that task
+directly. It can make watching cheaper, never wrong.
+
+### How a remote agent reports it finished
+
+The `taskyou_*` MCP tools are stdio, so a remotely placed agent's MCP server
+would talk to its own host's database rather than to ty. Instead, ty installs
+`.ty/signal` in the task's worktree and tells the agent about it in the prompt:
+
+```bash
+.ty/signal done        "<one line saying what you did>"
+.ty/signal needs-input "<the question you need answered>"
+.ty/signal failed      "<what stopped you>"
+```
+
+The script drops a file in a spool directory; the host agent drains it onto the
+connection ty already holds open. The sentence the agent writes reaches the board
+as the task's message — usually the only explanation of how a task on another
+machine ended.
+
+Without this ty had to infer completion from the screen: an agent that stopped
+repainting for two minutes was called finished. That is wrong in both directions
+— an agent pausing to think looks done, and an agent that finished in six seconds
+is parked two minutes later labelled "needs input" when nothing was asked. The
+idle heuristic is still there underneath, for a host where the script could not
+be installed, and ty says so when it falls back.
+
+### Current boundaries
+
+- Only the `claude` executor can be launched remotely so far. A task using
+  another executor fails visibly rather than quietly running here.
+- Attachments are staged in the local workspace, so they are not available to a
+  remotely-placed task. A file you drop into a remote agent's pane is a path on
+  *your* machine, and the agent cannot open it.
+- A host must already have a checkout of the project, mapped in the resolver's
+  inventory. ty creates the task's worktree there, but does not clone a project
+  the host has never seen.
 
 ## Environment
 

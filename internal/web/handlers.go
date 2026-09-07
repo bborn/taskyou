@@ -576,7 +576,8 @@ func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logs, err := s.db.GetTaskLogs(id, limit)
+	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	logs, err := s.db.GetTaskLogsBefore(id, before, limit)
 	if err != nil {
 		jsonErr(w, "failed to load logs", http.StatusInternalServerError)
 		return
