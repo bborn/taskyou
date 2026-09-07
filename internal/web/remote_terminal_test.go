@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/gorilla/websocket"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestRemoteShellAPIAndTerminalRouteEveryOperationToHost(t *testing.T) {

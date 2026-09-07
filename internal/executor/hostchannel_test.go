@@ -172,8 +172,8 @@ func TestHostAgentScriptRunsUnderPlainSh(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", hostAgentProgram())
-	cmd.Env = append(cmd.Environ(), "PATH="+dir+":"+pathEnv())
+	cmd := exec.CommandContext(ctx, "sh", "-c", strings.ReplaceAll(hostAgentProgram(), remoteSpoolDir, shellQuote(dir+"/events")))
+	cmd.Env = append(cmd.Environ(), "PATH="+dir+":"+pathEnv(), "TMPDIR="+dir)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -204,3 +204,16 @@ func TestHostAgentScriptRunsUnderPlainSh(t *testing.T) {
 }
 
 func pathEnv() string { return os.Getenv("PATH") }
+
+func TestFailedCapturePreservesWindowExistence(t *testing.T) {
+	c := &hostChannel{}
+	c.consume(strings.NewReader("S\nU daemon:task-42\n.\n"), map[string]string{})
+	win, live, known := c.Window("daemon:task-42")
+	if !live || !known || win.Content != "" {
+		t.Fatalf("failed capture lost window: %+v %v %v", win, live, known)
+	}
+	c.consume(strings.NewReader("S\n!\nH\n"), map[string]string{})
+	if _, _, known = c.Window("daemon:task-42"); known {
+		t.Fatal("failed enumeration published absence")
+	}
+}

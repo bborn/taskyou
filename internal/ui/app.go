@@ -49,6 +49,7 @@ const (
 	ViewRetry
 	ViewAttachments
 	ViewChangeStatus
+	ViewPlacement
 	ViewCommandPalette
 	ViewProjectDetectConfirm // Offer to create a project for the current git repo
 	ViewWelcome              // first-run fork: set up a project vs start a task
@@ -79,6 +80,7 @@ type KeyMap struct {
 	Help               key.Binding
 	Quit               key.Binding
 	ChangeStatus       key.Binding
+	PlaceTask          key.Binding
 	CommandPalette     key.Binding
 	ToggleDangerous    key.Binding
 	QueueDangerous     key.Binding
@@ -119,7 +121,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.CommandPalette, k.Settings, k.Routines},
-		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
+		{k.ChangeStatus, k.PlaceTask, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
 }
@@ -199,6 +201,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
 		),
+		PlaceTask: key.NewBinding(key.WithKeys("@"), key.WithHelp("@", "placement")),
 		ChangeStatus: key.NewBinding(
 			key.WithKeys("S"),
 			key.WithHelp("S", "status"),
@@ -488,6 +491,12 @@ type AppModel struct {
 	attachmentsView *AttachmentsModel
 
 	// Change status view state
+	placementForm           *huh.Form
+	placementTarget         string
+	placementDir            string
+	placementTaskID         int64
+	placementBusy           bool
+	placementMessage        string
 	changeStatusForm        *huh.Form
 	changeStatusValue       string
 	pendingChangeStatusTask *db.Task
@@ -747,6 +756,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg, reloadTokenMsg:
 		isSystemMsg = true
+	case placementFinishedMsg:
+		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
 		// main switch to update the notification banner, not be routed to a view.
@@ -754,6 +765,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if !isSystemMsg {
+		if m.currentView == ViewPlacement {
+			return m.updatePlacement(msg)
+		}
 		// Handle form updates first (needs all message types)
 		if m.currentView == ViewNewTask && m.newTaskForm != nil {
 			return m.updateNewTaskForm(msg)
@@ -917,6 +931,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.currentView == ViewDetail && key.Matches(msg, m.keys.PlaceTask) && m.selectedTask != nil {
+			return m.showPlacement(m.selectedTask)
+		}
 		// Route to current view
 		switch m.currentView {
 		case ViewDashboard:
@@ -940,6 +957,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDetail(msg)
 		}
 
+	case placementFinishedMsg:
+		m.placementBusy = false
+		if msg.err != nil {
+			m.placementMessage = msg.err.Error()
+		} else {
+			m.placementMessage = strings.Join(msg.result.Messages, "\n")
+			cmds = append(cmds, m.loadTasks())
+		}
 	case tasksLoadedMsg:
 		m.tasksLoadInFlight = false
 		var nextLoad tea.Cmd
@@ -1744,6 +1769,8 @@ func (m *AppModel) View() string {
 		if m.attachmentsView != nil {
 			return m.attachmentsView.View()
 		}
+	case ViewPlacement:
+		return m.viewPlacement()
 	case ViewChangeStatus:
 		return m.viewChangeStatus()
 	case ViewCommandPalette:
@@ -2208,6 +2235,10 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 
+	case key.Matches(msg, m.keys.PlaceTask):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m.showPlacement(task)
+		}
 	case key.Matches(msg, m.keys.ChangeStatus):
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showChangeStatus(task)

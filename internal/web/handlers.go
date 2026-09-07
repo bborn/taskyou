@@ -1060,36 +1060,38 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // --- JSON conversion helpers ---
 
 type taskJSON struct {
-	ID             int64         `json:"id"`
-	Title          string        `json:"title"`
-	Body           string        `json:"body"`
-	Status         string        `json:"status"`
-	Type           string        `json:"type"`
-	Project        string        `json:"project"`
-	Executor       string        `json:"executor"`
-	Pinned         bool          `json:"pinned"`
-	Tags           string        `json:"tags"`
-	PermissionMode string        `json:"permission_mode"`
-	BranchName     string        `json:"branch_name"`
-	Port           int           `json:"port,omitempty"`
-	WorktreePath   string        `json:"worktree_path,omitempty"`
-	HasExecutor    bool          `json:"has_executor"`
-	EffortLevel    string        `json:"effort_level,omitempty"`
-	Model          string        `json:"model,omitempty"`
-	SourceBranch   string        `json:"source_branch,omitempty"`
-	DaemonSession  string        `json:"daemon_session,omitempty"`
-	TmuxWindowID   string        `json:"tmux_window_id,omitempty"`
-	ClaudePaneID   string        `json:"claude_pane_id,omitempty"`
-	ShellPaneID    string        `json:"shell_pane_id,omitempty"`
-	PRURL          string        `json:"pr_url"`
-	PRNumber       int           `json:"pr_number,omitempty"`
-	PR             *prStatusJSON `json:"pr,omitempty"`
-	Summary        string        `json:"summary,omitempty"`
-	Stand          string        `json:"stand,omitempty"`
-	CreatedAt      string        `json:"created_at"`
-	UpdatedAt      string        `json:"updated_at"`
-	StartedAt      string        `json:"started_at,omitempty"`
-	CompletedAt    string        `json:"completed_at,omitempty"`
+	PlacementTarget string        `json:"placement_target"`
+	PlacementReason string        `json:"placement_reason"`
+	ID              int64         `json:"id"`
+	Title           string        `json:"title"`
+	Body            string        `json:"body"`
+	Status          string        `json:"status"`
+	Type            string        `json:"type"`
+	Project         string        `json:"project"`
+	Executor        string        `json:"executor"`
+	Pinned          bool          `json:"pinned"`
+	Tags            string        `json:"tags"`
+	PermissionMode  string        `json:"permission_mode"`
+	BranchName      string        `json:"branch_name"`
+	Port            int           `json:"port,omitempty"`
+	WorktreePath    string        `json:"worktree_path,omitempty"`
+	HasExecutor     bool          `json:"has_executor"`
+	EffortLevel     string        `json:"effort_level,omitempty"`
+	Model           string        `json:"model,omitempty"`
+	SourceBranch    string        `json:"source_branch,omitempty"`
+	DaemonSession   string        `json:"daemon_session,omitempty"`
+	TmuxWindowID    string        `json:"tmux_window_id,omitempty"`
+	ClaudePaneID    string        `json:"claude_pane_id,omitempty"`
+	ShellPaneID     string        `json:"shell_pane_id,omitempty"`
+	PRURL           string        `json:"pr_url"`
+	PRNumber        int           `json:"pr_number,omitempty"`
+	PR              *prStatusJSON `json:"pr,omitempty"`
+	Summary         string        `json:"summary,omitempty"`
+	Stand           string        `json:"stand,omitempty"`
+	CreatedAt       string        `json:"created_at"`
+	UpdatedAt       string        `json:"updated_at"`
+	StartedAt       string        `json:"started_at,omitempty"`
+	CompletedAt     string        `json:"completed_at,omitempty"`
 }
 
 // prStatusJSON is the live PR badge payload surfaced on board cards: the PR's
@@ -1115,6 +1117,7 @@ type logJSON struct {
 
 func toTaskJSON(t *db.Task) *taskJSON {
 	tj := &taskJSON{
+		PlacementTarget: t.PlacementTarget, PlacementReason: t.PlacementReason,
 		ID:             t.ID,
 		Title:          t.Title,
 		Body:           t.Body,

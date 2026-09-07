@@ -5,7 +5,7 @@
         "GET /api/plugins/actions",
         "POST /api/plugins/actions/run"
       ],
-      "note": "A / detail action picker — list and run plugin actions on a task; same runner as the CLI and command palette"
+      "note": "A / detail action picker \u2014 list and run plugin actions on a task; same runner as the CLI and command palette"
     },
     "Archive": {
       "api": [
@@ -155,10 +155,17 @@
         "POST /api/tasks/{id}/shell",
         "GET /api/tasks/{id}/terminal"
       ],
-      "note": "Shell tab in the detail terminal panel — local or remotely placed workdir shell; remote desktop and browser input/output use the host-aware terminal API"
+      "note": "Shell tab in the detail terminal panel \u2014 local or remotely placed workdir shell; remote desktop and browser input/output use the host-aware terminal API"
     },
     "Up": {
       "note": "Arrow keys move board selection"
+    },
+    "PlaceTask": {
+      "api": [
+        "GET /api/tasks/{id}/placement",
+        "POST /api/tasks/{id}/placement"
+      ],
+      "note": "@ opens placement in the TUI; task detail placement panel in desktop and browser."
     }
   },
   "gui_only": [

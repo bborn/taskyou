@@ -464,3 +464,31 @@ func request(project string) Request {
 		},
 	}
 }
+
+func TestExecutorEligibilityAndSSHDestination(t *testing.T) {
+	path := writeInventory(t, `hosts:
+  build:
+    ssh: worker@build.example
+    capabilities: ["executor:codex"]
+    repos: {app: /srv/app}
+`)
+	r := Resolver{InventoryPath: path, Prober: unusedProber{t}}
+	got := r.Resolve(context.Background(), Request{Task: Task{Project: "app", Executor: "codex"}})
+	if got.Target != "worker@build.example" {
+		t.Fatalf("destination = %+v", got)
+	}
+	for _, executor := range []string{"claude", "gemini"} {
+		got = r.Resolve(context.Background(), Request{Task: Task{Project: "app", Executor: executor, RemoteRequired: true}})
+		if got.Target != "" || !got.Unavailable {
+			t.Fatalf("ineligible executor placed: %+v", got)
+		}
+	}
+}
+
+func TestRequiredRemoteDoesNotFallbackOnProbeFailure(t *testing.T) {
+	r := Resolver{InventoryPath: writeInventory(t, fleet), Prober: &stubProber{err: errors.New("offline")}}
+	got := r.Resolve(context.Background(), Request{Task: Task{Project: "taskyou", RemoteRequired: true}})
+	if !got.Unavailable || got.Target != "" {
+		t.Fatalf("fallback: %+v", got)
+	}
+}

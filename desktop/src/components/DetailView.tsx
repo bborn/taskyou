@@ -5,6 +5,7 @@ import { subscribeTaskLogs } from "../api/sse";
 import type { Dependencies, LogLine, Task } from "../api/types";
 import { openExternal, openInEditor } from "../tauri";
 import { store, useAppState } from "../store";
+import { PlacementPanel } from "./PlacementPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { LogList } from "./LogList";
 import { mergeRecentLogs } from "../lib/logs";
@@ -304,6 +305,7 @@ export function DetailView({ taskId }: { taskId: number }) {
             </>
           )}
 
+          <PlacementPanel key={task.id} taskId={task.id} />
           <SectionTitle>Dependencies</SectionTitle>
           <div className="flex flex-col gap-1 text-[12.5px]">
             {deps?.blockers?.map((d) => (

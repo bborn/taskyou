@@ -147,16 +147,17 @@ func isShellCommand(cmd string) bool {
 
 // DetailModel represents the task detail view.
 type DetailModel struct {
-	paneWork sync.WaitGroup
-	task     *db.Task
-	logs     []*db.TaskLog
-	database *db.DB
-	executor *executor.Executor
-	viewport viewport.Model
-	width    int
-	height   int
-	ready    bool
-	prInfo   *github.PRInfo
+	hostHealth db.HostHealth
+	paneWork   sync.WaitGroup
+	task       *db.Task
+	logs       []*db.TaskLog
+	database   *db.DB
+	executor   *executor.Executor
+	viewport   viewport.Model
+	width      int
+	height     int
+	ready      bool
+	prInfo     *github.PRInfo
 
 	// Task position in column (1-indexed)
 	positionInColumn int
@@ -699,6 +700,7 @@ func (m *DetailModel) Refresh() tea.Cmd {
 // detailRefreshMsg carries read-only observations from a private snapshot.
 // The owner prevents a late result from updating another detail view.
 type detailRefreshMsg struct {
+	hostHealth                                 db.HostHealth
 	owner                                      *DetailModel
 	previousTask                               *db.Task
 	task                                       *db.Task
@@ -726,6 +728,7 @@ func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
 	lastLogCount, logsLoading := m.lastLogCount, m.logsLoading
 	return func() tea.Msg {
 		result.task, _ = worker.database.GetTask(taskCopy.ID)
+		result.hostHealth, _ = worker.database.RemoteHostHealth(taskCopy.PlacementTarget)
 		count, err := worker.database.GetTaskLogCount(taskCopy.ID)
 		if err == nil && count != lastLogCount && !logsLoading {
 			result.logs, _ = worker.database.GetTaskLogs(taskCopy.ID, 500)
@@ -752,6 +755,9 @@ func (m *DetailModel) handleRefreshSnapshot(msg detailRefreshMsg) tea.Cmd {
 	m.refreshInFlight = false
 	if m.task == nil || msg.previousTask == nil || m.task.ID != msg.previousTask.ID {
 		return nil
+	}
+	if m.task.PlacementTarget == msg.previousTask.PlacementTarget {
+		m.hostHealth = msg.hostHealth
 	}
 	// Task events can replace the task while the read is in flight. Preserve
 	// that newer state instead of restoring a stale database snapshot.
@@ -3488,6 +3494,20 @@ func (m *DetailModel) renderHeader() string {
 	}
 
 	lines := []string{headerLayout}
+	if t.PlacementTarget != "" {
+		health := m.hostHealth.State
+		if health == "" {
+			health = "unknown"
+		}
+		line := "Host: " + t.PlacementTarget + " · " + health + " · @ placement"
+		if m.hostHealth.LastSeen != "" {
+			line += " · last seen " + m.hostHealth.LastSeen
+		}
+		lines = append(lines, Dim.Render(truncateRunes(line, maxW)))
+		if t.PlacementReason != "" {
+			lines = append(lines, Dim.Render(truncateRunes(t.PlacementReason, maxW)))
+		}
+	}
 
 	// Where a remotely placed task actually is. Informational, not an error, and
 	// left-aligned on its own line so a worktree path or an ssh command survives

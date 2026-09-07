@@ -1,11 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -24,14 +22,6 @@ import (
 //
 // A decision written here is a decision like any other: sticky, reused by every
 // later retry, and visible with its reason.
-
-// localTargetNames are the words that mean "this machine". The resolver's wire
-// format spells local as an empty target, which is unusable on a command line.
-var localTargetNames = map[string]bool{"local": true, "here": true, "localhost": true}
-
-// placePreflightTimeout bounds the reachability check on a named host. Placing a
-// task is interactive, so this can be more generous than the spawn path's.
-const placePreflightTimeout = 30 * time.Second
 
 func newPlaceCmd() *cobra.Command {
 	var dir string
@@ -143,29 +133,4 @@ func describePlacement(task *db.Task, p db.TaskPlacement) string {
 		fmt.Fprintf(&b, "  Reason: %s\n", p.Reason)
 	}
 	return b.String()
-}
-
-// placeWhere names a target for a sentence about where a task RUNS.
-func placeWhere(target string) string {
-	if target == "" {
-		return "here"
-	}
-	return "on " + target
-}
-
-// preflightHost checks the host can actually run a task before a placement that
-// names it is written, and returns the absolute directory it resolved to.
-//
-// Verifying at placement time rather than at spawn time is the whole point of
-// naming a host by hand: a typo should fail here, in front of you, not six hours
-// later when the daemon gets to the task.
-func preflightHost(ctx context.Context, host, workDir string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, placePreflightTimeout)
-	defer cancel()
-
-	resolved, err := executor.RemoteRunner{Host: host, WorkDir: workDir}.Preflight(ctx)
-	if err != nil {
-		return "", fmt.Errorf("%s cannot run this task: %w", host, err)
-	}
-	return resolved, nil
 }

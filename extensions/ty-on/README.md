@@ -42,14 +42,15 @@ Response:
 }
 ```
 
-`target` names a host in the `on` inventory. `workdir` is that project's
+`target` is the selected host's `ssh` destination (or its inventory name when `ssh` is omitted). `workdir` is that project's
 checkout path on that host — a remote path, so a leading `~` is left alone for
 the remote shell to expand.
 
 **An empty `target` means "run locally"**, and it is the answer to every
 question ty-on cannot confidently answer: unknown project, missing inventory, no
-reachable host, malformed request, `on` not installed. ty-on never fails a task
-and never guesses a host — it exits 0 in all cases.
+reachable host, malformed request, `on` not installed. When the request includes
+`task.remote_required: true`, these answers include `unavailable: true`, so ty
+stops before launching locally. The resolver exits 0 for either decision.
 
 `reason` is always populated and is shown to the user, so it is written to
 explain a surprising placement without further digging.
@@ -65,14 +66,18 @@ hosts:
   ol-agents:
     ssh: ol-agents
     workdir: ~/projects
-    capabilities: [agent, ruby, node]
+    capabilities: [agent, ruby, node, "executor:claude", "executor:codex"]
     repos:
       offerlab: ~/projects/engineering
 ```
 
 Given a task's project:
 
-1. Find the hosts whose `repos` map contains that project.
+1. Find the hosts whose `repos` map contains that project and whose executor
+   capabilities allow the task. Remote adapters currently support Claude and
+   Codex. If a host declares any `executor:` capabilities, the requested executor
+   must be among them. Legacy inventories without executor declarations remain
+   eligible; ty checks the executable on the destination before launch.
 2. **None** → local. The fleet has no checkout to run in.
 3. **One** → that host. No probing: this path answers from the file alone, so it
    works on a machine that does not have `on` installed at all.
@@ -82,7 +87,7 @@ Given a task's project:
    answer is stable.
 
 `on` is an optional dependency. If it is missing, or fails, or is slow, the task
-stays local with a reason saying so.
+stays local with a reason saying so, unless the project requires remote execution.
 
 ### Speed
 
@@ -148,6 +153,5 @@ the rest — creating the task's worktree on that host, starting the session, an
 watching it over the single standing connection it keeps per host. Syncing a
 working tree for interactive use is still `on`'s job.
 
-Host `capabilities` are parsed but not yet used for filtering — the rules above
-are deliberately the whole policy. Matching an executor against a host's
-capabilities is the obvious next lever.
+Project policy can require an eligible remote host; see
+[remote execution](../../docs/remote-execution.md).

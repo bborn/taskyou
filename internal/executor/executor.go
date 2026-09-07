@@ -519,6 +519,19 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 			continue
 		}
 
+		// Reconcile the durable inbox even when the remote process survived a
+		// coordinator restart and no per-task poller has been reattached yet.
+		if task.PlacementTarget != "" {
+			if ev, ok := e.taskSignal(task.PlacementTarget, task.ID); ok {
+				e.applyHostSignal(task.ID, ev)
+				current, err := e.db.GetTask(task.ID)
+				if err == nil && current != nil && current.Status == db.StatusProcessing {
+					_ = e.updateStatus(task.ID, db.StatusBlocked)
+				}
+				continue
+			}
+		}
+
 		// A processing task with a live executor window is genuinely still
 		// running (e.g. the tmux server survived a daemon restart) - leave it.
 		// For a placed task that window is on another machine, so this asks the

@@ -34,6 +34,8 @@ func TestParseHostEvent(t *testing.T) {
 		{"no task id", "E done", hostEvent{}, false},
 		{"non-numeric id", "E abc done", hostEvent{}, false},
 		{"zero id", "E 0 done", hostEvent{}, false},
+		{"corrupt durable detail", "E 42 abc event.evt done !!!", hostEvent{}, false},
+		{"unsafe durable entry", "E 42 abc ../event done eA==", hostEvent{}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,13 +126,13 @@ func TestSignalScriptAndHostAgentRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	sig := filepath.Join(work, "signal")
-	if err := os.WriteFile(sig, []byte(signalScript()), 0o755); err != nil {
+	if err := os.WriteFile(sig, []byte(strings.ReplaceAll(signalScript(), remoteSpoolDir, shellQuote(filepath.Join(home, ".ty-events")))), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	// The agent signals.
 	run := exec.Command(sig, "done", "built the thing")
-	run.Env = append(os.Environ(), "HOME="+home, "WORKTREE_TASK_ID=4242")
+	run.Env = append(os.Environ(), "WORKTREE_RUN_ID=0123456789abcdef", "WORKTREE_TASK_ID=4242")
 	if out, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("signal script failed: %v (%s)", err, out)
 	}
@@ -138,8 +140,8 @@ func TestSignalScriptAndHostAgentRoundTrip(t *testing.T) {
 	// The host agent drains it.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	agent := exec.CommandContext(ctx, "sh", "-c", hostAgentProgram())
-	agent.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":"+os.Getenv("PATH"))
+	agent := exec.CommandContext(ctx, "sh", "-c", strings.ReplaceAll(hostAgentProgram(), remoteSpoolDir, shellQuote(filepath.Join(home, ".ty-events"))))
+	agent.Env = append(os.Environ(), "TMPDIR="+home, "PATH="+bin+":"+os.Getenv("PATH"))
 	out, err := agent.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -162,8 +164,8 @@ func TestSignalScriptAndHostAgentRoundTrip(t *testing.T) {
 				t.Errorf("detail = %q, want %q", ev.Detail, "built the thing")
 			}
 			// The spool entry must be consumed, or it replays every tick.
-			if files, _ := filepath.Glob(filepath.Join(home, ".ty-events", "*.evt")); len(files) != 0 {
-				t.Errorf("spool still holds %v", files)
+			if files, _ := filepath.Glob(filepath.Join(home, ".ty-events", "*.evt")); len(files) != 1 {
+				t.Errorf("unacknowledged event must remain in spool: %v", files)
 			}
 			return
 		}
@@ -255,5 +257,34 @@ func TestDoneSignalRespectsAFailingVerifyGate(t *testing.T) {
 	}
 	if !res.NeedsInput {
 		t.Errorf("want the task parked for input, got %+v", res)
+	}
+}
+
+func TestRemoteAcknowledgementFollowsDurablePersistence(t *testing.T) {
+	e, d := placementExecutor(t, t.TempDir())
+	_ = e
+	task := placementTestTask(t, d)
+	run, err := d.BeginRemoteRun(task.ID, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "ack")
+	stubSSH(t, "#!/bin/sh\nprintf ack >> "+shellQuote(marker)+"\n")
+	c := &hostChannel{database: d, coordinator: "coordinator", host: "build"}
+	ev := hostEvent{TaskID: task.ID, RunID: run, ID: "event-1.evt", Kind: eventDone, Detail: "finished"}
+	c.persistSignal(ev)
+	if _, ok, err := d.RemoteSignal(task.ID, "build"); err != nil || !ok {
+		t.Fatalf("not durable: %v %v", ok, err)
+	}
+	before, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal("event not acknowledged", err)
+	}
+	d.Close()
+	ev.ID = "event-2.evt"
+	c.persistSignal(ev)
+	after, _ := os.ReadFile(marker)
+	if string(before) != string(after) {
+		t.Fatal("acknowledged an event after DB persistence failed")
 	}
 }

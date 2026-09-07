@@ -205,7 +205,7 @@ ty writes the request to the handler's **stdin**:
 {"event":"task.placement",
  "task":{"id":5228,"title":"Add a consulted task.placement hook",
          "project":"taskyou","repo_path":"/Users/you/Projects/workflow",
-         "executor":"claude"}}
+         "executor":"claude","remote_required":false}}
 ```
 
 and reads the answer from its **stdout**:
@@ -215,7 +215,10 @@ and reads the answer from its **stdout**:
  "reason":"most free memory of 2 hosts serving offerlab"}
 ```
 
-- **`target`** — the ssh destination to run on. **Empty means run locally.**
+- **`target`** — the SSH destination to run on. Empty means run locally unless
+  `unavailable` is true or the project requires remote execution.
+- **`unavailable`** — optional boolean: no eligible placement exists. This stops
+  resolution and fails the run visibly; later handlers are not consulted.
 - **`workdir`** — the task's directory *on that host*. A remote path, so a
   leading `~` is passed through for the remote shell to expand.
 - **`reason`** — why. Always shown to the user (`ty show`, the task log), so
@@ -229,8 +232,10 @@ board, so a result can be traced back to the machine that produced it.
 
 ### Failure behaviour
 
-Failing to *decide* where to run falls back to local. Failing to *run* where you
-were told does not.
+By default, failing to decide where to run falls back to local. With
+`placement.remote_required: true` in `.taskyou.yml`, missing handlers, errors,
+empty decisions and recorded local placements all stop the run before a local
+launch. A failed remote preflight never falls back to local.
 
 | Situation | What ty does |
 |-----------|--------------|
@@ -240,8 +245,8 @@ were told does not.
 | Handler names a host ty cannot reach | **The task fails, visibly.** It is *not* quietly run locally — that would put the load straight back on the machine placement exists to unload, on the days you are least likely to notice. |
 
 If several plugins declare `task.placement` they are consulted in name order and
-the first to name a host wins; a handler that answers "local" lets the next one
-try.
+the first to name a host or return `unavailable: true` wins; a handler that
+answers "local" lets the next one try.
 
 ### The reference handler
 
@@ -276,7 +281,11 @@ stdout of a process ty started.
 
 If the channel cannot speak for a host — none started yet, or its last snapshot
 is stale — it reports "I don't know" and ty falls back to probing that task
-directly. It can make watching cheaper, never wrong.
+directly. Failed enumeration never becomes an empty successful snapshot, and
+a failed pane capture preserves the fact that its window exists. A stream with
+no incoming data for 30 seconds is restarted, with reconnect delays of 10, 20,
+then at most 30 seconds. Host health and its last successful observation are
+available through the placement API, TUI and desktop/browser detail views.
 
 ### How a remote agent reports it finished
 
@@ -290,8 +299,11 @@ would talk to its own host's database rather than to ty. Instead, ty installs
 .ty/signal failed      "<what stopped you>"
 ```
 
-The script drops a file in a spool directory; the host agent drains it onto the
-connection ty already holds open. The sentence the agent writes reaches the board
+The script atomically writes a private file under
+`~/.ty-events/<coordinator-id>/`. Each event carries the task, run and event IDs.
+The host streams it until ty persists it in SQLite and acknowledges that exact
+file. Duplicate delivery is harmless; previous runs and other hosts cannot
+change the current run. Persisted signals survive coordinator restarts. The sentence the agent writes reaches the board
 as the task's message — usually the only explanation of how a task on another
 machine ended.
 
@@ -304,8 +316,9 @@ be installed, and ty says so when it falls back.
 
 ### Current boundaries
 
-- Only the `claude` executor can be launched remotely so far. A task using
-  another executor fails visibly rather than quietly running here.
+- The `claude` and `codex` executors can be launched remotely. Other executors
+  require local placement. Remote launches start a new agent session; moving
+  carries code and a handoff, not the native agent conversation.
 - Attachments are staged in the local workspace, so they are not available to a
   remotely-placed task. A file you drop into a remote agent's pane is a path on
   *your* machine, and the agent cannot open it.

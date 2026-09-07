@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // One long-lived connection per HOST, replacing one poller per TASK.
@@ -69,7 +71,10 @@ type hostSnapshot struct {
 
 // hostChannel is the single connection to one host.
 type hostChannel struct {
-	host string
+	host        string
+	database    *db.DB
+	coordinator string
+	lastRead    time.Time
 
 	mu   sync.RWMutex
 	snap hostSnapshot
@@ -121,9 +126,10 @@ done
 sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-16; else cksum | cut -d" " -f1; fi; }
 while :; do
   printf 'S\n'
-  tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | while IFS= read -r w; do
+  if tmux list-windows -a -F '#{session_name}:#{window_name}' >"$state/windows" 2>/dev/null; then
+  while IFS= read -r w; do
     case "$w" in *:task-[0-9]*) ;; *) continue ;; esac
-    c=$(tmux capture-pane -p -t "$w" 2>/dev/null) || continue
+    c=$(tmux capture-pane -p -t "$w" 2>/dev/null) || { printf 'U %s\n' "$w"; continue; }
     h=$(printf '%s' "$c" | sum)
     f="$state/$(printf '%s' "$w" | tr -c 'A-Za-z0-9' '_')"
     if [ "$h" = "$(cat "$f" 2>/dev/null)" ]; then
@@ -132,24 +138,31 @@ while :; do
       printf '%s' "$h" >"$f"
       printf 'W %s %s %s\n' "$w" "$h" "$(printf '%s' "$c" | base64 | tr -d '\n')"
     fi
-  done
+  done <"$state/windows"
+  printf '.\n'
+  else
+    printf '!\n'
+  fi
   for f in "$spool"/*.evt; do
     [ -f "$f" ] || continue
-    id=${f##*/}; id=${id%%.*}
-    while IFS=' ' read -r kind detail || [ -n "$kind" ]; do
-      [ -n "$kind" ] && printf 'E %s %s %s\n' "$id" "$kind" "$detail"
+    name=${f##*/}
+    while IFS=' ' read -r id run kind detail || [ -n "$kind" ]; do
+      [ -n "$kind" ] && printf 'E %s %s %s %s %s\n' "$id" "$run" "$name" "$kind" "$detail"
     done <"$f"
-    rm -f "$f"
   done
-  printf '.\n'
+  printf 'H\n'
   sleep "$tick"
 done
 `
 
 // hostAgentProgram is the script with ty's tick baked in, so the interval has one
 // definition on this side rather than a default hidden in the shell.
-func hostAgentProgram() string {
-	return fmt.Sprintf("TY_HOST_TICK=%d\n", int(hostAgentTick.Seconds())) +
+func hostAgentProgram(coordinators ...string) string {
+	coordinator := "legacy"
+	if len(coordinators) > 0 {
+		coordinator = coordinators[0]
+	}
+	return "WORKTREE_COORDINATOR_ID=" + shellQuote(coordinator) + "\n" + fmt.Sprintf("TY_HOST_TICK=%d\n", int(hostAgentTick.Seconds())) +
 		strings.ReplaceAll(hostAgentScript, spoolToken, remoteSpoolDir)
 }
 
@@ -181,13 +194,28 @@ func (c *hostChannel) consume(r io.Reader, carry map[string]string) {
 	pending := map[string]hostWindow{}
 	for scanner.Scan() {
 		line := scanner.Text()
+		c.mu.Lock()
+		c.lastRead = time.Now()
+		c.mu.Unlock()
 		switch {
+		case line == "!":
+			c.mu.Lock()
+			c.snap = hostSnapshot{}
+			c.mu.Unlock()
+			if c.database != nil {
+				_ = c.database.RecordHostHealth(c.host, "Could not enumerate remote windows", false)
+			}
+		case strings.HasPrefix(line, "U "):
+			pending[strings.TrimPrefix(line, "U ")] = hostWindow{}
 		case line == "S":
 			pending = map[string]hostWindow{}
 		case line == ".":
 			c.mu.Lock()
 			c.snap = hostSnapshot{At: time.Now(), Windows: pending}
 			c.mu.Unlock()
+			if c.database != nil {
+				_ = c.database.RecordHostHealth(c.host, "", true)
+			}
 			pending = map[string]hostWindow{}
 		case strings.HasPrefix(line, "W "):
 			target, win := parseHostWindow(line, carry)
@@ -200,6 +228,10 @@ func (c *hostChannel) consume(r io.Reader, carry map[string]string) {
 			// meaningful on its own, and holding it back would add a tick of delay
 			// to the one thing this exists to make immediate.
 			if ev, ok := parseHostEvent(line); ok {
+				if c.database != nil {
+					c.persistSignal(ev)
+					continue
+				}
 				c.mu.Lock()
 				if c.events == nil {
 					c.events = map[int64]hostEvent{}
@@ -230,14 +262,53 @@ func parseHostWindow(line string, carry map[string]string) (string, hostWindow) 
 // run keeps the agent alive on the host, redialling until the channel is stopped.
 func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec.Cmd, io.Reader, error)) {
 	defer close(c.done)
+	delay := hostChannelRetryDelay
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		cmd, out, err := dial(ctx)
+		connectionCtx, cancel := context.WithCancel(ctx)
+		c.mu.Lock()
+		c.lastRead = time.Now()
+		c.mu.Unlock()
+		cmd, out, err := dial(connectionCtx)
 		if err == nil {
+			stopped := make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(hostAgentTick)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopped:
+						return
+					case <-connectionCtx.Done():
+						return
+					case <-ticker.C:
+						c.mu.RLock()
+						stale := time.Since(c.lastRead) > hostSnapshotTTL
+						c.mu.RUnlock()
+						if stale {
+							cancel()
+							_ = cmd.Process.Kill()
+							return
+						}
+					}
+				}
+			}()
 			c.consume(out, map[string]string{})
+			close(stopped)
 			_ = cmd.Wait()
+		}
+		cancel()
+		c.mu.Lock()
+		healthy := !c.snap.At.IsZero() && time.Since(c.snap.At) < hostSnapshotTTL
+		c.snap = hostSnapshot{}
+		c.mu.Unlock()
+		if healthy {
+			delay = hostChannelRetryDelay
+		}
+		if c.database != nil {
+			_ = c.database.RecordHostHealth(c.host, "Connection interrupted; reconnecting", false)
 		}
 		// The agent exited: the host rebooted, the link dropped, tmux went away.
 		// Snapshots go stale on their own (hostSnapshotTTL), so callers fall back
@@ -245,18 +316,35 @@ func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(hostChannelRetryDelay):
+		case <-time.After(delay):
+			if delay < 30*time.Second {
+				delay *= 2
+				if delay > 30*time.Second {
+					delay = 30 * time.Second
+				}
+			}
 		}
 	}
 }
 
 // startHostChannel dials a host and starts consuming its agent's stream.
-func startHostChannel(host string) *hostChannel {
+func startHostChannel(host string, databases ...*db.DB) *hostChannel {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &hostChannel{host: host, stop: cancel, done: make(chan struct{})}
+	c := &hostChannel{host: host, stop: cancel, done: make(chan struct{}), coordinator: "legacy"}
+	if len(databases) > 0 && databases[0] != nil {
+		c.database = databases[0]
+		id, err := c.database.CoordinatorID()
+		if err != nil {
+			cancel()
+			close(c.done)
+			return c
+		}
+		c.coordinator = id
+	}
 	go c.run(ctx, func(ctx context.Context) (*exec.Cmd, io.Reader, error) {
 		r := RemoteRunner{Host: host}
-		cmd := r.Command(ctx, "", "sh", "-c", hostAgentProgram())
+		cmd := r.Command(ctx, "", "sh", "-c", hostAgentProgram(c.coordinator))
+		cmd.WaitDelay = 2 * time.Second
 		out, err := cmd.StdoutPipe()
 		if err != nil {
 			return nil, nil, err
@@ -285,7 +373,7 @@ type hostChannels struct {
 
 // get returns the channel for a host, starting one on first use. It returns nil
 // for an empty host (a local task) and after Close.
-func (h *hostChannels) get(host string) *hostChannel {
+func (h *hostChannels) get(host string, databases ...*db.DB) *hostChannel {
 	if strings.TrimSpace(host) == "" {
 		return nil
 	}
@@ -300,7 +388,7 @@ func (h *hostChannels) get(host string) *hostChannel {
 	if c, ok := h.byHost[host]; ok {
 		return c
 	}
-	c := startHostChannel(host)
+	c := startHostChannel(host, databases...)
 	h.byHost[host] = c
 	return c
 }
@@ -323,5 +411,5 @@ func (h *hostChannels) Close() {
 
 // hostChannelFor returns the executor's channel to a placed host.
 func (e *Executor) hostChannelFor(host string) *hostChannel {
-	return e.hostChans.get(host)
+	return e.hostChans.get(host, e.db)
 }
