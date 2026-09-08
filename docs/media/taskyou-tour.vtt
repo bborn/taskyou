@@ -1,0 +1,28 @@
+WEBVTT
+
+00:00.000 --> 00:03.500
+Your projects share one board.
+
+00:03.500 --> 00:09.000
+Press / to filter by project or task title.
+
+00:09.000 --> 00:11.500
+Enter opens a task. Esc takes you back.
+
+00:11.500 --> 00:20.500
+Press n. Pick a project and describe the change.
+
+00:20.500 --> 00:24.000
+Ctrl+S saves it. Press x to run it.
+
+00:24.000 --> 00:29.000
+The executor opens beside a shell in the task’s worktree.
+
+00:29.000 --> 00:37.000
+Claude adds the size-guide code. Waiting time is trimmed.
+
+00:37.000 --> 00:45.000
+The executor edits the product page and styles.
+
+00:45.000 --> 00:54.000
+Later: task done. All seven tests pass in the adjacent shell.

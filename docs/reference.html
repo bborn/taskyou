@@ -1,0 +1,1303 @@
+<!doctype html>
+<!-- Generated from reference.md by scripts/build-site.mjs. Edit the Markdown source. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Full reference — TaskYou</title><meta name="description" content="Full reference: setup, commands, and practical guidance for TaskYou.">
+<link rel="canonical" href="https://taskyou.dev/reference.html"><link rel="icon" href="images/logo.webp">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/site.css"></head>
+<body><a class="skip" href="#main">Skip to content</a><nav class="nav" aria-label="Main navigation"><div class="wrap"><a class="brand" href="./"><img src="images/logo.webp" width="40" height="40" alt="">taskyou</a><div class="navlinks"><a href="workflows.html">Workflows</a><a href="https://github.com/bborn/taskyou">GitHub</a></div></div></nav>
+<div class="guide-layout"><aside class="guide-nav" aria-label="Documentation"><p>TaskYou docs</p><a href="getting-started.html">Your first task</a><a href="workflows.html">Workflow recipes</a><a href="reference.html" aria-current="page">Full reference</a><a href="./#demo">Product tour</a></aside>
+<main id="main" class="prose"><h1 id="taskyou-reference">TaskYou reference</h1>
+<p><a href="getting-started.html">Start with your first task</a> or <a href="workflows.html">choose a workflow</a>. This manual covers the full command surface and configuration.</p>
+<h2 id="find-what-you-need">Find what you need</h2>
+<ul>
+<li><a href="#the-tui--first-class">Terminal interface</a> and <a href="#keyboard-shortcuts">keyboard shortcuts</a></li>
+<li><a href="#the-gui">Desktop and browser installation</a></li>
+<li><a href="#workflows">Workflows</a>, <a href="#routines">routines</a>, and <a href="#plugins">plugins</a></li>
+<li><a href="#full-cli-scriptability">CLI commands</a> and <a href="#daemon-management">daemon management</a></li>
+<li><a href="#task-executors">Executors</a> and <a href="#task-lifecycle">task lifecycle</a></li>
+<li><a href="#taskyouyml-configuration">Project configuration</a> and <a href="#worktree-setup-script">worktree setup</a></li>
+<li><a href="#ssh-access--deployment">SSH access and deployment</a></li>
+</ul>
+<h2 id="the-tui--first-class">The TUI — first class</h2>
+<p>The terminal UI is TaskYou&#39;s primary interface — everything ships here first. Launch it with <code>ty</code>.</p>
+<h3 id="kanban-board">Kanban Board</h3>
+<p><a href="media/hero-board.png"><img src="media/hero-board.png" alt="Kanban Board"></a>
+<em>The main view showing tasks organized across Backlog, In Progress, Blocked, and Done columns</em></p>
+<h3 id="task-detail-view">Task Detail View</h3>
+<p><a href="media/task-review-tui.png"><img src="media/task-review-tui.png" alt="Task Detail View"></a>
+<em>Viewing a task with Claude&#39;s output and shell access in split panes</em></p>
+<h3 id="workflow-handoff">Workflow handoff</h3>
+<p><a href="media/workflow-handoff.png"><img src="media/workflow-handoff.png" alt="Completed plan with implementation already processing"></a>
+<em>The plan step is done; its dependent implementation task is processing.</em></p>
+<h3 id="new-task-form">New Task Form</h3>
+<p><a href="screenshots/new-task-form.png"><img src="screenshots/new-task-form.png" alt="New Task Form"></a>
+<em>Creating a new task with project selection, type, executor, effort, permissions, and attachments</em></p>
+<h2 id="the-cli">The CLI</h2>
+<p>Everything the TUI can do, the CLI can do too — create, execute, retry, and inspect tasks, read executor output, even send keystrokes to a running executor. That makes TaskYou trivial to drive from scripts, cron jobs, and AI agents.</p>
+<p><a href="screenshots/cli-board.png"><img src="screenshots/cli-board.png" alt="CLI"></a>
+<em>Creating a task and checking the board without leaving your shell</em></p>
+<p>See <a href="#full-cli-scriptability">Full CLI Scriptability</a> for the complete command surface.</p>
+<h2 id="the-gui">The GUI</h2>
+<p><a href="screenshots/gui-board.png"><img src="screenshots/gui-board.png" alt="Web UI"></a>
+<em>The same Kanban board in the desktop app or any browser</em></p>
+<p>Just want the GUI? On macOS, install it with one command:</p>
+<pre><code class="language-sh">curl -fsSL taskyou.dev/install-macos.sh | bash
+</code></pre>
+<p>This downloads the latest DMG, verifies it, installs <strong>TaskYou.app</strong> to <code>~/Applications</code>, and launches it — no Gatekeeper prompts, no sudo. Set <code>TASKYOU_INSTALL_SYSTEM=1</code> to install to <code>/Applications</code> for all users instead.</p>
+<p>Or grab a prebuilt bundle from the <a href="https://github.com/bborn/taskyou/releases/latest">latest release</a>:</p>
+<ul>
+<li><strong>macOS</strong>: <code>TaskYou-macos-arm64.dmg</code> (Apple Silicon only)</li>
+<li><strong>Linux</strong>: <code>TaskYou-linux-x64.AppImage</code> or <code>.deb</code></li>
+</ul>
+<p>The app is self-contained — it ships its own <code>ty</code> engine and starts the server and daemon for you. Two things must be installed on your machine: <strong>tmux</strong> (<code>brew install tmux</code>) and at least one executor CLI (e.g. <a href="https://claude.com/claude-code">Claude Code</a>).</p>
+<p>The macOS bundles are ad-hoc signed but not notarized, so macOS flags DMGs downloaded in a browser on first launch (the install script above avoids this entirely). If you installed from a browser-downloaded DMG, drag <strong>TaskYou.app</strong> to Applications, then either right-click it → <strong>Open</strong> → <strong>Open</strong>, or clear the download quarantine flag:</p>
+<pre><code class="language-sh">xattr -dr com.apple.quarantine /Applications/TaskYou.app
+</code></pre>
+<p>The same UI is also served in your browser at <code>http://localhost:8080</code> whenever <code>ty serve</code> runs with the embedded UI (<code>make build-ui build</code>). Desktop gets a real PTY executor terminal; the browser falls back to a live terminal mirror. Source lives in <a href="https://github.com/bborn/taskyou/blob/main/desktop/"><code>desktop/</code></a>.</p>
+<h2 id="features">Features</h2>
+<ul>
+<li><strong>Kanban Board</strong> - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)</li>
+<li><strong>Git Worktrees</strong> - Each task runs in an isolated worktree, no conflicts between parallel tasks</li>
+<li><strong>Pluggable Executors</strong> - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task</li>
+<li><strong>Workflows</strong> - Turn one goal into a multi-step DAG (e.g. plan → code → parallel review → collect), each step on its own executor/model, advancing automatically (see <a href="#workflows">Workflows</a>)</li>
+<li><strong>Event Hooks &amp; Plugins</strong> - Run scripts when tasks change state, or drop in self-contained plugins (see <a href="#event-hooks">Event Hooks</a> and <a href="#plugins">Plugins</a>)</li>
+<li><strong>Ghost Text Autocomplete</strong> - LLM-powered suggestions for task titles and descriptions as you type</li>
+<li><strong>VS Code-style Fuzzy Search</strong> - Quick task navigation with smart matching (e.g., &quot;dsno&quot; matches &quot;diseno website&quot;)</li>
+<li><strong>Markdown Rendering</strong> - Task descriptions render with proper formatting in the detail view</li>
+<li><strong>Real-time Updates</strong> - Watch tasks execute live</li>
+<li><strong>Running Process Indicator</strong> - Green dot (<code>●</code>) shows which tasks have active shell processes (servers, watchers, etc.)</li>
+<li><strong>Auto-cleanup</strong> - Automatic cleanup of Claude processes for completed tasks (see maintenance commands for config cleanup)</li>
+<li><strong>Fully Scriptable CLI</strong> - 100% of Task You is controllable via CLI—agents can manage tasks, read executor output, and send input to running executors programmatically (see <a href="#full-cli-scriptability">Full CLI Scriptability</a>)</li>
+<li><strong>SSH Access</strong> - Run as an SSH server to access your tasks from anywhere (see <a href="#ssh-access--deployment">SSH Access &amp; Deployment</a>)</li>
+<li><strong>Project Context Caching</strong> - AI agents automatically cache codebase exploration results and reuse them across tasks, eliminating redundant exploration (see <a href="#project-context">Project Context</a>)</li>
+<li><strong>Shell Completion</strong> - Tab completion for commands, task IDs, projects, statuses, and flags in bash, zsh, fish, and PowerShell (see <a href="#shell-completion">Shell Completion</a>)</li>
+</ul>
+<h2 id="workflows">Workflows</h2>
+<p>A <strong>workflow</strong> turns a single goal into a small DAG of step tasks that run on one shared git branch, each routed to its own executor and model, advancing automatically. Steps are sequential where they depend on each other and <strong>parallel</strong> where they don&#39;t.</p>
+<p>Workflows come from two places: ones you <strong>install from a plugin</strong> (<a href="#plugins">grab battle-tested ones like <code>rpi</code> with <code>ty plugins add</code></a>) and YAML files you write yourself. Nothing is compiled into the binary. For example, a <code>plan-code-review</code> workflow — shipped as an example plugin under <code>examples/plugins/</code>:</p>
+<pre><code>Plan ──▶ Code ──▶ Review A ─┐
+                  Review B ─┴─▶ Collect ──▶ PR
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Model</th>
+<th>Job</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Plan</strong></td>
+<td>Opus</td>
+<td>Explore, write <code>PLAN.md</code>, push. No code.</td>
+</tr>
+<tr>
+<td><strong>Code</strong></td>
+<td>Sonnet</td>
+<td>Implement the plan, push.</td>
+</tr>
+<tr>
+<td><strong>Review A</strong>, <strong>Review B</strong></td>
+<td>Opus, Sonnet</td>
+<td>Two <strong>independent</strong> reviewers in parallel — different models + independent context catch different issues and avoid self-review bias.</td>
+</tr>
+<tr>
+<td><strong>Collect</strong></td>
+<td>Sonnet</td>
+<td>Read both reviews, apply the fixes worth applying, open the PR.</td>
+</tr>
+</tbody></table>
+<p>Steps advance with no human in the loop; a workflow only pauses when a step genuinely needs one — the final step opens a PR (landing in <code>blocked</code> for a human merge) or a step asks for input.</p>
+<h3 id="running-a-workflow">Running a workflow</h3>
+<pre><code class="language-bash"># CLI — pick the kind with -d (there is no default workflow)
+ty pipeline &quot;Add rate limiting to the API&quot; -p myapp -d plan-code-review
+ty pipeline --list                 # show available workflows (the YAML files)
+ty pipeline &quot;...&quot; -d &lt;kind&gt; --no-execute   # stage without starting
+
+# TUI: in the new-task form (n), pick it in the &quot;Kind&quot; selector (types and workflows in one list).
+</code></pre>
+<p>On the board, a workflow shows as a <strong>single card</strong> (<code>⇄ goal · Review ∥ · 3/5</code>) instead of one card per step. It needs a project that uses git worktrees and has a remote to push to.</p>
+<h3 id="authoring-workflows">Authoring workflows</h3>
+<p>Workflows are plain <strong>YAML files</strong> — one per workflow — in <code>~/.config/task/workflows/*.yaml</code> (override with <code>$TY_WORKFLOWS_DIR</code>), or per-project in <code>.taskyou/workflows/</code>. The file name is the kind name. You write only <em>what</em> each step does and its <code>deps</code>; the git handoff (which branch to push to, when to open the PR) is derived from the step&#39;s position in the DAG.</p>
+<pre><code class="language-yaml">name: build-and-qa
+description: Plan, build, then security review and QA in parallel, then finalize.
+steps:
+  - {name: Plan,     model: opus,   prompt: &quot;Design a plan for {{goal}}; write PLAN.md.&quot;}
+  - {name: Build,    deps: [Plan],  prompt: &quot;Implement the plan.&quot;}
+  - {name: Security, deps: [Build], prompt: &quot;Security review; write findings to security.md.&quot;}
+  - {name: QA,       deps: [Build], prompt: &quot;Exercise the change; write results to qa.md.&quot;}
+  - {name: Finalize, deps: [Security, QA], prompt: &quot;Address the findings and finalize.&quot;}
+</code></pre>
+<p>Two steps with the same <code>deps</code> run in parallel; a step depending on several joins them; multiple root steps (no <code>deps</code>) are parallel entry points (e.g. try 3 approaches at once).</p>
+<pre><code class="language-bash"># Author a workflow from a plain-English description (LLM → YAML you can edit)
+ty pipeline new &quot;spike three approaches, pick the best, build it, review and test in parallel&quot;
+
+# Eject any workflow — built-in, plugin, or installed — to a local YAML file to tweak its models / prompts / steps
+ty pipeline edit rpi               # writes ~/.config/task/workflows/rpi.yaml (shadows the built-in)
+</code></pre>
+<p>Custom workflows appear in <code>ty pipeline --list</code>, the <code>--definition</code> flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.</p>
+<h3 id="reality-gates--bind-a-step-to-your-build-and-tests">Reality gates — bind a step to your build and tests</h3>
+<p>By default a step is &quot;done&quot; when its agent says so. Add a <code>verify:</code> command and that
+claim has to survive contact with reality first: when the step tries to complete,
+TaskYou runs the command in the worktree and <strong>only advances the workflow if it
+passes</strong> (exit 0) — on the agent&#39;s own signal <em>and</em> on the daemon&#39;s git-completion
+sweep, so there&#39;s no path around it.</p>
+<pre><code class="language-yaml">steps:
+  - name: implement
+    verify: go build ./... &amp;&amp; go test ./...   # must be green before the DAG advances
+    prompt: &quot;Implement the plan.&quot;
+</code></pre>
+<p>A failing check keeps the step running and hands the command&#39;s output back to the
+agent, so it fixes the real problem instead of reporting a success it doesn&#39;t have.
+It&#39;s the antidote to an agent marking a step done on a red build — and it&#39;s what lets
+a <code>simplify</code> step cut a change down while the tests stay the safety net.</p>
+<h3 id="kinds-a-task-type-and-a-workflow-are-the-same-thing">Kinds: a task type and a workflow are the same thing</h3>
+<p>A <strong>kind</strong> is what you pick when you make a task — <code>code</code>, <code>writing</code>, <code>thinking</code>, <code>plan-code-review</code>, <code>rpi</code>, or any you add. There is no separate &quot;workflow&quot; you choose instead: the same pick runs as a <strong>single task</strong> when nothing defines steps for that name, and as a <strong>multi-step workflow</strong> when a definition with <code>steps</code> exists for it.</p>
+<pre><code>pick &quot;code&quot;             → single task   (a kind with instructions, no steps)
+pick &quot;plan-code-review&quot; → workflow      (a kind whose definition adds steps)
+</code></pre>
+<p>Picking a kind resolves by name, and two sources answer to that name — a <strong>definition</strong> wins over a <strong>DB task type</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Where it lives</th>
+<th>What it gives the kind</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Definition</strong></td>
+<td>plugin <code>workflows/</code> → global <code>~/.config/task/workflows/</code> → project <code>.taskyou/workflows/</code> (nothing is compiled into the binary)</td>
+<td><code>steps</code> (→ workflow), or just instructions (→ single task)</td>
+</tr>
+<tr>
+<td><strong>DB task type</strong></td>
+<td>the tasks database (<code>code</code>, <code>writing</code>, <code>thinking</code>, plus any you add)</td>
+<td>instructions (→ single task)</td>
+</tr>
+</tbody></table>
+<p>Definitions are layered lowest-to-highest and a later layer shadows an earlier one by name, so your own <code>~/.config/task/workflows/rpi.yaml</code> overrides the built-in <code>rpi</code>, and a project file overrides everything. <code>ty pipeline --list</code> shows them all, labelled <strong>built-in</strong> or <strong>custom</strong>. Adding <code>steps</code> is the only thing that makes a kind a workflow: drop a <code>code.yaml</code> with steps beside the <code>code</code> type and that same pick upgrades from a single task to a DAG.</p>
+<p>A workflow&#39;s steps can <strong>run other kinds</strong> by name — and if a referenced kind is itself a workflow (has a file), its steps are inlined at build time, so you compose big flows from small ones:</p>
+<pre><code class="language-yaml"># ~/.config/task/workflows/ship.yaml
+name: ship
+steps:
+  - {name: Build,  kind: plan-code-review}          # a whole workflow, inlined
+  - {name: QA,     kind: code, deps: [Build]}        # a DB kind → sets the step&#39;s type
+  - {name: Deploy, prompt: &quot;Deploy it.&quot;, deps: [QA]}
+</code></pre>
+<p>A step&#39;s <code>kind:</code> sets that step&#39;s task <strong>type</strong>, so the kind&#39;s instructions apply — <code>code</code>, <code>writing</code>, or any kind is referenceable with no extra wiring. Cycles and runaway nesting are rejected at build time.</p>
+<h2 id="project-context">Project Context</h2>
+<p>TaskYou implements <strong>intelligent codebase caching</strong> to make AI agents dramatically more efficient across multiple tasks in the same project.</p>
+<h3 id="how-it-works">How It Works</h3>
+<p>When an AI agent starts a task, it can:</p>
+<ol>
+<li><strong>Check for cached context</strong> via <code>taskyou_get_project_context</code> MCP tool</li>
+<li><strong>Use existing context</strong> if available, skipping redundant exploration</li>
+<li><strong>Explore once and save</strong> via <code>taskyou_set_project_context</code> for future tasks</li>
+</ol>
+<p>This cached context is stored in the <code>projects.context</code> database column and persists across all tasks in that project.</p>
+<h3 id="benefits">Benefits</h3>
+<ul>
+<li><strong>Faster task startup</strong> - No need to re-explore the codebase on every task</li>
+<li><strong>Consistent understanding</strong> - All tasks share the same baseline knowledge</li>
+<li><strong>Token efficiency</strong> - Avoids burning tokens on repeated exploration</li>
+<li><strong>Better continuity</strong> - Agents build on previous learnings</li>
+</ul>
+<h3 id="example-usage">Example Usage</h3>
+<p>When an agent starts a task, it first checks for context:</p>
+<pre><code>Agent: taskyou_get_project_context()
+TaskYou: &quot;## Cached Project Context
+
+This is a Go project using:
+- Bubble Tea for TUI
+- SQLite for storage
+- Charm libraries for styling
+
+Key directories:
+- internal/db/ - Database layer
+- internal/executor/ - Task execution
+- internal/ui/ - UI components
+...&quot;
+</code></pre>
+<p>If no context exists, the agent explores once and saves it:</p>
+<pre><code>Agent: [explores codebase]
+Agent: taskyou_set_project_context(&quot;...&quot;)
+TaskYou: &quot;Project context saved. Future tasks will use this.&quot;
+</code></pre>
+<h3 id="best-practices">Best Practices</h3>
+<p><strong>What to include in context:</strong></p>
+<ul>
+<li>Project structure and key directories</li>
+<li>Tech stack and frameworks used</li>
+<li>Coding conventions and patterns</li>
+<li>Important files and their purposes</li>
+<li>Common development workflows</li>
+</ul>
+<p><strong>When to update:</strong></p>
+<ul>
+<li>After major refactorings</li>
+<li>When new patterns are introduced</li>
+<li>After significant file reorganization</li>
+<li>When the tech stack changes</li>
+</ul>
+<p><strong>Context is per-project</strong> - Each project maintains its own cached context, preventing cross-contamination.</p>
+<h3 id="related-features">Related Features</h3>
+<ul>
+<li>Task types can have their own instructions that complement project context</li>
+<li>Project-level instructions (in the database) add project-specific guidance</li>
+<li>Both are automatically included in agent prompts alongside cached context</li>
+</ul>
+<p>See <a href="https://github.com/bborn/taskyou/blob/main/docs/orchestrator.md">the agent orchestration guide</a> for using the CLI from an agent.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>Go 1.26.0+</strong> - Required to build the project</li>
+</ul>
+<h3 id="using-mise-recommended">Using mise (recommended)</h3>
+<p>If you use <a href="https://mise.jdx.dev/">mise</a> for dependency management, simply run:</p>
+<pre><code class="language-bash">mise install
+</code></pre>
+<p>This will install the correct Go version automatically.</p>
+<h3 id="manual-installation">Manual installation</h3>
+<p>Install Go 1.26.0 or later from <a href="https://go.dev/dl/">go.dev/dl</a>.</p>
+<h2 id="installation">Installation</h2>
+<h3 id="quick-install-recommended">Quick Install (recommended)</h3>
+<pre><code class="language-bash">curl -fsSL taskyou.dev/install.sh | bash
+</code></pre>
+<p>This downloads the latest release and installs <code>ty</code> (with <code>taskyou</code> as an alias) to <code>~/.local/bin</code>.</p>
+<p>You can also specify a custom install directory:</p>
+<pre><code class="language-bash">curl -fsSL https://taskyou.dev/install.sh | INSTALL_DIR=~/.local/bin bash
+</code></pre>
+<h3 id="build-from-source">Build from source</h3>
+<pre><code class="language-bash">git clone https://github.com/bborn/taskyou
+cd taskyou
+make build
+</code></pre>
+<h2 id="usage">Usage</h2>
+<pre><code class="language-bash"># Launch the TUI (auto-starts background daemon)
+./bin/ty
+</code></pre>
+<h3 id="daemon-management">Daemon management</h3>
+<pre><code class="language-bash">./bin/ty daemon         # Start daemon manually
+./bin/ty daemon stop    # Stop the daemon
+./bin/ty daemon status  # Check daemon status
+</code></pre>
+<h3 id="restarting-without-closing-terminals">Restarting without closing terminals</h3>
+<p><code>ty restart</code> restarts the daemon and asks local TUIs using the same database to
+reload the current binary in place. Their tmux sessions stay open. Task selection,
+board filter, and the open detail view are restored, and borrowed agent panes are
+returned before reloading. Unsaved forms and pending task saves defer the reload.</p>
+<p>TUIs started with an older build that lacks cooperative reload remain running;
+reopen those once with the updated build to enable future automatic reloads.
+<code>POST /api/tui/reload</code> requests the same cooperative TUI reload through the HTTP API.
+<code>ty daemon restart</code> only restarts the daemon. <code>ty restart --hard</code> remains an explicit
+destructive reset that kills TaskYou tmux sessions.</p>
+<h3 id="maintenance-commands">Maintenance commands</h3>
+<pre><code class="language-bash">./bin/ty purge-claude-config            # Remove stale ~/.claude.json entries
+./bin/ty purge-claude-config --dry-run  # Preview what would be removed
+./bin/ty claudes cleanup                # Kill orphaned Claude processes
+</code></pre>
+<h3 id="full-cli-scriptability">Full CLI Scriptability</h3>
+<p><strong>Task You is 100% scriptable.</strong> Every action you can perform in the TUI is available via the <code>ty</code> CLI, making it trivial for AI agents, scripts, or external orchestrators to control your entire task queue programmatically.</p>
+<p>This includes:</p>
+<ul>
+<li><strong>Board state</strong> - <code>ty board --json</code> returns the full Kanban snapshot</li>
+<li><strong>Task management</strong> - <code>ty create</code>, <code>ty execute</code>, <code>ty retry</code>, <code>ty status</code>, <code>ty pin</code>, <code>ty close</code>, <code>ty archive</code>, <code>ty delete</code></li>
+<li><strong>Direct executor interaction</strong> - <code>ty input</code> sends keystrokes/text to running executors, <code>ty output</code> reads their output</li>
+<li><strong>Session management</strong> - <code>ty sessions list</code>, <code>ty sessions cleanup</code></li>
+</ul>
+<p>Because agents can send input to running executors via <code>ty input</code>, they can answer prompts, confirm dialogs, navigate menus, and fully control tasks mid-execution—no human intervention required.</p>
+<p>See <a href="https://github.com/bborn/taskyou/blob/main/docs/orchestrator.md">docs/orchestrator.md</a> for a complete guide to building your own orchestration agent.</p>
+<p><strong>Auto-cleanup:</strong> The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.</p>
+<blockquote>
+<p><strong>Note:</strong> Automatic cleanup currently only works for the Claude executor. When using other executors (Codex, Gemini, Pi, etc.), you may need to manually clean up processes using <code>ty sessions cleanup</code> to prevent memory bloat.</p>
+</blockquote>
+<h3 id="ai-agent-skill">AI Agent Skill</h3>
+<p>Task You includes a <code>/taskyou</code> skill that teaches any AI agent how to orchestrate your task queue via CLI.</p>
+<p><strong>Automatic availability:</strong> The skill is automatically available when working inside the Task You project directory (via <code>skills/taskyou/</code>).</p>
+<p><strong>Global installation:</strong> To use the skill from any project:</p>
+<pre><code class="language-bash">./scripts/install-skill.sh
+</code></pre>
+<p>Once available, you can ask Claude things like:</p>
+<ul>
+<li>&quot;Show me my task board&quot;</li>
+<li>&quot;Execute the top priority task&quot;</li>
+<li>&quot;What&#39;s blocked right now?&quot;</li>
+<li>&quot;Create a task to fix the login bug&quot;</li>
+</ul>
+<p>The skill works with Claude Code, Codex, Gemini, or any agent that can execute shell commands. It provides structured guidance for common orchestration patterns without needing to memorize CLI flags.</p>
+<h2 id="keyboard-shortcuts">Keyboard Shortcuts</h2>
+<h3 id="kanban-board-1">Kanban Board</h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>←/→</code> or <code>h/l</code></td>
+<td>Navigate columns</td>
+</tr>
+<tr>
+<td><code>↑/↓</code> or <code>j/k</code></td>
+<td>Navigate tasks</td>
+</tr>
+<tr>
+<td><code>Enter</code></td>
+<td>View task details</td>
+</tr>
+<tr>
+<td><code>n</code></td>
+<td>Create new task</td>
+</tr>
+<tr>
+<td><code>x</code></td>
+<td>Execute (queue) task</td>
+</tr>
+<tr>
+<td><code>r</code></td>
+<td>Retry task with feedback</td>
+</tr>
+<tr>
+<td><code>c</code></td>
+<td>Close task</td>
+</tr>
+<tr>
+<td><code>a</code></td>
+<td>Archive task</td>
+</tr>
+<tr>
+<td><code>d</code></td>
+<td>Delete task</td>
+</tr>
+<tr>
+<td><code>t</code></td>
+<td>Pin/unpin task</td>
+</tr>
+<tr>
+<td><code>o</code></td>
+<td>Open task&#39;s working directory</td>
+</tr>
+<tr>
+<td><code>p</code></td>
+<td>Command palette (fuzzy search)</td>
+</tr>
+<tr>
+<td><code>/</code></td>
+<td>Filter tasks</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>Settings</td>
+</tr>
+<tr>
+<td><code>?</code></td>
+<td>Toggle help</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>Quit</td>
+</tr>
+</tbody></table>
+<h3 id="task-detail-view-1">Task Detail View</h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>e</code></td>
+<td>Edit task</td>
+</tr>
+<tr>
+<td><code>x</code></td>
+<td>Execute task</td>
+</tr>
+<tr>
+<td><code>r</code></td>
+<td>Retry with feedback</td>
+</tr>
+<tr>
+<td><code>S</code></td>
+<td>Change task status</td>
+</tr>
+<tr>
+<td><code>t</code></td>
+<td>Pin/unpin task</td>
+</tr>
+<tr>
+<td><code>!</code></td>
+<td>Toggle dangerous/safe mode</td>
+</tr>
+<tr>
+<td><code>\</code></td>
+<td>Toggle shell pane visibility</td>
+</tr>
+<tr>
+<td><code>Shift+↑/↓</code></td>
+<td>Switch between panes</td>
+</tr>
+<tr>
+<td><code>Alt+Shift+↑/↓</code></td>
+<td>Jump to prev/next task (stays in executor pane)</td>
+</tr>
+<tr>
+<td><code>c</code></td>
+<td>Close task</td>
+</tr>
+<tr>
+<td><code>a</code></td>
+<td>Archive task</td>
+</tr>
+<tr>
+<td><code>d</code></td>
+<td>Delete task</td>
+</tr>
+<tr>
+<td><code>Esc</code></td>
+<td>Back to kanban</td>
+</tr>
+</tbody></table>
+<h3 id="task-form-autocomplete">Task Form (Autocomplete)</h3>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Tab</code></td>
+<td>Accept ghost text suggestion</td>
+</tr>
+<tr>
+<td><code>Escape</code></td>
+<td>Dismiss suggestion</td>
+</tr>
+<tr>
+<td><code>Ctrl+Space</code></td>
+<td>Manually trigger suggestion</td>
+</tr>
+</tbody></table>
+<h2 id="task-lifecycle">Task Lifecycle</h2>
+<pre><code>backlog → queued → processing → done
+                 ↘ blocked (needs input)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>backlog</code></td>
+<td>Created but not started</td>
+</tr>
+<tr>
+<td><code>queued</code></td>
+<td>Waiting to be processed</td>
+</tr>
+<tr>
+<td><code>processing</code></td>
+<td>Currently being executed</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td>Needs input/clarification</td>
+</tr>
+<tr>
+<td><code>done</code></td>
+<td>Completed</td>
+</tr>
+</tbody></table>
+<h2 id="task-executors">Task Executors</h2>
+<p>Task You supports multiple AI executors for processing tasks. You can choose the executor when creating or editing a task.</p>
+<blockquote>
+<p>Developers who want to add another backend should read <a href="https://github.com/bborn/taskyou/blob/main/docs/executor_interface.md"><code>docs/executor_interface.md</code></a> for the full <code>TaskExecutor</code> contract.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Executor</th>
+<th>CLI</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Claude (default)</td>
+<td><code>claude</code></td>
+<td><a href="https://claude.ai/claude-code">Claude Code</a> - Anthropic&#39;s coding agent with session resumption</td>
+</tr>
+<tr>
+<td>Codex</td>
+<td><code>codex</code></td>
+<td><a href="https://github.com/openai/codex">OpenAI Codex CLI</a> - OpenAI&#39;s coding assistant</td>
+</tr>
+<tr>
+<td>Gemini</td>
+<td><code>gemini</code></td>
+<td><a href="https://ai.google.dev/gemini-api/docs/cli">Gemini CLI</a> - Google&#39;s Gemini-based coding assistant</td>
+</tr>
+<tr>
+<td>Grok</td>
+<td><code>grok</code></td>
+<td><a href="https://x.ai/cli">Grok CLI</a> - xAI&#39;s coding assistant with session resumption</td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td><code>agent</code> / <code>cursor-agent</code></td>
+<td><a href="https://cursor.com/docs/cli">Cursor CLI</a> - Cursor&#39;s coding agent with session resumption</td>
+</tr>
+<tr>
+<td>Pi</td>
+<td><code>pi</code></td>
+<td><a href="https://github.com/mariozechner/pi-coding-agent">Pi Coding Agent</a> - Multi-provider AI coding agent with session continuity</td>
+</tr>
+<tr>
+<td>OpenCode</td>
+<td><code>opencode</code></td>
+<td><a href="https://opencode.ai">OpenCode</a> - Open-source AI coding assistant with multi-LLM support</td>
+</tr>
+<tr>
+<td>OpenClaw</td>
+<td><code>openclaw</code></td>
+<td><a href="https://openclaw.ai">OpenClaw</a> - Open-source personal AI assistant with session resumption</td>
+</tr>
+</tbody></table>
+<p>All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:</p>
+<ul>
+<li><strong>Claude Code</strong>, <strong>Grok</strong>, <strong>Cursor</strong>, <strong>Pi</strong>, and <strong>OpenClaw</strong> support session resumption - when you retry a task, they continue with full conversation history</li>
+<li><strong>Codex</strong> and <strong>Gemini</strong> start fresh on each execution but receive the full prompt with any feedback</li>
+<li><strong>OpenCode</strong> does not support session resumption</li>
+</ul>
+<h3 id="installing-executors">Installing Executors</h3>
+<p>At least one executor CLI must be installed for tasks to run:</p>
+<pre><code class="language-bash"># Claude Code (recommended)
+# See https://claude.ai/claude-code for installation
+
+# OpenAI Codex CLI
+npm install -g @openai/codex
+
+# Google Gemini CLI
+# See https://ai.google.dev/gemini-api/docs/cli for installation instructions
+
+# Grok CLI
+curl -fsSL https://x.ai/cli/install.sh | bash
+
+# Cursor Agent CLI
+curl https://cursor.com/install -fsS | bash
+
+# Pi Coding Agent
+npm install -g @mariozechner/pi-coding-agent
+
+# OpenClaw
+npm install -g openclaw@latest
+openclaw onboard  # Run setup wizard
+</code></pre>
+<h3 id="how-task-executors-work">How Task Executors Work</h3>
+<p>Understanding how Task You manages executor processes helps you debug issues and work with running tasks.</p>
+<h4 id="tmux-based-architecture">tmux-Based Architecture</h4>
+<p>Task executors run inside <strong>tmux windows</strong> within a daemon session:</p>
+<pre><code>task-daemon-{PID}              (tmux session)
+├── _placeholder               (keeps session alive)
+├── task-123                   (window for task 123)
+│   ├── pane 0: Executor       (left - Claude/Codex output)
+│   └── pane 1: Shell          (right - workdir access)
+├── task-124                   (window for task 124)
+└── ...
+</code></pre>
+<p>When you execute a task:</p>
+<ol>
+<li>The daemon ensures a <code>task-daemon-*</code> session exists</li>
+<li>Creates a new tmux window named <code>task-{ID}</code></li>
+<li>Spawns the configured executor (Claude or Codex) with environment variables and the task prompt</li>
+<li>Creates a shell pane for manual intervention</li>
+</ol>
+<h4 id="session-tracking">Session Tracking</h4>
+<p>Each task tracks its executor state in the database:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SessionID</code></td>
+<td>Executor session ID (Claude only, for resumption)</td>
+</tr>
+<tr>
+<td><code>TmuxWindowID</code></td>
+<td>Unique window target for tmux commands</td>
+</tr>
+<tr>
+<td><code>daemon_session</code></td>
+<td>Which <code>task-daemon-*</code> owns this task</td>
+</tr>
+<tr>
+<td><code>Port</code></td>
+<td>Unique port (3100-4099) for the worktree</td>
+</tr>
+</tbody></table>
+<h4 id="managing-executor-processes">Managing Executor Processes</h4>
+<p><strong>Inside the TUI:</strong></p>
+<ul>
+<li>The green dot (<code>●</code>) indicates tasks with active processes</li>
+</ul>
+<p><strong>From the command line:</strong></p>
+<pre><code class="language-bash"># List all running executor processes
+./bin/ty sessions list
+
+# Kill orphaned executor processes
+./bin/ty sessions cleanup
+</code></pre>
+<p><strong>Direct executor interaction:</strong></p>
+<pre><code class="language-bash"># See what the executor is outputting
+./bin/ty output &lt;id&gt;              # Last 50 lines
+./bin/ty output &lt;id&gt; --lines 100  # More history
+
+# Send input directly to a running executor
+./bin/ty input &lt;id&gt; &quot;yes&quot;         # Send text + Enter
+./bin/ty input &lt;id&gt; --enter       # Just press Enter (confirm prompts)
+./bin/ty input &lt;id&gt; --key Down --enter  # Navigate + confirm
+echo &quot;continue&quot; | ./bin/ty input &lt;id&gt;   # Pipe input
+</code></pre>
+<p><strong>Inside a task worktree:</strong></p>
+<p>When working in a task&#39;s worktree directory, you can interact with the executor directly. For Claude tasks:</p>
+<pre><code class="language-bash">cd /path/to/project/.task-worktrees/123-my-task/
+
+# List Claude sessions (shows any spawned for this directory)
+claude -r
+
+# Resume a specific session
+claude --resume {session-id}
+</code></pre>
+<p>The <code>claude -r</code> command shows Claude sessions associated with the current directory. This is useful when:</p>
+<ul>
+<li>Debugging why a task got stuck</li>
+<li>Continuing work manually after a task completes</li>
+<li>Checking what the executor was doing in a specific task</li>
+</ul>
+<h4 id="session-resumption-claude-only">Session Resumption (Claude Only)</h4>
+<p>Claude Code supports <strong>session resumption</strong> - when you retry a task or press <code>R</code>, the executor reconnects to the existing conversation:</p>
+<ol>
+<li><strong>First execution:</strong> Claude starts fresh, prints a session ID</li>
+<li><strong>Task You captures:</strong> The session ID is stored in the database</li>
+<li><strong>On retry/resume:</strong> Runs <code>claude --resume {sessionID}</code> with your feedback</li>
+<li><strong>Full context preserved:</strong> Claude sees the entire conversation history</li>
+</ol>
+<p>This means when you retry a blocked task with feedback, Claude doesn&#39;t start over—it continues the conversation with full awareness of what it already tried.</p>
+<p><strong>Note:</strong> Codex and Gemini do not support session resumption. When retrying these tasks, they receive the full prompt including any feedback, but start a fresh session. Claude Code and OpenClaw support full session resumption.</p>
+<h4 id="lifecycle--cleanup">Lifecycle &amp; Cleanup</h4>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Task completes</td>
+<td>Process stays alive for 30 minutes, then auto-killed</td>
+</tr>
+<tr>
+<td>Task blocked</td>
+<td>Process suspends after 6 hours of idle time</td>
+</tr>
+<tr>
+<td>Task deleted (<code>d</code>)</td>
+<td>Window killed, task trashed — worktree kept on disk so it can be restored</td>
+</tr>
+<tr>
+<td>Trash retention expires</td>
+<td>Worktree removed, <a href="#worktree-teardown-script">teardown script</a> runs (default 14 days)</td>
+</tr>
+<tr>
+<td>Task archived, or stale-worktree sweep</td>
+<td>Worktree archived to a git ref and removed, <a href="#worktree-teardown-script">teardown script</a> runs (sweep default: 24h after completion)</td>
+</tr>
+<tr>
+<td>Daemon restart</td>
+<td>Orphaned windows are cleaned up on next poll</td>
+</tr>
+</tbody></table>
+<h2 id="routines">Routines</h2>
+<p>Routines are named, unattended agent runs — scouts and monitors that watch
+something on a schedule and feed your queue. TaskYou deliberately has <strong>no
+scheduler</strong>: trigger runs with <code>ty run &lt;name&gt;</code> from cron, launchd, or anything
+else that can run a command. TaskYou owns everything around the run: state,
+logs, history, and failure alerting.</p>
+<p>A routine is a directory under <code>~/.config/task/routines/&lt;name&gt;/</code>:</p>
+<ul>
+<li><code>prompt.md</code> — the agent prompt, with optional frontmatter (<code>model</code>, <code>project</code>,
+<code>timeout</code>, <code>permission-mode</code>)</li>
+<li><code>env.sh</code> — optional; sourced before each run for secrets and fail-fast checks
+(a non-zero exit fails the run before the agent starts)</li>
+</ul>
+<pre><code class="language-bash">ty routines create my-scout     # scaffold a new routine
+ty run my-scout                 # run it now (cron/launchd call this too)
+ty routines                     # health: last run, status, duration
+ty routines show my-scout       # config + recent run history
+ty routines logs my-scout       # full log of the latest run
+ty routines edit my-scout       # open prompt.md in $EDITOR (re-validates on save)
+ty routines schedule my-scout --every 30m   # register with the OS scheduler
+ty routines unschedule my-scout # remove the ty-managed scheduler entry
+ty routines disable my-scout    # pause (ty run becomes a no-op)
+ty routines delete my-scout     # remove routine, schedule, state, run history
+</code></pre>
+<p>In the TUI, press <code>u</code> for the routines fleet-health view: last run status per
+routine, <code>enter</code> to read the latest run log, <code>d</code> to enable/disable.</p>
+<p><code>schedule</code> writes the OS scheduler config and hands over the clock: a launchd
+agent on macOS (<code>com.taskyou.routine.&lt;name&gt;</code>) or a tagged crontab line, with
+your PATH captured so the agent can find <code>ty</code> and <code>claude</code>. ty keeps <strong>no
+schedule state of its own</strong> — <code>show</code> and the TUI read the OS entry live, so
+nothing can drift. Use <code>--cron &quot;0 8 * * 1-5&quot;</code> for calendar cadences, and
+<code>--print</code> to emit the config without installing it. Prefer your own
+scheduler? Skip <code>schedule</code> entirely and point anything at <code>ty run &lt;name&gt;</code>.</p>
+<p>Each run executes <code>claude -p</code> headlessly (default model: sonnet, default
+timeout: 30m) with the prompt on stdin, working directory set to the routine&#39;s
+private state dir (<code>~/.local/share/task/routines/&lt;name&gt;/</code>, also exported as
+<code>$ROUTINE_STATE_DIR</code>) so cross-run state like seen-IDs has an obvious home.
+Output is logged per run and recorded in run history.</p>
+<p>When a run fails — agent error, <code>env.sh</code> failure (expired credentials), or
+timeout — TaskYou pins a <code>Routine failed: &lt;name&gt;</code> task to your board (deduped
+while one is open) and fires a <code>routine.failed</code> event hook. Silent failure is
+the one thing a routine is not allowed to do.</p>
+<h2 id="event-hooks">Event Hooks</h2>
+<p>TaskYou runs scripts in <code>~/.config/task/hooks/</code> when tasks change state.</p>
+<h3 id="setup">Setup</h3>
+<pre><code class="language-bash"># Create a hook for completed tasks
+cat &gt; ~/.config/task/hooks/task.completed &lt;&lt; &#39;EOF&#39;
+#!/bin/bash
+osascript -e &quot;display notification \&quot;$TASK_TITLE\&quot; with title \&quot;Task Completed\&quot;&quot;
+EOF
+
+chmod +x ~/.config/task/hooks/task.completed
+</code></pre>
+<h3 id="available-events">Available Events</h3>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>When Emitted</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>task.created</code></td>
+<td>New task created</td>
+</tr>
+<tr>
+<td><code>task.updated</code></td>
+<td>Task fields changed (including status transitions)</td>
+</tr>
+<tr>
+<td><code>task.deleted</code></td>
+<td>Task removed</td>
+</tr>
+<tr>
+<td><code>task.started</code></td>
+<td>Execution begins</td>
+</tr>
+<tr>
+<td><code>task.blocked</code></td>
+<td>Task needs user input (or agent failed)</td>
+</tr>
+<tr>
+<td><code>task.completed</code></td>
+<td>Agent finished successfully (task moves to backlog for human review)</td>
+</tr>
+<tr>
+<td><code>task.failed</code></td>
+<td>Agent execution failed</td>
+</tr>
+<tr>
+<td><code>task.worktree_ready</code></td>
+<td>Worktree set up and ready for agent</td>
+</tr>
+</tbody></table>
+<h3 id="environment-variables">Environment Variables</h3>
+<pre><code class="language-bash">TASK_ID          # Task ID
+TASK_TITLE       # Task title
+TASK_STATUS      # Current status
+TASK_PROJECT     # Project name
+TASK_EVENT       # Event type
+TASK_TIMESTAMP   # ISO 8601 timestamp
+</code></pre>
+<p>See <a href="https://github.com/bborn/taskyou/blob/main/examples/hooks/">examples/hooks/</a> for examples.</p>
+<h3 id="plugins">Plugins</h3>
+<p>A <strong>plugin</strong> is a self-contained directory under <code>~/.config/task/plugins/</code> with a
+<code>plugin.yaml</code> manifest. It can carry any mix of three things:</p>
+<ul>
+<li><strong>workflows</strong> (<code>workflows/*.yaml</code>) — new <code>ty pipeline -d &lt;name&gt;</code> definitions</li>
+<li><strong>hooks</strong> — scripts that fire on task events. Unlike the one-script-per-event hooks
+dir above, any number of plugins can handle the same event and <strong>all of them run</strong></li>
+<li><strong>actions</strong> — user-invoked commands (<code>ty plugins run &lt;plugin&gt; &lt;action&gt;</code>)</li>
+</ul>
+<p>One event is different: <code>task.placement</code> is <strong>consulted</strong>, not merely notified.
+Just before an executor spawns, ty asks any installed placement handler where the
+task should run — request on stdin, answer on stdout — and runs it there. An empty
+answer (and every way a handler can fail) means &quot;run locally&quot;, which is what
+happens for everyone who has no placement plugin installed: nothing is asked, and
+nothing changes.</p>
+<p>A placed task is watched over <strong>one standing connection per host</strong> rather than one
+poller per task, so a fleet of hundreds costs a handful of connections. ty holds
+that connection outbound — nothing listens on your machine and no port is opened.
+The agent reports its own outcome through it (<code>.ty/signal done &quot;…&quot;</code>), so a remote
+task finishes when it says it has finished, rather than when it has been quiet
+long enough to look finished.</p>
+<p>Remote tasks support the workdir shell in every interface: <code>\</code> toggles it in
+TUI detail view, and the desktop/browser terminal has a <strong>Shell</strong> tab. The shell
+runs on the placed host with the task&#39;s environment and survives closing the
+view. Shift-arrow keys cycle the TUI, agent, and shell panes; Alt-Shift-Up/Down
+switch tasks. Inside an attached remote pane, <strong>Ctrl-a</strong> is the remote tmux
+prefix. Desktop and browser remote terminals use the HTTP terminal bridge.</p>
+<p>See <a href="https://github.com/bborn/taskyou/blob/main/docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of">docs/plugins.md</a>
+and the reference resolver in <a href="https://github.com/bborn/taskyou/blob/main/extensions/ty-on/README.md">extensions/ty-on</a>.</p>
+<p>Task placement is also available from the task detail view in the desktop and
+browser, and with <code>@</code> in the TUI. See <a href="https://github.com/bborn/taskyou/blob/main/docs/remote-execution.md">remote execution</a>
+for executor eligibility, required remote placement, connection health, and
+shared HTTP placement endpoints.</p>
+<p>Install one — or a whole collection, since a single git repo can hold many plugins —
+with one command:</p>
+<pre><code class="language-bash">ty plugins add https://github.com/taskyou/plugins   # clone &amp; install the collection
+ty plugins list                                     # see what they provide
+</code></pre>
+<p>Re-run the same command any time to update (it <code>git pull</code>s). Or drop a directory in
+by hand.</p>
+<h4 id="why-youd-care-the-community-collection">Why you&#39;d care: the community collection</h4>
+<p><strong><a href="https://github.com/taskyou/plugins">github.com/taskyou/plugins</a></strong> is the fastest
+way to feel what workflows-as-plugins buys you — install it and these show up in
+<code>ty pipeline -d</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Workflow</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong><code>rpi</code></strong></td>
+<td>Turns a goal into a PR: neutral research → goal-blind investigation → an approach you approve (<strong>human gate</strong>) → a plan you approve (<strong>human gate</strong>) → implement + simplify that must pass your build/tests (<strong>reality gate</strong>) → PR. A human okays the <em>approach</em>; the machine proves the <em>code</em>.</td>
+</tr>
+<tr>
+<td><strong><code>plan-code-review</code></strong></td>
+<td>Plan → code → <strong>two independent reviewers in parallel</strong> → collect → PR. Different models with independent context catch different issues.</td>
+</tr>
+<tr>
+<td><strong><code>arc-solve</code></strong></td>
+<td>An agent that <strong>plays a live <a href="https://arcprize.org/arc-agi/3">ARC-AGI-3</a> game and beats a level</strong> — the verify gate replays its solution against the real game, so a win can&#39;t be faked. (<a href="https://github.com/taskyou/plugins/blob/main/arc-solve/example-run.md">recorded run + GIF</a>.)</td>
+</tr>
+</tbody></table>
+<p>That last one is the point in miniature: a workflow whose completion is bound to a
+result the gate re-checks against reality, packaged so anyone gets it with one
+command.</p>
+<p>See the <a href="https://github.com/taskyou/plugins">collection README</a> to browse or
+contribute, <a href="https://github.com/bborn/taskyou/blob/main/docs/plugins.md">docs/plugins.md</a> for the manifest format,
+<a href="https://github.com/bborn/taskyou/blob/main/examples/plugins/"><code>examples/plugins/</code></a> for more (desktop-notify, slack, worktree),
+and <a href="https://github.com/bborn/taskyou/blob/main/docs/plugin-ideas.md">docs/plugin-ideas.md</a> for ideas.</p>
+<h2 id="configuration">Configuration</h2>
+<h3 id="settings">Settings</h3>
+<p>Manage settings with <code>ty settings</code>:</p>
+<pre><code class="language-bash">ty settings                              # View all settings
+ty settings set &lt;key&gt; &lt;value&gt;            # Set a value
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>anthropic_api_key</code></td>
+<td>API key for ghost text autocomplete (optional, uses API credits)</td>
+</tr>
+<tr>
+<td><code>autocomplete_enabled</code></td>
+<td>Enable/disable autocomplete (<code>true</code>/<code>false</code>)</td>
+</tr>
+</tbody></table>
+<h3 id="ghost-text-autocomplete">Ghost Text Autocomplete</h3>
+<p>LLM-powered suggestions appear as you type task titles and descriptions, similar to GitHub Copilot:</p>
+<ul>
+<li><strong>Title suggestions</strong> - Autocomplete as you type the task title</li>
+<li><strong>Body suggestions</strong> - Auto-suggest a description when you tab from the title to an empty body field</li>
+<li><strong>Cursor-aware</strong> - Ghost text renders at cursor position for natural editing</li>
+<li><strong>Smart caching</strong> - Recent completions are cached for instant responses</li>
+</ul>
+<p><strong>Setup:</strong></p>
+<pre><code class="language-bash">ty settings set anthropic_api_key sk-ant-your-key-here
+</code></pre>
+<p><strong>Controls:</strong></p>
+<ul>
+<li><code>Tab</code> - Accept suggestion</li>
+<li><code>Escape</code> - Dismiss suggestion</li>
+<li><code>Ctrl+Space</code> - Manually trigger suggestion</li>
+</ul>
+<p>Get an API key at <a href="https://console.anthropic.com/">console.anthropic.com</a>. This is optional and uses your API credits.</p>
+<h3 id="environment-variables-1">Environment Variables</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>WORKTREE_DB_PATH</code></td>
+<td>SQLite database path</td>
+<td><code>~/.local/share/task/tasks.db</code></td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>Fallback for autocomplete if not set in settings</td>
+<td>-</td>
+</tr>
+</tbody></table>
+<h3 id="taskyouyml-configuration"><code>.taskyou.yml</code> Configuration</h3>
+<p>You can configure per-project settings by creating a <code>.taskyou.yml</code> file in your project root:</p>
+<pre><code class="language-yaml">worktree:
+  init_script: bin/worktree-setup
+</code></pre>
+<p><strong>Supported filenames</strong> (in order of precedence):</p>
+<ul>
+<li><code>.taskyou.yml</code></li>
+<li><code>.taskyou.yaml</code></li>
+<li><code>taskyou.yml</code></li>
+<li><code>taskyou.yaml</code></li>
+</ul>
+<p><strong>Configuration options:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>worktree.init_script</code></td>
+<td>Path to script that runs after worktree creation (relative or absolute)</td>
+<td><code>bin/worktree-setup</code></td>
+</tr>
+<tr>
+<td><code>worktree.teardown_script</code></td>
+<td>Path to script that runs before a worktree is removed — on archive as well as delete (relative or absolute)</td>
+<td><code>bin/worktree-teardown</code></td>
+</tr>
+</tbody></table>
+<h3 id="projects">Projects</h3>
+<p>Configure projects in Settings (<code>s</code>):</p>
+<ul>
+<li><strong>Name</strong> - Project identifier (e.g., <code>myproject</code>)</li>
+<li><strong>Path</strong> - Local filesystem path to git repo</li>
+<li><strong>Aliases</strong> - Short names for quick reference</li>
+<li><strong>Instructions</strong> - Project-specific AI instructions</li>
+<li><strong>Claude Config Dir</strong> - Optional override for <code>CLAUDE_CONFIG_DIR</code> (use different Claude accounts per project)</li>
+</ul>
+<h3 id="worktrees">Worktrees</h3>
+<p>Tasks run in isolated git worktrees at <code>~/.local/share/task/worktrees/{project}/task-{id}</code>. This allows multiple tasks to run in parallel without conflicts. Press <code>o</code> to open a task&#39;s worktree.</p>
+<h4 id="worktree-setup-script">Worktree Setup Script</h4>
+<p>You can configure a script to run automatically after each worktree is created. The setup script runs:</p>
+<ul>
+<li><strong>After</strong> the git worktree is created</li>
+<li><strong>Before</strong> the AI executor (Claude/Codex) starts working on the task</li>
+<li>When reusing an existing worktree that has already been checked out</li>
+</ul>
+<p>This is useful for:</p>
+<ul>
+<li>Installing dependencies</li>
+<li>Setting up databases</li>
+<li>Copying configuration files</li>
+<li>Running migrations</li>
+</ul>
+<p><strong>Two ways to configure:</strong></p>
+<ol>
+<li><strong>Conventional location</strong> - Create an executable script at <code>bin/worktree-setup</code>:</li>
+</ol>
+<pre><code class="language-bash">#!/bin/bash
+# Example: bin/worktree-setup
+bundle install
+cp config/database.yml.example config/database.yml
+</code></pre>
+<ol start="2">
+<li><strong>Custom location</strong> - Specify in <code>.taskyou.yml</code>:</li>
+</ol>
+<pre><code class="language-yaml">worktree:
+  init_script: scripts/my-setup.sh
+</code></pre>
+<p>The script runs in the worktree directory and has access to all worktree environment variables (<code>WORKTREE_TASK_ID</code>, <code>WORKTREE_PORT</code>, <code>WORKTREE_PATH</code>).</p>
+<h4 id="worktree-teardown-script">Worktree Teardown Script</h4>
+<p>You can configure a script to run automatically just before a worktree is removed. This is useful for releasing per-worktree resources:</p>
+<ul>
+<li>Dropping task-specific databases</li>
+<li>Freeing an allocated Redis DB, S3 prefix, or dev-server symlink</li>
+<li>Stopping background services and docker containers</li>
+<li>Removing temporary files</li>
+</ul>
+<p>TaskYou removes a worktree in one of two ways — <strong>archive</strong> (worktree state, including uncommitted changes, is first saved to a git ref so the task can be unarchived later with everything restored) and <strong>delete</strong> — and the teardown script runs on <strong>both</strong>.</p>
+<p><strong>When it runs:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Trigger</th>
+<th>How the worktree goes away</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Automatic stale-worktree sweep</strong> — the daemon archives and removes worktrees for <code>done</code>/<code>archived</code> tasks whose completion is older than the cleanup max age (default <strong>24h</strong>, setting <code>worktree_cleanup_max_age</code>; set to <code>0</code>/<code>disabled</code> to turn off)</td>
+<td>archive</td>
+</tr>
+<tr>
+<td><code>ty worktrees cleanup</code> (<code>--max-age 0</code> sweeps every done/archived worktree now, <code>--dry-run</code> previews)</td>
+<td>archive</td>
+</tr>
+<tr>
+<td>Archiving a task in the TUI (<code>a</code>)</td>
+<td>archive</td>
+</tr>
+<tr>
+<td><strong>Trash sweep</strong> — a trashed task&#39;s worktree is removed once the retention window expires (default <strong>14 days</strong>, setting <code>trash_retention</code>)</td>
+<td>delete</td>
+</tr>
+<tr>
+<td><code>ty delete --hard</code></td>
+<td>delete</td>
+</tr>
+<tr>
+<td>Moving a task to another project (<code>ty move</code>, or the TUI move action) — the old worktree is removed</td>
+<td>delete</td>
+</tr>
+</tbody></table>
+<p>So a finished task releases its resources on its own: by default the sweep archives and tears down its worktree ~24 hours after it completes. You do not need to build a separate reaper.</p>
+<p>Note that <code>d</code> in the TUI and plain <code>ty delete</code> <strong>trash</strong> a task rather than destroying it — the worktree is deliberately left on disk so <code>ty restore</code> works. Teardown for those runs later, when the trash sweep hard-deletes the task (or immediately if you pass <code>--hard</code>).</p>
+<p><strong>When it does not run:</strong></p>
+<ul>
+<li>You remove the worktree yourself, outside TaskYou (<code>git worktree remove</code>, <code>rm -rf</code>) — TaskYou never sees it happen.</li>
+<li>Projects that don&#39;t use worktrees (the task runs in the project directory itself). Nothing per-task was created, so nothing is torn down.</li>
+</ul>
+<p><strong>Two ways to configure:</strong></p>
+<ol>
+<li><strong>Conventional location</strong> - Create an executable script at <code>bin/worktree-teardown</code>:</li>
+</ol>
+<pre><code class="language-bash">#!/bin/bash
+# Example: bin/worktree-teardown
+bin/rails db:drop
+</code></pre>
+<ol start="2">
+<li><strong>Custom location</strong> - Specify in <code>.taskyou.yml</code>:</li>
+</ol>
+<pre><code class="language-yaml">worktree:
+  teardown_script: scripts/my-teardown.sh
+</code></pre>
+<p>The script is resolved from the project root but executed with the worktree as its working directory, with the same environment variables as the setup script (<code>WORKTREE_TASK_ID</code>, <code>WORKTREE_PORT</code>, <code>WORKTREE_PATH</code>). Its output is streamed into the task log, prefixed with <code>[teardown]</code>.</p>
+<p><strong>Your teardown script must not refuse to run.</strong> A non-zero exit is logged as a warning and TaskYou removes the worktree anyway — cleanup never fails on your script. A script that guards itself (bailing out when the worktree is dirty, for example) will therefore leak whatever it was supposed to release, silently. Write it to be unconditional and idempotent. TaskYou also waits for the script to finish with no timeout, so keep it quick.</p>
+<p><strong>Note:</strong> Teardown is tied to worktree removal, not to task status, so it happens after the max-age delay rather than the moment a task finishes. If you need cleanup at the exact moment a task completes, use <a href="#event-hooks">Event Hooks</a> on the <code>task.completed</code> event — but be aware the worktree is still live at that point (the agent&#39;s changes may not be merged yet), and the teardown script will still run later when the worktree is actually removed.</p>
+<h3 id="running-applications-in-worktrees">Running Applications in Worktrees</h3>
+<p>Each task provides environment variables that applications can use to run in isolation:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>WORKTREE_TASK_ID</code></td>
+<td>Unique task identifier</td>
+<td><code>207</code></td>
+</tr>
+<tr>
+<td><code>WORKTREE_PORT</code></td>
+<td>Unique port (3100-4099)</td>
+<td><code>3100</code></td>
+</tr>
+<tr>
+<td><code>WORKTREE_PATH</code></td>
+<td>Path to the worktree</td>
+<td><code>/path/to/project/.task-worktrees/207-my-task</code></td>
+</tr>
+</tbody></table>
+<h4 id="loading-environment-variables">Loading Environment Variables</h4>
+<p>Each worktree includes a <code>.envrc</code> file with these variables. To load them:</p>
+<ul>
+<li><strong>With <a href="https://direnv.net/">direnv</a></strong> (recommended): Variables load automatically when you <code>cd</code> into the worktree. Run <code>direnv allow</code> the first time.</li>
+<li><strong>Without direnv</strong>: Run <code>source .envrc</code> manually.</li>
+</ul>
+<p>These variables allow multiple tasks to run simultaneously without conflicts on ports or databases.</p>
+<h4 id="example-rails-application">Example: Rails Application</h4>
+<p>Configure your Rails app to use worktree variables for complete isolation:</p>
+<p><strong>config/puma.rb:</strong></p>
+<pre><code class="language-ruby">port ENV.fetch(&quot;WORKTREE_PORT&quot;, 3000)
+</code></pre>
+<p><strong>config/database.yml:</strong></p>
+<pre><code class="language-yaml">development:
+  database: myapp_dev&lt;%= ENV[&#39;WORKTREE_TASK_ID&#39;] ? &quot;_task#{ENV[&#39;WORKTREE_TASK_ID&#39;]}&quot; : &quot;&quot; %&gt;
+</code></pre>
+<p><strong>Procfile.dev:</strong></p>
+<pre><code>web: bin/rails server -p ${WORKTREE_PORT:-3000}
+</code></pre>
+<p><strong>bin/worktree-setup:</strong></p>
+<pre><code class="language-bash">#!/bin/bash
+set -e
+
+# Install dependencies
+bundle install
+
+# Create isolated database for this task
+bin/rails db:create db:migrate
+</code></pre>
+<p><strong>bin/worktree-teardown:</strong></p>
+<pre><code class="language-bash">#!/bin/bash
+# Drop the task-specific database
+bin/rails db:drop
+</code></pre>
+<p>Now the AI executor (Claude or Codex) can:</p>
+<ul>
+<li>Run your app with <code>bin/dev</code></li>
+<li>Access it at <code>http://localhost:$WORKTREE_PORT</code></li>
+<li>Work on multiple tasks in parallel without database or port conflicts</li>
+</ul>
+<h4 id="example-nodejs-application">Example: Node.js Application</h4>
+<p><strong>package.json:</strong></p>
+<pre><code class="language-json">{
+  &quot;scripts&quot;: {
+    &quot;dev&quot;: &quot;next dev -p ${WORKTREE_PORT:-3000}&quot;
+  }
+}
+</code></pre>
+<p><strong>bin/worktree-setup:</strong></p>
+<pre><code class="language-bash">#!/bin/bash
+npm install
+cp .env.example .env.local
+</code></pre>
+<h2 id="shell-completion">Shell Completion</h2>
+<p>TaskYou supports tab completion for all CLI commands, subcommands, flags, and dynamic values (task IDs, project names, statuses, etc.).</p>
+<h3 id="setup-1">Setup</h3>
+<p><strong>Zsh</strong> (macOS default):</p>
+<pre><code class="language-bash"># Enable completion if not already done:
+echo &quot;autoload -U compinit; compinit&quot; &gt;&gt; ~/.zshrc
+
+# Generate and install the completion script:
+ty completion zsh &gt; &quot;${fpath[1]}/_ty&quot;
+
+# Restart your shell or run:
+source ~/.zshrc
+</code></pre>
+<p><strong>Bash</strong>:</p>
+<pre><code class="language-bash"># Linux:
+ty completion bash &gt; /etc/bash_completion.d/ty
+
+# macOS (with Homebrew):
+ty completion bash &gt; $(brew --prefix)/etc/bash_completion.d/ty
+</code></pre>
+<p><strong>Fish</strong>:</p>
+<pre><code class="language-bash">ty completion fish &gt; ~/.config/fish/completions/ty.fish
+</code></pre>
+<p><strong>PowerShell</strong>:</p>
+<pre><code class="language-powershell">ty completion powershell &gt;&gt; $PROFILE
+</code></pre>
+<h3 id="what-completes">What completes</h3>
+<ul>
+<li><strong>Subcommands</strong> — <code>ty &lt;TAB&gt;</code> shows all available commands</li>
+<li><strong>Task IDs</strong> — <code>ty show &lt;TAB&gt;</code> lists tasks with their status and title</li>
+<li><strong>Statuses</strong> — <code>ty status 42 &lt;TAB&gt;</code> suggests backlog, queued, processing, etc.</li>
+<li><strong>Projects</strong> — <code>ty move 42 &lt;TAB&gt;</code> and <code>--project &lt;TAB&gt;</code> complete project names</li>
+<li><strong>Task types</strong> — <code>--type &lt;TAB&gt;</code> completes from your configured task types</li>
+<li><strong>Executors</strong> — <code>--executor &lt;TAB&gt;</code> suggests claude, codex, gemini, grok, etc.</li>
+<li><strong>Settings</strong> — <code>ty settings set &lt;TAB&gt;</code> shows available setting keys</li>
+</ul>
+<h2 id="ssh-access--deployment">SSH Access &amp; Deployment</h2>
+<p>Task You can run as an SSH server, allowing you to access your task board from anywhere.</p>
+<h3 id="running-the-ssh-server">Running the SSH Server</h3>
+<p>The <code>taskd</code> daemon provides SSH access to the TUI:</p>
+<pre><code class="language-bash"># Start SSH server on default port (2222)
+./bin/taskd
+
+# Custom port
+./bin/taskd -addr :22222
+
+# Custom database location
+./bin/taskd -db /path/to/tasks.db
+
+# Custom SSH host key
+./bin/taskd -host-key ~/.ssh/custom_key
+</code></pre>
+<p>Once running, connect from any machine:</p>
+<pre><code class="language-bash">ssh -p 2222 username@your-server.com
+</code></pre>
+<p>Replace <code>your-server.com</code> with your server&#39;s hostname or IP address. The SSH server accepts public key authentication (currently accepts all keys - see <a href="#security">Security</a> below).</p>
+<h3 id="deployment">Deployment</h3>
+<h4 id="building-for-linux">Building for Linux</h4>
+<p>If deploying from macOS to a Linux server:</p>
+<pre><code class="language-bash">make build-linux
+</code></pre>
+<p>This creates Linux binaries in <code>./bin/</code>.</p>
+<h4 id="installing-as-a-systemd-service">Installing as a Systemd Service</h4>
+<p>For persistent SSH access, install taskd as a systemd service:</p>
+<pre><code class="language-bash">./scripts/install-service.sh
+</code></pre>
+<p>This creates <code>~/.config/systemd/user/taskd.service</code> and enables it to start on boot.</p>
+<p>Manage the service with:</p>
+<pre><code class="language-bash">systemctl --user status taskd   # Check status
+systemctl --user start taskd    # Start
+systemctl --user stop taskd     # Stop
+systemctl --user restart taskd  # Restart
+journalctl --user -u taskd      # View logs
+</code></pre>
+<h4 id="security">Security</h4>
+<p><strong>Important:</strong> The SSH server currently accepts all public keys. For production use, edit <code>internal/server/ssh.go</code>:</p>
+<pre><code class="language-go">wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
+    // Compare key fingerprint against allowed list
+    allowed := map[string]bool{
+        &quot;SHA256:your-allowed-key-fingerprint&quot;: true,
+    }
+    return allowed[ssh.FingerprintSHA256(key)]
+})
+</code></pre>
+<p>Get your key fingerprint with:</p>
+<pre><code class="language-bash">ssh-keygen -lf ~/.ssh/id_ed25519.pub
+</code></pre>
+<p>Password authentication is disabled by default.</p>
+<h2 id="extensions">Extensions</h2>
+<h3 id="ty-email">ty-email</h3>
+<p>Email interface for TaskYou. Send emails to create tasks, reply to provide input, receive status updates—all from your phone or any email client.</p>
+<pre><code class="language-bash">cd extensions/ty-email
+go build -o ty-email ./cmd
+./ty-email init   # Interactive setup wizard
+./ty-email serve  # Run daemon
+</code></pre>
+<p>See <a href="https://github.com/bborn/taskyou/blob/main/extensions/ty-email/README.md">extensions/ty-email/README.md</a> for full documentation.</p>
+<h3 id="ty-chrome">ty-chrome</h3>
+<p>Chrome extension for visual product development in a loop. Annotate any page
+served by a task&#39;s dev server (point at elements, draw boxes, comment) and the
+context — selectors, DOM excerpts, a screenshot with your markers — lands
+directly in the task&#39;s executor, which makes the change while you watch its
+live output in the side panel. The executor can also see and drive your tab
+through the browser bridge (screenshot/snapshot/console/click/type) instead of
+launching its own browser, and the page auto-reloads when it finishes a turn.</p>
+<p><a href="screenshots/browser-annotation.png"><img src="screenshots/browser-annotation.png" alt="Annotating a page with a region and comment"></a></p>
+<pre><code>chrome://extensions → Developer mode → Load unpacked → extensions/ty-chrome
+ty serve   # the extension auto-discovers it
+</code></pre>
+<p>See <a href="https://github.com/bborn/taskyou/blob/main/extensions/ty-chrome/README.md">extensions/ty-chrome/README.md</a> for full documentation.</p>
+<h2 id="development">Development</h2>
+<pre><code class="language-bash">make build        # Build binaries
+make test         # Run tests
+make install      # Install to ~/go/bin
+</code></pre>
+<h2 id="tech-stack">Tech Stack</h2>
+<ul>
+<li><a href="https://github.com/charmbracelet/bubbletea">Bubble Tea</a> - TUI framework</li>
+<li><a href="https://github.com/charmbracelet/lipgloss">Lip Gloss</a> - Terminal styling</li>
+<li><a href="https://github.com/charmbracelet/wish">Wish</a> - SSH server</li>
+<li><a href="https://modernc.org/sqlite">SQLite</a> - Local database</li>
+</ul>
+<p class="source"><a href="https://github.com/bborn/taskyou/blob/main/docs/reference.md">View this guide on GitHub</a></p></main></div>
+<footer class="footer"><div class="wrap"><span>TaskYou. An agent for every task.</span><a href="./">Back to TaskYou</a></div></footer></body></html>

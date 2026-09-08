@@ -1,0 +1,97 @@
+<!doctype html>
+<!-- Generated from getting-started.md by scripts/build-site.mjs. Edit the Markdown source. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your first task — TaskYou</title><meta name="description" content="Your first task: setup, commands, and practical guidance for TaskYou.">
+<link rel="canonical" href="https://taskyou.dev/getting-started.html"><link rel="icon" href="images/logo.webp">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/site.css"></head>
+<body><a class="skip" href="#main">Skip to content</a><nav class="nav" aria-label="Main navigation"><div class="wrap"><a class="brand" href="./"><img src="images/logo.webp" width="40" height="40" alt="">taskyou</a><div class="navlinks"><a href="workflows.html">Workflows</a><a href="https://github.com/bborn/taskyou">GitHub</a></div></div></nav>
+<div class="guide-layout"><aside class="guide-nav" aria-label="Documentation"><p>TaskYou docs</p><a href="getting-started.html" aria-current="page">Your first task</a><a href="workflows.html">Workflow recipes</a><a href="reference.html">Full reference</a><a href="./#demo">Product tour</a></aside>
+<main id="main" class="prose"><h1 id="your-first-task">Your first task</h1>
+<p>Start with a small documentation change in a repo you already have. You will need at least one Git commit in it.</p>
+<h2 id="install">Install</h2>
+<p>TaskYou runs on macOS and Linux. You need Git, tmux, and an installed coding agent that you have already signed in to. Agent usage is billed by your agent provider; TaskYou is free and MIT licensed.</p>
+<pre><code class="language-sh">curl -fsSL https://taskyou.dev/install.sh | bash
+</code></pre>
+<p>This installs prebuilt binaries in <code>~/.local/bin</code>. You do not need Go. Follow the installer&#39;s PATH instructions if your shell cannot find <code>ty</code>.</p>
+<p>Missing tmux? On macOS, run <code>brew install tmux</code>. On Debian or Ubuntu, run <code>sudo apt-get install tmux</code>. Use your distribution&#39;s package manager elsewhere.</p>
+<p>Before continuing, check that <code>git --version</code>, <code>tmux -V</code>, and your chosen agent&#39;s own CLI work in the same terminal. TaskYou supports Claude Code, Codex, Gemini, Grok, Cursor, Pi, OpenCode, and OpenClaw; individual executor features differ.</p>
+<h2 id="try-the-practice-project">Try the practice project</h2>
+<p>Want to see it work before using your own repo? <a href="downloads/taskyou-storefront.zip">Download the storefront</a>, unzip it, and run <code>bash start.sh</code> inside its folder. You also need Node.js 18 or later for this example&#39;s tests.</p>
+<p>The script prepares a Git repository and opens TaskYou. Accept the project, press <strong>n</strong>, pick your agent, and paste:</p>
+<blockquote>
+<p>Add a size guide to product pages. Show measurements in cm and inches. Keep it usable on mobile. Add tests for the conversion and run node --test. Do not push or open a PR.</p>
+</blockquote>
+<p>Save and press <strong>x</strong>. Open the card to watch the executor. Run <code>node --test</code> in its shell, then open the worktree&#39;s <code>index.html</code> to try the result. This is the starting project used in the tour; the size guide is yours to build. Nothing runs until you queue it.</p>
+<h2 id="open-your-project">Open your project</h2>
+<p>In your terminal, change into the root of the repository you want to work on, then run:</p>
+<pre><code class="language-sh">ty
+</code></pre>
+<p>TaskYou offers to register the detected project. Accept it and check that the path is correct and worktree isolation is enabled. Project instructions may be imported from files such as <code>AGENTS.md</code> or <code>CLAUDE.md</code>; inspect them in Settings if needed.</p>
+<p>If you see the welcome screen, choose <strong>Set up a project</strong> and select your repository. If the project already exists, TaskYou opens the board. The TUI starts the background daemon for you.</p>
+<h2 id="give-it-a-small-specific-task">Give it a small, specific task</h2>
+<p>Press <strong>n</strong>. Select your project and an agent you already use. Leave the permission mode at its normal setting for your first task.</p>
+<p>Try this request:</p>
+<blockquote>
+<p>Add a troubleshooting section to README.md using the project&#39;s actual setup commands. Explain three common setup failures and their fixes. Change documentation only. Do not push or open a pull request; leave the changes for me to review.</p>
+</blockquote>
+<p>Save the task, select its card, and press <strong>x</strong> to queue it. Press <strong>Enter</strong> to open its details and live agent output.</p>
+<p><a href="media/task-review-tui.png"><img src="media/task-review-tui.png" alt="A task's live output and shell pane"></a></p>
+<p>The initial request explicitly keeps this first exercise local. Automated workflow recipes have a different handoff: they push branches and open a PR.</p>
+<h2 id="answer-when-it-needs-you">Answer when it needs you</h2>
+<p>If the task moves to <strong>Blocked</strong>, open it and read the agent&#39;s latest output. Answer questions or permission prompts in the agent pane. To change the request or recover a stopped task, use <strong>r</strong> to retry with feedback.</p>
+<p>Blocked means the task needs attention; it is not necessarily a failure. <strong>Done</strong> is a task state, not a guarantee that the change is correct.</p>
+<h2 id="review-the-result">Review the result</h2>
+<p>Read the output and inspect the changed files in the task&#39;s worktree. The task details show its working directory. Confirm that the commands match your project and the change stayed within the request. Merge only after your review.</p>
+<p>For the next task, choose a small bug with a clear expected result. For multi-step work, try a <a href="workflows.html">workflow recipe</a>.</p>
+<h2 id="prefer-commands">Prefer commands?</h2>
+<p>From the root of your repository, register it once and create a task:</p>
+<pre><code class="language-sh">ty projects create myapp --path &quot;$PWD&quot;
+ty create &quot;Document the setup commands&quot; --project myapp --executor codex
+ty list --project myapp
+</code></pre>
+<p>Use the ID printed by <code>create</code> in place of <code>123</code> below:</p>
+<pre><code class="language-sh">ty show 123
+ty execute 123
+ty
+</code></pre>
+<p>Choose <code>--executor claude</code> or another supported executor if that is what you have installed. If you already registered this repository through the TUI, use its existing project name and skip <code>projects create</code>.</p>
+<p><code>execute</code> queues the task. Keep the daemon running to process it: opening <code>ty</code> starts it automatically, or use <code>ty daemon</code> for CLI-only operation.</p>
+<h2 id="if-something-gets-stuck">If something gets stuck</h2>
+<table>
+<thead>
+<tr>
+<th>What you see</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ty: command not found</code></td>
+<td>Add <code>~/.local/bin</code> to your PATH using the installer&#39;s instructions, then open a new terminal.</td>
+</tr>
+<tr>
+<td>No agent starts</td>
+<td>Check <code>tmux -V</code>, then launch the selected agent directly and complete its sign-in.</td>
+</tr>
+<tr>
+<td>The task stays queued</td>
+<td>Run <code>ty daemon status</code>. Open <code>ty</code> to start the daemon, then inspect task output for errors.</td>
+</tr>
+<tr>
+<td>The agent is waiting</td>
+<td>Open the task and answer its question or permission prompt in the agent pane.</td>
+</tr>
+<tr>
+<td>The worktree cannot build</td>
+<td>Configure your project&#39;s <a href="reference.html#worktree-setup-script">worktree init script</a> to install dependencies and set up the environment.</td>
+</tr>
+<tr>
+<td>Work stops when the computer sleeps</td>
+<td>Run TaskYou on a machine that stays awake. See <a href="reference.html#ssh-access--deployment">SSH access</a> for server use.</td>
+</tr>
+</tbody></table>
+<h2 id="want-the-desktop-app">Want the desktop app?</h2>
+<p>Get the macOS Apple Silicon DMG or Linux AppImage/DEB from the <a href="https://github.com/bborn/taskyou/releases/latest">latest release</a>. The desktop app includes the TaskYou engine; tmux and an authenticated agent are still required. See <a href="reference.html#the-gui">desktop installation</a> for macOS first-launch details.</p>
+<p>For the browser UI, use <code>ty serve</code> with a build that includes the web UI, then open <code>http://localhost:8080</code>. See the <a href="reference.html">full reference</a> for configuration and commands.</p>
+<p class="source"><a href="https://github.com/bborn/taskyou/blob/main/docs/getting-started.md">View this guide on GitHub</a></p></main></div>
+<footer class="footer"><div class="wrap"><span>TaskYou. An agent for every task.</span><a href="./">Back to TaskYou</a></div></footer></body></html>

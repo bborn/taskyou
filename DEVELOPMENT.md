@@ -319,3 +319,28 @@ go fmt ./...      # Format code
 - Check existing code for patterns
 - Run `make help` for available commands
 - Review recent commits for style examples
+
+## Public website and guides
+
+The landing page is `docs/index.html`; shared styles and browser behavior live in
+`docs/assets/`. Edit `docs/getting-started.md`, `docs/workflows.md`, and
+`docs/reference.md` for guide content, then regenerate their committed HTML:
+
+```sh
+npm ci --prefix desktop  # only if the existing dependencies are not installed
+node scripts/build-site.mjs
+node scripts/build-site.mjs --check
+python3 -m http.server 8876 --bind 127.0.0.1 --directory docs
+```
+
+Open `http://127.0.0.1:8876` to check desktop and mobile layouts, navigation,
+workflow downloads, and the copy button. Publishing uses the committed static
+files; no new site build dependency is required on the host. The three starter
+workflow definitions live in `docs/workflows/` and are downloadable from the site.
+
+For the public onboarding assets, run `python3 scripts/package-practice-project.py`
+after editing `examples/storefront`, then `node scripts/build-site.mjs` and
+`node scripts/check-site.mjs`. The link check validates generated downloads and
+local image/fragment targets. Exercise a released binary with
+`scripts/qa/check-onboarding.sh /absolute/path/to/ty`; it uses a temporary database
+and local bare remote, since workflow staging can push even with `--no-execute`.
