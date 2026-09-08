@@ -20,10 +20,10 @@ func recordingTmux(t *testing.T) (logPath string) {
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> '" + logPath + "'\n" +
 		"case \"$*\" in\n" +
+		"  *split-window*) echo '%777';; \n" + // a split reports its own new pane
+		"  *list-panes*) echo '%999'; echo '%888';; \n" +
 		"  *'#{pane_id}'*) echo '%999';; \n" + // the OTHER instance's pane
 		"  *'#{session_name}'*) echo 'task-ui-OTHER';; \n" +
-		"  *list-panes*) echo '%999'; echo '%888';; \n" +
-		"  *split-window*) echo '%777';; \n" +
 		"esac\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(root, "tmux"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
