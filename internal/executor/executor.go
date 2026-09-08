@@ -4693,16 +4693,18 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				}
 			}
 
-			// Also check task-ui (pane might be joined there). Local only: task-ui is
-			// THIS machine's TUI session, and asking a placed host about it is an ssh
-			// round trip that can only ever answer "no such session".
+			// Opening a task detail moves both panes out of the daemon window and into
+			// this instance's UI session. The source window then disappears even though
+			// the agent is still running. Follow the persisted agent pane ID instead of
+			// guessing a UI session name: pane IDs survive join-pane, and isolated or
+			// concurrent instances name their UI sessions task-ui-<session-id> rather
+			// than plain task-ui. Local only — a remotely placed task is probed through
+			// its remote window/channel above and its locally stored pane ID does not
+			// address that host's tmux server.
 			if !windowExists && remoteHost == "" {
 				checkCtx, checkCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
-				checkCmd := tmuxCmd(checkCtx, "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
-				if out, err := checkCmd.Output(); err == nil {
-					if strings.Contains(string(out), "claude") {
-						windowExists = true
-					}
+				if task != nil && task.ClaudePaneID != "" {
+					windowExists = probeWindow(checkCtx, task.ClaudePaneID, false) == windowLive
 				}
 				checkCancel()
 			}
