@@ -2495,6 +2495,12 @@ func (m *DetailModel) focusExecutorPane() {
 	}
 }
 
+// tmuxCmdSep separates two commands inside a single tmux command argument (e.g.
+// the body of a bind-key). It is the two characters backslash-semicolon: tmux
+// strips the backslash and treats the ";" as part of the command being defined.
+// A bare ";" would instead terminate the tmux command line itself.
+const tmuxCmdSep = `\;`
+
 // bindPaneNavigation installs the same navigation for local and SSH panes.
 func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
 	// Bind Shift+Arrow keys to cycle through panes from any pane
@@ -2506,10 +2512,18 @@ func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
 
 	// Forward an internal navigation key to the TUI. The task loader focuses
 	// the executor after pane setup completes, including slow SSH attachments.
+	//
+	// The separator MUST be the escaped tmuxCmdSep. A bare ";" is eaten by tmux's
+	// own argv parser as a top-level command separator, so this reads as TWO
+	// commands: it binds only the select-pane half and RUNS the send-keys
+	// immediately. bindPaneNavigation runs on every pane setup, so that typed
+	// C-Up and C-Down into pane 0 - the TUI - every time a task was opened, and
+	// the detail view acts on those as prev/next task. Opening a task therefore
+	// navigated straight to a different one.
 	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up",
-		"select-pane", "-t", ":.0", ";", "send-keys", "-t", ":.0", "C-Up").Run()
+		"select-pane", "-t", ":.0", tmuxCmdSep, "send-keys", "-t", ":.0", "C-Up").Run()
 	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down",
-		"select-pane", "-t", ":.0", ";", "send-keys", "-t", ":.0", "C-Down").Run()
+		"select-pane", "-t", ":.0", tmuxCmdSep, "send-keys", "-t", ":.0", "C-Down").Run()
 
 }
 
