@@ -4320,6 +4320,10 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 		return fmt.Errorf("run TUI: %w", err)
 	}
 
+	// Bells are debounced, so one may still be scheduled when the user quits.
+	// Deliver it instead of dropping it on the floor.
+	ui.FlushBell()
+
 	if state, ready := model.ReloadState(); ready {
 		// Bubble Tea has restored the terminal and the model returned borrowed
 		// panes first. Replace this process without destroying its tmux session.
