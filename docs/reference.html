@@ -831,6 +831,46 @@ TASK_EVENT       # Event type
 TASK_TIMESTAMP   # ISO 8601 timestamp
 </code></pre>
 <p>See <a href="https://github.com/bborn/taskyou/blob/main/examples/hooks/">examples/hooks/</a> for examples.</p>
+<h3 id="distribute-agents-with-ty-on">Distribute agents with ty-on</h3>
+<p>Run tasks on your desktop or servers while managing them from the same TaskYou
+board. The optional <strong>ty-on</strong> plugin picks a machine for each task; TaskYou
+creates an isolated worktree there, starts the agent over SSH, and tracks its
+progress. Remote execution supports <strong>Claude and Codex</strong>.</p>
+<p>First, prepare each machine with SSH access, a checkout of your project, Git,
+tmux, and an authenticated Claude or Codex executable on its login shell PATH.
+TaskYou does not clone the initial checkout or copy agent credentials for you.</p>
+<p>Add the machines to <code>~/.config/on/hosts.yaml</code>. Repository keys must match the
+project name in TaskYou; paths point to existing checkouts on those machines:</p>
+<pre><code class="language-yaml">hosts:
+  desktop:
+    ssh: desktop
+    capabilities: [&quot;executor:claude&quot;, &quot;executor:codex&quot;]
+    repos:
+      storefront: ~/Projects/storefront
+  server:
+    ssh: dev-server
+    capabilities: [&quot;executor:claude&quot;, &quot;executor:codex&quot;]
+    repos:
+      storefront: ~/projects/storefront
+</code></pre>
+<p>Install the <a href="https://github.com/bborn/on">on CLI</a> to compare available memory
+across multiple machines. Then, from a TaskYou source checkout with Go installed:</p>
+<pre><code class="language-bash">make install-ty-on
+ty plugins list
+</code></pre>
+<p>Queue tasks as usual. ty-on selects a host configured for the task&#39;s project and
+executor. With one eligible host, it selects that host directly. With several,
+it uses <code>on ls</code> to pick the reachable host with the most free memory. Task detail
+shows the selected host and the reason. You can also choose a host yourself with
+<strong>Change host</strong> in the desktop/browser, <code>@</code> in the TUI, or <code>ty place</code> in the CLI.</p>
+<p>Tasks fall back to local execution when no remote placement is available. To
+require a remote machine for a project, add this to its <code>.taskyou.yml</code>:</p>
+<pre><code class="language-yaml">placement:
+  remote_required: true
+</code></pre>
+<p>With that setting, an unavailable remote destination stops the launch instead
+of starting an agent locally. See the <a href="https://github.com/bborn/taskyou/blob/main/extensions/ty-on/README.md">ty-on setup and placement rules</a>
+and <a href="https://github.com/bborn/taskyou/blob/main/docs/remote-execution.md">remote execution guide</a> for details.</p>
 <h3 id="plugins">Plugins</h3>
 <p>A <strong>plugin</strong> is a self-contained directory under <code>~/.config/task/plugins/</code> with a
 <code>plugin.yaml</code> manifest. It can carry any mix of three things:</p>

@@ -702,6 +702,60 @@ TASK_TIMESTAMP   # ISO 8601 timestamp
 
 See [examples/hooks/](../examples/hooks/) for examples.
 
+### Distribute agents with ty-on
+
+Run tasks on your desktop or servers while managing them from the same TaskYou
+board. The optional **ty-on** plugin picks a machine for each task; TaskYou
+creates an isolated worktree there, starts the agent over SSH, and tracks its
+progress. Remote execution supports **Claude and Codex**.
+
+First, prepare each machine with SSH access, a checkout of your project, Git,
+tmux, and an authenticated Claude or Codex executable on its login shell PATH.
+TaskYou does not clone the initial checkout or copy agent credentials for you.
+
+Add the machines to `~/.config/on/hosts.yaml`. Repository keys must match the
+project name in TaskYou; paths point to existing checkouts on those machines:
+
+```yaml
+hosts:
+  desktop:
+    ssh: desktop
+    capabilities: ["executor:claude", "executor:codex"]
+    repos:
+      storefront: ~/Projects/storefront
+  server:
+    ssh: dev-server
+    capabilities: ["executor:claude", "executor:codex"]
+    repos:
+      storefront: ~/projects/storefront
+```
+
+Install the [on CLI](https://github.com/bborn/on) to compare available memory
+across multiple machines. Then, from a TaskYou source checkout with Go installed:
+
+```bash
+make install-ty-on
+ty plugins list
+```
+
+Queue tasks as usual. ty-on selects a host configured for the task's project and
+executor. With one eligible host, it selects that host directly. With several,
+it uses `on ls` to pick the reachable host with the most free memory. Task detail
+shows the selected host and the reason. You can also choose a host yourself with
+**Change host** in the desktop/browser, `@` in the TUI, or `ty place` in the CLI.
+
+Tasks fall back to local execution when no remote placement is available. To
+require a remote machine for a project, add this to its `.taskyou.yml`:
+
+```yaml
+placement:
+  remote_required: true
+```
+
+With that setting, an unavailable remote destination stops the launch instead
+of starting an agent locally. See the [ty-on setup and placement rules](../extensions/ty-on/README.md)
+and [remote execution guide](remote-execution.md) for details.
+
 ### Plugins
 
 A **plugin** is a self-contained directory under `~/.config/task/plugins/` with a

@@ -377,6 +377,27 @@ h3 {
   color:var(--muted);
 }
 
+.machines-section {
+  border-bottom:1px solid var(--line);
+}
+
+.machines-section .section-lead {
+  margin-top:0;
+}
+
+.machines-section h2+.section-lead {
+  margin-top:25px;
+}
+
+.machines-section code {
+  font-size:.9em;
+  color:var(--mint);
+}
+
+.machines-detail {
+  margin-top:16px;
+}
+
 .workflow-section {
   background:var(--orange);
   color:#29150f;
