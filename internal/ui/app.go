@@ -421,9 +421,13 @@ type AppModel struct {
 	detailView   *DetailModel
 	// Prevent rapid arrow key navigation from causing duplicate panes
 	taskTransitionInProgress bool
-	detailCleanupInFlight    bool
-	pendingDetailLoad        *taskLoadedMsg
-	taskLoadRevision         uint64
+	// Deadline after which a held transition is treated as finished. Pane setup
+	// reports back through panesJoinedMsg / paneWaitForExecutorMsg; if such a
+	// result is ever lost, this keeps a stuck guard from wedging navigation.
+	taskTransitionDeadline time.Time
+	detailCleanupInFlight  bool
+	pendingDetailLoad      *taskLoadedMsg
+	taskLoadRevision       uint64
 	// Grace period after task transition to prevent focus flashing
 	taskTransitionGraceUntil time.Time
 
@@ -1138,7 +1142,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentView = ViewDetail
 			m.pendingDetailLoad = nil
 			m.taskLoadRevision++
-			m.taskTransitionInProgress = false
+			m.endTaskTransition()
 			m.notification = "Could not return task panes to the daemon; the running process was preserved. Try Back again."
 			m.detailView.paneError = m.notification
 			if m.detailView.task != nil {
@@ -1221,8 +1225,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingDetailLoad = &msg
 			return m, nil
 		}
-		// Reset transition flag now that task is loaded
-		m.taskTransitionInProgress = false
+		// The row is loaded, but the switch is not finished: the new detail view's
+		// tmux panes are joined asynchronously below. Hand the guard to that join
+		// (released on panesJoinedMsg / paneWaitForExecutorMsg) rather than
+		// reopening it here, where it would let keys queued during the join each
+		// start another detach/join cycle.
 		// Set grace period to prevent focus flashing during task switch
 		// This allows the new detail view to settle before checking focus
 		m.taskTransitionGraceUntil = time.Now().Add(500 * time.Millisecond)
@@ -1252,9 +1259,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.SetPosition(pos, total)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
-			// Start async pane setup if needed
+			// Start async pane setup if needed. The detail view reports whether it
+			// is waiting on panes; when it is not (no tmux, nothing to join) the
+			// switch is already complete and the guard must not wait for a pane
+			// message that will never be sent.
 			if initCmd != nil {
 				cmds = append(cmds, initCmd)
+			}
+			if !m.detailView.paneLoading {
+				m.endTaskTransition()
 			}
 			// Start tmux output ticker if session is active
 			if tickerCmd := m.detailView.StartTmuxTicker(); tickerCmd != nil {
@@ -1279,6 +1292,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.err = msg.err
+			m.endTaskTransition()
 		}
 
 	case prInfoMsg:
@@ -1587,11 +1601,33 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewDetail && m.detailView != nil {
 			// Skip focus checking during task transitions to prevent visual flashing
 			// The grace period allows the new task to settle before checking focus
-			if !m.taskTransitionInProgress && time.Now().After(m.taskTransitionGraceUntil) && !m.focusLoadInFlight {
+			if !m.transitionInProgress() && time.Now().After(m.taskTransitionGraceUntil) && !m.focusLoadInFlight {
 				m.focusLoadInFlight = true
 				cmds = append(cmds, m.detailView.focusStateCmd())
 			}
 			cmds = append(cmds, m.focusTick())
+		}
+
+	case panesJoinedMsg, paneWaitForExecutorMsg:
+		// Pane setup has reported back: either the panes are in place, or the task
+		// is now waiting on the daemon to build a window (an open-ended wait that
+		// must not hold navigation). Either way that switch is over.
+		//
+		// Only when a detail view actually owns it. detachDetail nils detailView
+		// and then waits on paneWork, so the *outgoing* task's join lands here
+		// mid-switch; opening the guard on that would let another key start a
+		// cycle before the incoming task has its panes. The incoming view sends
+		// its own message (or clears the guard at load time when it has no pane
+		// work to do), and taskTransitionTimeout backstops a lost one.
+		if m.detailView != nil {
+			m.endTaskTransition()
+			if m.currentView == ViewDetail {
+				var cmd tea.Cmd
+				m.detailView, cmd = m.detailView.Update(msg)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
 		}
 
 	case dbChangeMsg:
@@ -2698,6 +2734,44 @@ type detailCleanupMsg struct {
 	failed *DetailModel
 }
 
+// taskTransitionTimeout bounds how long a task switch may hold the navigation
+// guard while waiting for its panes. Joins are normally well under a second but
+// have been observed at ~2s on a task whose stored window ID went stale; this is
+// the backstop for a pane result that never arrives at all.
+const taskTransitionTimeout = 10 * time.Second
+
+// beginTaskTransition closes the navigation guard for a task switch. It stays
+// closed until the new detail view's panes are in place (endTaskTransition), so a
+// second switch cannot start while tmux panes are still being moved.
+func (m *AppModel) beginTaskTransition() {
+	m.taskTransitionInProgress = true
+	m.taskTransitionDeadline = time.Now().Add(taskTransitionTimeout)
+}
+
+// endTaskTransition reopens the navigation guard.
+func (m *AppModel) endTaskTransition() {
+	m.taskTransitionInProgress = false
+	m.taskTransitionDeadline = time.Time{}
+}
+
+// transitionInProgress reports whether a task switch still owns the detail view.
+//
+// The guard must outlive the *database* load: NewDetailModel returns as soon as
+// the row is read, but the ~30-call tmux join that actually populates the pane
+// runs asynchronously for another 0.5-2s. Reopening at row-load time let every
+// key pressed during that window start its own detach/join cycle, and because
+// detachDetail blocks on paneWork.Wait() each cycle tore the executor pane back
+// out microseconds after it landed — the pane visibly flickering between tasks.
+func (m *AppModel) transitionInProgress() bool {
+	if !m.taskTransitionInProgress {
+		return false
+	}
+	if !m.taskTransitionDeadline.IsZero() && time.Now().After(m.taskTransitionDeadline) {
+		return false
+	}
+	return true
+}
+
 // Detach ownership immediately so board input can continue. New detail loads
 // wait for the handoff, and old pane results cannot reach the next detail view.
 func (m *AppModel) detachDetail(saveHeight bool) tea.Cmd {
@@ -2744,7 +2818,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.Back) {
 		m.taskLoadRevision++
 		m.pendingDetailLoad = nil
-		m.taskTransitionInProgress = false
+		m.endTaskTransition()
 		m.currentView = ViewDashboard
 		// Clear origin column when exiting detail view
 		m.kanban.ClearOriginColumn()
@@ -2880,10 +2954,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Ignore if transition already in progress to prevent duplicate panes
-		if m.taskTransitionInProgress {
+		if m.transitionInProgress() {
 			return m, nil
 		}
-		m.taskTransitionInProgress = true
+		m.beginTaskTransition()
 		// Clean up current detail view before switching (without saving height)
 		cleanup := m.detachDetail(false)
 		// Move selection up in the kanban
@@ -2892,7 +2966,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, tea.Batch(cleanup, m.loadTaskWithOptions(task.ID, keyMsg.String() == "ctrl+up"))
 		}
-		m.taskTransitionInProgress = false
+		m.endTaskTransition()
 		return m, cleanup
 	}
 	if key.Matches(keyMsg, m.keys.Down) || keyMsg.String() == "ctrl+down" {
@@ -2901,10 +2975,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Ignore if transition already in progress to prevent duplicate panes
-		if m.taskTransitionInProgress {
+		if m.transitionInProgress() {
 			return m, nil
 		}
-		m.taskTransitionInProgress = true
+		m.beginTaskTransition()
 		// Clean up current detail view before switching (without saving height)
 		cleanup := m.detachDetail(false)
 		// Move selection down in the kanban
@@ -2913,7 +2987,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, tea.Batch(cleanup, m.loadTaskWithOptions(task.ID, keyMsg.String() == "ctrl+down"))
 		}
-		m.taskTransitionInProgress = false
+		m.endTaskTransition()
 		return m, cleanup
 	}
 
