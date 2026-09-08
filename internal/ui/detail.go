@@ -918,12 +918,11 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 			}
 		}
 
-		// Resolve the actual UI session name (avoid prefix-matching the wrong session).
-		if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
-			m.uiSessionName = strings.TrimSpace(string(out))
-		} else {
-			m.uiSessionName = "task-ui" // fallback
-		}
+		// Resolve the actual UI session name (avoid prefix-matching the wrong
+		// session, and avoid naming another instance's — see ownSessionName).
+		sessionCtx, cancelSession := context.WithTimeout(context.Background(), 5*time.Second)
+		m.uiSessionName = m.ownSessionName(sessionCtx)
+		cancelSession()
 
 		// Find the task's existing window (one tmux call).
 		m.cachedWindowTarget = m.findTaskWindow()
@@ -1061,19 +1060,14 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 	defer cancel()
 
 	if m.uiSessionName == "" {
-		if out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
-			m.uiSessionName = strings.TrimSpace(string(out))
-		} else {
-			m.uiSessionName = "task-ui"
-		}
+		m.uiSessionName = m.ownSessionName(ctx)
 	}
 
-	tuiPaneOut, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
-	if err != nil {
-		log.Error("attachRemotePane: could not read the TUI pane id: %v", err)
+	tuiPaneID := ownPaneID()
+	if tuiPaneID == "" {
+		log.Error("attachRemotePane: no $TMUX_PANE; refusing to guess this instance's pane")
 		return ""
 	}
-	tuiPaneID := strings.TrimSpace(string(tuiPaneOut))
 	m.tuiPaneID = tuiPaneID
 
 	// Clear any panes left behind by the previously viewed task, exactly as the
@@ -1762,6 +1756,33 @@ func (m *DetailModel) updateTmuxPaneTitle() {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T", m.getPaneTitle()).Run()
+}
+
+// ownPaneID is the pane this ty process draws into. $TMUX_PANE is set by tmux
+// for the process it runs, so it names this instance's pane by definition.
+//
+// Asking tmux for "#{pane_id}" without a target answers with the active pane of
+// whichever client tmux currently considers foremost. With a second ty attached
+// to the same server that is somebody else's pane — and callers here go on to
+// kill the panes around the answer and split into it, so a wrong answer destroys
+// another instance's executor panes.
+func ownPaneID() string {
+	return os.Getenv("TMUX_PANE")
+}
+
+// ownSessionName resolves the session holding this process's own pane. Scoped to
+// ownPaneID for the same reason: an unscoped query names the foremost client's
+// session, which is how one instance ends up operating inside another's.
+func (m *DetailModel) ownSessionName(ctx context.Context) string {
+	if pane := ownPaneID(); pane != "" {
+		if out, err := osExec.CommandContext(ctx, "tmux", "display-message",
+			"-t", pane, "-p", "#{session_name}").Output(); err == nil {
+			if name := strings.TrimSpace(string(out)); name != "" {
+				return name
+			}
+		}
+	}
+	return "task-ui"
 }
 
 // titlePaneID is the pane whose border title names the task on screen: the one

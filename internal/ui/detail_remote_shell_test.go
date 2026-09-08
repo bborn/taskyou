@@ -31,6 +31,7 @@ esac
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "test")
+	t.Setenv("TMUX_PANE", "%0")
 	m := &DetailModel{database: app.db, task: &db.Task{ID: 42, DaemonSession: "task-daemon-7", PlacementTarget: "remote"}, shellPaneHidden: true, focusExecutorOnJoin: true}
 	if id := m.attachRemotePane(executor.RemoteTaskLocation{Host: "remote"}); id != "%90" {
 		t.Fatalf("attach returned %q", id)
