@@ -1,0 +1,66 @@
+<!doctype html>
+<!-- Generated from workflows.md by scripts/build-site.mjs. Edit the Markdown source. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workflow recipes — TaskYou</title><meta name="description" content="Workflow recipes: setup, commands, and practical guidance for TaskYou.">
+<link rel="canonical" href="https://taskyou.dev/workflows.html"><link rel="icon" href="images/logo.webp">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/site.css"></head>
+<body><a class="skip" href="#main">Skip to content</a><nav class="nav" aria-label="Main navigation"><div class="wrap"><a class="brand" href="./"><img src="images/logo.webp" width="40" height="40" alt="">taskyou</a><div class="navlinks"><a href="workflows.html">Workflows</a><a href="https://github.com/bborn/taskyou">GitHub</a></div></div></nav>
+<div class="guide-layout"><aside class="guide-nav" aria-label="Documentation"><p>TaskYou docs</p><a href="getting-started.html">Your first task</a><a href="workflows.html" aria-current="page">Workflow recipes</a><a href="reference.html">Full reference</a><a href="./#demo">Product tour</a></aside>
+<main id="main" class="prose"><h1 id="workflows">Workflows</h1>
+<p>Planning hands off to coding. Coding hands off to review. TaskYou starts each step when its inputs are ready, so you do not have to ferry prompts between agents.</p>
+<p>Below are three YAML recipes you can download and edit. Each ends with a pull request.</p>
+<p><strong>Before running:</strong> complete <a href="getting-started.html">your first task</a>, use a project with Git worktrees enabled and a writable <code>origin</code> remote, and authenticate <code>gh</code> for opening pull requests. These recipes commit and push branches and ask the final agent to open a PR. You review and merge it.</p>
+<h2 id="install-a-recipe">Install a recipe</h2>
+<p>Download one of the YAML files below and save it in <code>~/.config/task/workflows/</code> with its original filename. Or install all three from your terminal:</p>
+<pre><code class="language-sh">mkdir -p ~/.config/task/workflows
+curl -fL https://taskyou.dev/workflows/fix-and-review.yaml -o ~/.config/task/workflows/fix-and-review.yaml
+curl -fL https://taskyou.dev/workflows/feature-and-review.yaml -o ~/.config/task/workflows/feature-and-review.yaml
+curl -fL https://taskyou.dev/workflows/refactor-and-review.yaml -o ~/.config/task/workflows/refactor-and-review.yaml
+ty pipeline --list
+</code></pre>
+<p>These download commands replace files with the same names. Keep a copy first if you have customized a recipe. From a source checkout, you can copy the files from <code>docs/workflows/</code> instead.</p>
+<p>The recipes default to <strong>Claude</strong>, using the agent&#39;s default model. Edit <code>executor:</code> on individual steps to use another installed agent. Your agent&#39;s usual usage costs apply.</p>
+<p>Use your registered project name instead of <code>myapp</code> in the commands below. Keep the TaskYou daemon running: opening <code>ty</code> starts it automatically.</p>
+<h2 id="fix-a-bug">Fix a bug</h2>
+<p><strong>Reproduce → Fix → Review</strong></p>
+<p>Use this when you can describe what happens and what should happen instead. The first step records the cause and a reproduction; the second fixes it and adds regression coverage; the last checks the result and opens a PR.</p>
+<pre><code class="language-sh">ty pipeline &quot;Fix duplicate items when a user submits the form twice. A repeated submission should create only one item.&quot; -p myapp -d fix-and-review
+</code></pre>
+<p><strong>Expected output:</strong> a focused PR with reproduction steps, a regression test where practical, and the commands and results used to verify the fix. The recipe asks the agent to stop and report when it cannot reproduce the problem.</p>
+<p><a href="workflows/fix-and-review.yaml">Download fix-and-review.yaml</a></p>
+<h2 id="build-a-feature">Build a feature</h2>
+<p><strong>Plan → Implement → Code review + Test review → Finish</strong></p>
+<p>Use this for a bounded feature with acceptance criteria. Two reviewers run independently after implementation: one examines correctness, the other examines tests and missing scenarios. The final step reads both reports, addresses findings, and opens a PR.</p>
+<pre><code class="language-sh">ty pipeline &quot;Add CSV export to the tasks page. Export the current filter, include title and status, and handle commas and newlines correctly.&quot; -p myapp -d feature-and-review
+</code></pre>
+<p><strong>Expected output:</strong> a PR, a short plan, and separate code and test review reports. The final summary names the checks run and any unresolved findings. Running two reviews uses more agent time than a single task.</p>
+<p><a href="workflows/feature-and-review.yaml">Download feature-and-review.yaml</a></p>
+<h2 id="refactor-with-checks">Refactor with checks</h2>
+<p><strong>Baseline → Refactor → Review</strong></p>
+<p>Use this for internal cleanup with a specific boundary. The first step records current behavior and the checks that protect it. The second changes the implementation. The final step checks for behavior drift and unnecessary scope before opening a PR.</p>
+<pre><code class="language-sh">ty pipeline &quot;Simplify the task filtering code without changing supported filters, ordering, or empty-state behavior.&quot; -p myapp -d refactor-and-review
+</code></pre>
+<p><strong>Expected output:</strong> a PR with the baseline, before/after check results, and an explanation of what became simpler. The recipe asks the agent to add characterization coverage where existing tests cannot protect the requested behavior.</p>
+<p><a href="workflows/refactor-and-review.yaml">Download refactor-and-review.yaml</a></p>
+<h2 id="make-passing-checks-a-requirement">Make passing checks a requirement</h2>
+<p>The recipes ask agents to run tests and report results. For an enforced check, add <code>verify:</code> to each implementation or final step using your repository&#39;s actual test command. For example, in a Go project:</p>
+<pre><code class="language-yaml">  - name: Fix
+    deps: [Reproduce]
+    executor: claude
+    verify: go test ./...
+    prompt: Read BUG.md, implement the fix, and run the regression test.
+</code></pre>
+<p>A nonzero exit rejects completion and sends the output back to the agent. Without <code>verify:</code>, test execution is an agent instruction rather than an enforced gate. We leave it unset in the downloadable recipes because test commands differ by project. Use your project&#39;s remote test runner here if it requires one.</p>
+<h2 id="inspect-before-starting">Inspect before starting</h2>
+<p>Add <code>--no-execute</code> to stage a workflow without queueing its first step:</p>
+<pre><code class="language-sh">ty pipeline &quot;Fix duplicate submissions&quot; -p myapp -d fix-and-review --no-execute
+</code></pre>
+<p>Inspect the tasks on the board, then execute the root step when ready. Staging can prepare worktrees and push the shared branch to <code>origin</code>. <code>--no-execute</code> prevents agent execution; it is not a read-only preview. Use a disposable repository with a local bare remote if you want to inspect a recipe without touching a hosted repository. To make one step wait for your review before continuing, add <code>gate: true</code> to that step. See the <a href="reference.html#workflows">workflow reference</a> for composition, per-project overrides, and configuration.</p>
+<h2 id="tested-in-the-qa-harness">Tested in the QA harness</h2>
+<p>We ran all three recipes against isolated storefront projects with real coding agents. All 11 steps completed, including the automatic handoffs and the feature recipe&#39;s two parallel reviews.</p>
+<p>The feature reviews found gaps in test coverage and inaccurate rounding documentation. The final step addressed the findings and expanded the suite from 10 to 14 passing tests. The bug-fix recipe passed 5 tests; its regression test also failed against the original implementation. The refactor passed 13 tests and an independent comparison across 11,001 subtotals.</p>
+<p><a href="media/workflow-handoff.png"><img src="media/workflow-handoff.png" alt="A completed plan with its implementation task already processing in TaskYou"></a></p>
+<p>The runs used local bare Git remotes. Hosted pull request creation and merging were not exercised. These recipes did not have <code>verify:</code> configured; the test results were checked independently after execution.</p>
+<p class="source"><a href="https://github.com/bborn/taskyou/blob/main/docs/workflows.md">View this guide on GitHub</a></p></main></div>
+<footer class="footer"><div class="wrap"><span>TaskYou. An agent for every task.</span><a href="./">Back to TaskYou</a></div></footer></body></html>

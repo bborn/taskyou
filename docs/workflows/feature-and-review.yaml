@@ -1,0 +1,42 @@
+name: feature-and-review
+description: Plan and implement a feature, run independent code and test reviews, then open a PR.
+steps:
+  - name: Plan
+    executor: claude
+    prompt: >-
+      Read the project instructions and inspect the relevant code. Write PLAN.md
+      with the goal, acceptance criteria, smallest implementation, affected files,
+      edge cases, and project-specific verification commands. Do not implement yet.
+      Ask for input if a missing requirement prevents a sound implementation.
+  - name: Implement
+    executor: claude
+    deps: [Plan]
+    prompt: >-
+      Implement PLAN.md with focused changes and behavioral tests. Run the
+      project's relevant checks. Record the actual commands and results in
+      IMPLEMENTATION.md, including any justified deviation or unverified behavior.
+  - name: Code review
+    executor: claude
+    deps: [Implement]
+    prompt: >-
+      Independently review the implementation against PLAN.md and the goal.
+      Examine correctness, security, regressions, and scope. Write CODE-REVIEW.md
+      with prioritized findings, file and line evidence, and suggested fixes.
+      Do not modify application code; your output is the review report.
+  - name: Test review
+    executor: claude
+    deps: [Implement]
+    prompt: >-
+      Independently inspect acceptance-criteria coverage, edge cases, and failure
+      paths. Run the relevant tests and identify assertions that would miss a real
+      regression. Write TEST-REVIEW.md with exact commands, results, and actionable
+      findings. Do not modify application code; your output is the review report.
+  - name: Finish
+    executor: claude
+    deps: [Code review, Test review]
+    prompt: >-
+      Read CODE-REVIEW.md and TEST-REVIEW.md from their respective dependency
+      branches using the handoff instructions. Address material findings on the
+      shared branch and rerun the relevant checks. In the PR summarize the final
+      behavior, test results, and how each finding was resolved or deferred.
+      Never report an unrun check as passing. Leave merging to the human reviewer.

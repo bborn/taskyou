@@ -1,0 +1,28 @@
+name: fix-and-review
+description: Reproduce a bug, fix it with regression coverage, then review and open a PR.
+steps:
+  - name: Reproduce
+    executor: claude
+    prompt: >-
+      Read the project instructions. Reproduce the reported bug and identify its
+      cause. Write BUG.md with expected versus actual behavior, reproduction steps,
+      relevant files, and the exact test commands appropriate to this project.
+      Do not change application code yet. If you cannot reproduce the problem,
+      report the missing evidence and ask for input instead of claiming success.
+  - name: Fix
+    executor: claude
+    deps: [Reproduce]
+    prompt: >-
+      Read BUG.md. Implement the smallest fix that addresses the root cause.
+      Add regression coverage that fails on the old behavior and passes with the
+      fix where practical. Run the relevant project checks and record exact
+      commands, results, and any limitations in BUG.md. Keep unrelated code alone.
+  - name: Review
+    executor: claude
+    deps: [Fix]
+    prompt: >-
+      Independently inspect the change against the original bug and BUG.md.
+      Check edge cases and confirm that the regression test detects the original
+      failure. Fix material findings, rerun relevant checks, and summarize the
+      reproduction, fix, test evidence, and unresolved limitations in the PR.
+      Never report an unrun check as passing. Leave merging to the human reviewer.

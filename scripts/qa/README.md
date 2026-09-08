@@ -293,3 +293,40 @@ latency, and reports the final expected/actual task IDs and observed frame gaps.
 50/second to an existing processing fixture; keep the QA executor frozen. Busy
 mode refuses database roots outside `/tmp`. JSON results stay in the QA root.
 The measurement includes tmux IPC and output scheduling, not physical iTerm pixels.
+
+## Record a product tour
+
+```bash
+scripts/qa/ty-qa-tour.sh /tmp/ty-product-tour/tour.mp4
+```
+
+Records the real TUI and executor at **3840×2160** with a 40px Menlo font
+using VHS attached to the isolated tmux session. It creates a disposable storefront
+from `examples/storefront`, seeds sample cards, and parks existing queued
+cards in backlog. Only the task created on camera runs through the real daemon.
+Claude uses the existing authenticated configuration and the task's auto permission
+mode. The project instructions prohibit publishing, pushes, PRs, and messages.
+
+The capture includes browsing, creating and queueing a task, then the executor
+panel. Teardown runs on exit. Database assertions check the new task and its
+executor pane; visually review the exported footage before using it.
+
+The generated VHS tape and `uistate.json` remain in `TY_QA_ROOT` (default
+`/tmp/ty-product-tour`). The website uses a fast-start MP4, a poster taken from the
+recording, and a WebVTT instruction track in `docs/media/`.
+
+## Check the new-user CLI path
+
+```bash
+scripts/qa/check-onboarding.sh /absolute/path/to/ty
+```
+
+Uses the downloadable practice project, a temporary database and a local bare
+Git remote. Checks project registration, create/show/list and all three workflow
+recipes with `--no-execute`. No agents or hosted remotes are used. Run it against
+a released binary as well as development builds: documentation can drift from
+what users actually install. Staging a workflow can push its shared branch even
+with `--no-execute`; the local remote keeps that side effect inside the check.
+
+Rebuild the practice archive after editing `examples/storefront`:
+`python3 scripts/package-practice-project.py`.

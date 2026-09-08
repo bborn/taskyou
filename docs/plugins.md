@@ -5,7 +5,7 @@ into `~/.config/task/plugins/` and it's live — no rebuild, no config edits, an
 no collisions with other plugins. This is the easy on-ramp for community
 integrations (notifications, proxies, trackers, chat bridges, …).
 
-It builds on TaskYou's existing [event hooks](../README.md#event-hooks). The
+It builds on TaskYou's existing [event hooks](reference.md#event-hooks). The
 difference: the legacy hooks dir allows **one script per event**, so two
 integrations that both want `task.done` fight over the same file. A plugin
 namespaces its scripts in its own directory and declares what it handles in a
@@ -136,7 +136,7 @@ CLI**, which is often the least-effort option for a small shell service.
 
 ## Events
 
-Plugins handle the same events as the [event hooks](../README.md#event-hooks)
+Plugins handle the same events as the [event hooks](reference.md#event-hooks)
 system. The ones dispatched today:
 
 | Event | When |
