@@ -13,6 +13,14 @@ const titles = {
   workflows: "Workflow recipes",
   reference: "Full reference",
 };
+const descriptions = {
+  "getting-started": "Install TaskYou, add a project, run one coding-agent task in an isolated git worktree, and review the result.",
+  workflows: "Download tested TaskYou workflow recipes for bug fixes, features, and refactors with parallel review steps and pull-request handoffs.",
+  reference: "TaskYou reference for CLI commands, terminal and desktop interfaces, task executors, workflows, plugins, hooks, SSH access, and configuration.",
+};
+const siteUrl = "https://taskyou.dev";
+const socialImage = `${siteUrl}/images/taskyou-social.png`;
+const socialImageAlt = "TaskYou — Kanban for code agents, with a pixel coffee mug and illustrated terminal Kanban board";
 const escape = (text) =>
   text
     .replaceAll("&", "&amp;")
@@ -51,8 +59,11 @@ for (const guide of guides) {
   const html = `<!doctype html>
 <!-- Generated from ${guide}.md by scripts/build-site.mjs. Edit the Markdown source. -->
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${titles[guide]} — TaskYou</title><meta name="description" content="${escape(titles[guide])}: setup, commands, and practical guidance for TaskYou.">
-<link rel="canonical" href="https://taskyou.dev/${guide}.html"><link rel="icon" href="images/logo.webp">
+<title>${titles[guide]} — TaskYou</title><meta name="description" content="${escape(descriptions[guide])}"><meta name="robots" content="index,follow,max-image-preview:large">
+<link rel="canonical" href="${siteUrl}/${guide}.html"><link rel="icon" href="images/logo.webp">
+<meta property="og:title" content="${titles[guide]} — TaskYou"><meta property="og:description" content="${escape(descriptions[guide])}"><meta property="og:type" content="website"><meta property="og:site_name" content="TaskYou"><meta property="og:locale" content="en_US"><meta property="og:url" content="${siteUrl}/${guide}.html">
+<meta property="og:image" content="${socialImage}"><meta property="og:image:secure_url" content="${socialImage}"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="${socialImageAlt}">
+<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${titles[guide]} — TaskYou"><meta name="twitter:description" content="${escape(descriptions[guide])}"><meta name="twitter:image" content="${socialImage}"><meta name="twitter:image:alt" content="${socialImageAlt}">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><link rel="stylesheet" href="assets/site.css"></head>
 <body><a class="skip" href="#main">Skip to content</a><nav class="nav" aria-label="Main navigation"><div class="wrap"><a class="brand" href="./"><img src="images/logo.webp" width="40" height="40" alt="">taskyou</a><div class="navlinks"><a href="workflows.html">Workflows</a><a href="https://github.com/bborn/taskyou">GitHub</a></div></div></nav>
