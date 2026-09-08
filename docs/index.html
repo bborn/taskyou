@@ -1,323 +1,116 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TaskYou — Kanban for code agents</title>
-<meta name="description" content="A Kanban board for Claude Code that runs in your terminal. Drop a task in a column and TaskYou puts an agent on it — an agent for every task, a worktree for every agent.">
-<link rel="icon" href="images/logo.webp">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TaskYou — Kanban for code agents</title>
+    <meta
+      name="description"
+      content="A Kanban board that puts coding agents to work. Run Claude Code, Codex, and more in isolated worktrees, follow their progress, and review the results."
+    />
+    <link rel="icon" href="images/logo.webp" />
 
-<!-- Open Graph / Twitter -->
-<meta property="og:title" content="TaskYou — Kanban for code agents">
-<meta property="og:description" content="Calm, cool, a little crazy. An agent for every task. A worktree for every agent.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://taskyou.dev/">
-<meta property="og:image" content="https://taskyou.dev/images/logo.webp">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:site" content="@taskyoudev">
+    <!-- Open Graph / Twitter -->
+    <meta property="og:title" content="TaskYou — Kanban for code agents" />
+    <meta
+      property="og:description"
+      content="Calm, cool, a little crazy. An agent for every task. A worktree for every agent."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://taskyou.dev/" />
+    <meta property="og:image" content="https://taskyou.dev/images/logo.webp" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@taskyoudev" />
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --bg:#0e0b16; --panel:#15111f; --panel2:#1b1628; --line:#241e38; --line2:#2e2746;
-    --text:#f3eaff; --muted:#9b93bd; --dim:#6f6790;
-    --orange:#ff7a3c; --orange-d:#c9432a; --green:#7cf6b0; --yellow:#ffd23f;
-  }
-  *{box-sizing:border-box; margin:0; padding:0;}
-  html{scroll-behavior:smooth;}
-  body{
-    font-family:'Space Grotesk',system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text);
-    line-height:1.55; -webkit-font-smoothing:antialiased; overflow-x:hidden;
-  }
-  /* CRT scanlines */
-  body::before{
-    content:""; position:fixed; inset:0; pointer-events:none; z-index:9999; opacity:.5;
-    background:repeating-linear-gradient(0deg, rgba(255,255,255,.022) 0 1px, transparent 1px 3px);
-  }
-  .grid-bg{
-    position:fixed; inset:0; z-index:-1; pointer-events:none;
-    background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
-    background-size:26px 26px;
-    -webkit-mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 75%);
-            mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 75%);
-  }
-  .wrap{max-width:1080px; margin:0 auto; padding:0 1.5rem;}
-  a{color:inherit; text-decoration:none;}
-  .mono{font-family:'JetBrains Mono',monospace;}
-
-  /* NAV */
-  nav{position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); background:rgba(14,11,22,.72); border-bottom:1px solid var(--line);}
-  nav .wrap{display:flex; align-items:center; justify-content:space-between; height:60px;}
-  .brand{display:flex; align-items:center; gap:.55rem; font-weight:700; font-size:1.05rem;}
-  .brand img{height:26px; width:auto; image-rendering:pixelated;}
-  .navlinks{display:flex; align-items:center; gap:1.4rem; font-family:'JetBrains Mono',monospace; font-size:.8rem; color:var(--muted);}
-  .navlinks a:hover{color:var(--text);}
-  .navlinks .desktop-only{display:inline;}
-  @media(max-width:640px){.navlinks .desktop-only{display:none;}}
-  .btn{display:inline-flex; align-items:center; gap:.5rem; font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.8rem; padding:.5rem .9rem; border-radius:8px; transition:transform .12s ease;}
-  .btn:hover{transform:translateY(-1px);}
-  .btn-primary{background:var(--orange); color:#1a1320; box-shadow:0 4px 0 var(--orange-d);}
-  .btn-primary:active{transform:translateY(3px); box-shadow:0 1px 0 var(--orange-d);}
-
-  /* HERO */
-  header.hero{padding:5rem 0 3rem; position:relative;}
-  .hero-grid{display:grid; grid-template-columns:1.05fr .95fr; gap:3rem; align-items:center;}
-  @media(max-width:860px){.hero-grid{grid-template-columns:1fr; gap:2rem;}}
-  .mascot-lg{height:92px; width:auto; image-rendering:pixelated; margin-bottom:1.1rem; filter:drop-shadow(0 0 22px rgba(255,122,60,.45));}
-  h1.headline{
-    font-weight:700; font-size:clamp(2.6rem,5.6vw,3.9rem); line-height:1.02; letter-spacing:-.02em; margin-bottom:.7rem;
-    filter:url(#fx-aberration);
-  }
-  h1.headline .t{color:var(--orange);}
-  .lede{font-family:'JetBrains Mono',monospace; font-size:1.05rem; color:var(--green); margin-bottom:.5rem;}
-  .supp{color:var(--muted); font-size:1.02rem; margin-bottom:1.7rem; max-width:30ch;}
-  .badges{display:flex; gap:.5rem; flex-wrap:wrap; margin-top:1.5rem;}
-  .chip{font-family:'JetBrains Mono',monospace; font-size:.68rem; color:var(--muted); border:1px solid var(--line2); border-radius:999px; padding:.28rem .65rem;}
-  .chip b{color:var(--green); font-weight:600;}
-
-  .install .lbl{font-family:'JetBrains Mono',monospace; font-size:.66rem; text-transform:uppercase; letter-spacing:.12em; color:var(--dim); margin-bottom:.45rem;}
-  .cmd{
-    font-family:'JetBrains Mono',monospace; font-size:.84rem; color:var(--green); background:#0a0812;
-    border:1px solid var(--line2); border-radius:10px; padding:.85rem 1rem; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:1rem;
-    transition:border-color .15s ease; overflow:hidden;
-  }
-  .cmd:hover{border-color:var(--orange);}
-  .cmd .ctext{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;}
-  .cmd .copy{color:var(--dim); font-size:.7rem; flex-shrink:0;}
-  .cmd.copied .copy{color:var(--green);}
-  .cmd .prompt{color:var(--orange);}
-
-  /* terminal window */
-  .win{border:1px solid var(--line2); border-radius:12px; overflow:hidden; background:#0c0a14; box-shadow:0 34px 70px -28px rgba(0,0,0,.85);}
-  .win .bar{display:flex; align-items:center; gap:.45rem; padding:.55rem .75rem; background:#181426; border-bottom:1px solid var(--line2);}
-  .win .bar i{width:11px; height:11px; border-radius:50%; display:inline-block;}
-  .win .bar .ttl{font-family:'JetBrains Mono',monospace; font-size:.68rem; color:var(--dim); margin-left:.6rem;}
-  .win img, .win video{width:100%; display:block;}
-  .win video{cursor:pointer; background:#0c0a14;}
-
-  /* SECTIONS */
-  section{padding:4.5rem 0;}
-  .eyebrow{font-family:'JetBrains Mono',monospace; font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--orange); margin-bottom:.7rem;}
-  h2.sec{font-weight:700; font-size:clamp(1.8rem,3.6vw,2.5rem); letter-spacing:-.01em; margin-bottom:.6rem;}
-  .sec-sub{color:var(--muted); max-width:54ch; margin-bottom:2.5rem;}
-
-  /* how it works */
-  .steps{display:grid; grid-template-columns:repeat(3,1fr); gap:1.2rem;}
-  @media(max-width:860px){.steps{grid-template-columns:1fr;}}
-  .step{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.4rem;}
-  .step .num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.8rem; color:#1a1320; background:var(--orange); width:1.9rem; height:1.9rem; border-radius:7px; display:flex; align-items:center; justify-content:center; margin-bottom:1rem;}
-  .step h3{font-size:1.15rem; margin-bottom:.4rem;}
-  .step p{color:var(--muted); font-size:.92rem; margin-bottom:1rem;}
-  .step .mini{border:1px solid var(--line2); border-radius:8px; overflow:hidden; background:#0c0a14;}
-  .step .mini img{width:100%; display:block;}
-
-  /* features */
-  .feats{display:grid; grid-template-columns:repeat(3,1fr); gap:1rem;}
-  @media(max-width:860px){.feats{grid-template-columns:1fr 1fr;}}
-  @media(max-width:560px){.feats{grid-template-columns:1fr;}}
-  .feat{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:1.3rem; transition:border-color .15s ease, transform .15s ease;}
-  .feat:hover{border-color:var(--line2); transform:translateY(-2px);}
-  .feat .ic{display:block; margin-bottom:.9rem; color:var(--orange);}
-  .feat .ic svg{width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}
-  .feat h3{font-size:1.02rem; margin-bottom:.3rem;}
-  .feat p{color:var(--muted); font-size:.88rem;}
-
-  /* install section */
-  .install-deck{display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1.5rem;}
-  @media(max-width:760px){.install-deck{grid-template-columns:1fr;}}
-  .install-card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.4rem;}
-  .install-card .lbl{display:flex; align-items:center; gap:.5rem; font-family:'JetBrains Mono',monospace; font-size:.7rem; text-transform:uppercase; letter-spacing:.1em; color:var(--dim); margin-bottom:.8rem;}
-  .note{margin-top:1.5rem; font-size:.86rem; color:var(--dim); font-family:'JetBrains Mono',monospace;}
-  .note b{color:var(--muted); font-weight:500;}
-
-  /* footer */
-  footer{border-top:1px solid var(--line); padding:2.5rem 0 3.5rem; color:var(--dim);}
-  footer .wrap{display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem;}
-  footer .fbrand{display:flex; align-items:center; gap:.5rem; color:var(--muted); font-weight:600;}
-  footer .fbrand img{height:22px; width:auto; image-rendering:pixelated;}
-  footer .flinks{display:flex; gap:1.3rem; font-family:'JetBrains Mono',monospace; font-size:.78rem;}
-  footer .flinks a:hover{color:var(--text);}
-  footer .meta{width:100%; font-family:'JetBrains Mono',monospace; font-size:.72rem; color:var(--dim); display:flex; gap:1rem; flex-wrap:wrap; margin-top:.4rem;}
-  footer .meta a{color:var(--dim); text-decoration:underline;}
-</style>
-</head>
-<body>
-<div class="grid-bg"></div>
-
-<!-- CRT chromatic-aberration filter for the hero headline -->
-<svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true"><defs>
-  <filter id="fx-aberration" x="-8%" y="-25%" width="116%" height="150%">
-    <feColorMatrix in="SourceGraphic" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
-    <feOffset dx="1.6" dy="0"/><feGaussianBlur stdDeviation="0.5" result="r"/>
-    <feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="g"/>
-    <feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"/>
-    <feOffset dx="-1.6" dy="0"/><feGaussianBlur stdDeviation="0.5" result="b"/>
-    <feBlend in="r" in2="g" mode="screen" result="rg"/>
-    <feBlend in="rg" in2="b" mode="screen"/>
-  </filter>
-</defs></svg>
-
-<nav>
-  <div class="wrap">
-    <a class="brand" href="/"><img src="images/logo.webp" alt="">taskyou</a>
-    <div class="navlinks">
-      <a class="desktop-only" href="#how">How it works</a>
-      <a class="desktop-only" href="#features">Features</a>
-      <a href="https://github.com/bborn/taskyou">GitHub</a>
-      <a href="#install" class="btn btn-primary">Install ↓</a>
-    </div>
-  </div>
-</nav>
-
-<header class="hero">
-  <div class="wrap hero-grid">
-    <div>
-      <img class="mascot-lg" src="images/logo.webp" alt="TaskYou mascot — a pixel coffee mug in sunglasses">
-      <h1 class="headline">Kanban for <span class="t">code agents</span>.</h1>
-      <p class="lede">Calm, cool, a little crazy.</p>
-      <p class="supp">An agent for every task. A worktree for every agent.</p>
-
-      <div class="install" style="margin-top:1.8rem; max-width:430px;">
-        <div class="lbl">Install with one command</div>
-        <div class="cmd" onclick="copyCmd(this,'curl -fsSL taskyou.dev/install.sh | bash')">
-          <span class="ctext"><span class="prompt">$</span> curl -fsSL taskyou.dev/install.sh | bash</span>
-          <span class="copy">COPY</span>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="assets/home.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <nav class="nav"><div class="container nav-inner">
+      <a class="brand" href="./"><img src="images/logo.webp" width="42" height="42" alt="" />taskyou</a>
+      <div class="nav-links"><a href="#how">How it works</a><a href="#workflows">Workflows</a><a href="getting-started.html">Docs</a><a class="nav-install" href="#install">Get ty <span aria-hidden="true">↓</span></a></div>
+    </div></nav>
+    <main id="main">
+      <header class="hero container">
+        <div class="hero-copy">
+          <p class="hello"><img src="images/logo.webp" width="72" height="72" alt="Pixel coffee mug wearing sunglasses" />Calm, cool, a little crazy.</p>
+          <h1>Kanban for<br />code agents.</h1>
+          <p class="lead">Your backlog has help.</p>
+          <p class="intro">Give a task to a coding agent. It gets its own worktree, gets to work, and keeps its progress on the board. You decide what ships.</p>
+          <div class="actions"><a class="button" href="#install">Put a task to work <span aria-hidden="true">↗</span></a><a class="text-link" href="#demo">Watch it happen</a></div>
+          <p class="fine">Open source. Runs in your terminal. macOS &amp; Linux.</p>
         </div>
-      </div>
-
-      <div class="badges">
-        <span class="chip"><b>◆</b> open source · MIT</span>
-        <span class="chip"><b>◆</b> terminal-native</span>
-        <span class="chip"><b>◆</b> works with Claude Code</span>
-      </div>
-    </div>
-
-    <div class="win">
-      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="ttl">~/projects/storefront — ty</span></div>
-      <img src="screenshots/kanban-board.png" alt="TaskYou Kanban board running in the terminal" loading="lazy">
-    </div>
-  </div>
-</header>
-
-<!-- DEMO -->
-<section id="demo" style="padding-top:1.5rem;">
-  <div class="wrap">
-    <div class="eyebrow">See it run</div>
-    <h2 class="sec">Watch the board clear itself.</h2>
-    <p class="sec-sub">Queue up work, hand it to the agents, and watch cards march from Backlog to Done.</p>
-    <div class="win">
-      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="ttl">taskyou — demo</span></div>
-      <video src="TaskYouDemo.mp4" poster="screenshots/kanban-board.png" autoplay muted loop playsinline preload="metadata" onclick="toggleSound(this)"></video>
-    </div>
-    <p class="note" style="text-align:center;">▸ click the video for sound</p>
-  </div>
-</section>
-
-<!-- HOW IT WORKS -->
-<section id="how">
-  <div class="wrap">
-    <div class="eyebrow">How it works</div>
-    <h2 class="sec">Drop a task. Walk away. Merge the diff.</h2>
-    <p class="sec-sub">TaskYou is a Kanban board that runs in your terminal — but the cards do the work. Move one into play and ty puts a Claude Code agent on it, in its own isolated git worktree.</p>
-
-    <div class="steps">
-      <div class="step">
-        <div class="num">1</div>
-        <h3>Add a task</h3>
-        <p>Write what you want done in plain language and drop it on the board.</p>
-        <div class="mini"><img src="screenshots/new-task-form.png" alt="Creating a new task in TaskYou" loading="lazy"></div>
-      </div>
-      <div class="step">
-        <div class="num">2</div>
-        <h3>An agent picks it up</h3>
-        <p>ty spins up a Claude Code agent in a fresh worktree and runs it in the background.</p>
-        <div class="mini"><img src="screenshots/execution-log.png" alt="Live agent execution log" loading="lazy"></div>
-      </div>
-      <div class="step">
-        <div class="num">3</div>
-        <h3>Review &amp; merge</h3>
-        <p>Read the diff and the run log, then merge straight from the board.</p>
-        <div class="mini"><img src="screenshots/task-detail-view.png" alt="Task detail view with diff" loading="lazy"></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- FEATURES -->
-<section id="features" style="padding-top:1rem;">
-  <div class="wrap">
-    <div class="eyebrow">Why it's different</div>
-    <h2 class="sec">Built for running many agents at once.</h2>
-    <p class="sec-sub">Not a chat window. A board you can stack with work and let rip — every task isolated, every agent accountable.</p>
-
-    <div class="feats">
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span><h3>Terminal-native</h3><p>A full Kanban TUI. Keyboard-driven and fast — no browser, no context switch.</p></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></span><h3>An agent per task</h3><p>Every card gets its own Claude Code agent. Run a whole column in parallel.</p></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span><h3>Worktree isolation</h3><p>Each agent works in its own git worktree. They never step on your working tree — or each other.</p></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg></span><h3>Background execution</h3><p>Queue a stack of tasks, walk away, come back to a column full of diffs.</p></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg></span><h3>Review &amp; merge</h3><p>Inspect the diff, read the execution log, and merge — all from the board.</p></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span><h3>Open source</h3><p>MIT-licensed and free. Runs locally, drives the Claude Code you already have.</p></div>
-    </div>
-  </div>
-</section>
-
-<!-- INSTALL -->
-<section id="install" style="padding-top:1rem;">
-  <div class="wrap">
-    <div class="eyebrow">Install</div>
-    <h2 class="sec">One command and you're on the board.</h2>
-    <p class="sec-sub">Grab the binary, or spin it up on a fresh cloud VM in seconds.</p>
-
-    <div class="install-deck">
-      <div class="install-card">
-        <div class="lbl">◆ Local — macOS / Linux</div>
-        <div class="cmd" onclick="copyCmd(this,'curl -fsSL taskyou.dev/install.sh | bash')">
-          <span class="ctext"><span class="prompt">$</span> curl -fsSL taskyou.dev/install.sh | bash</span>
-          <span class="copy">COPY</span>
+        <div class="hero-art" role="img" aria-label="Three separate tasks, each connected to its own coding agent and git worktree">
+          <div class="art-heading"><span>On your board</span><span class="activity">3 agents at work</span></div>
+          <div class="job job-one"><span class="job-number">#24</span><div><strong>Fix checkout on mobile</strong><span>Claude · adjusting the layout</span></div><span class="pulse" aria-hidden="true"></span></div>
+          <div class="tree-line"><span>↳</span> worktree / checkout-fix</div>
+          <div class="job job-two"><span class="job-number">#25</span><div><strong>Add the size guide</strong><span>Codex · writing tests</span></div><span class="pulse" aria-hidden="true"></span></div>
+          <div class="tree-line"><span>↳</span> worktree / size-guide</div>
+          <div class="job job-three"><span class="job-number">#26</span><div><strong>Speed up product search</strong><span>Claude · checking the query</span></div><span class="pulse" aria-hidden="true"></span></div>
+          <div class="tree-line"><span>↳</span> worktree / product-search</div>
+          <div class="art-bottom"><span>One repo. Separate worktrees.</span><span aria-hidden="true">⌘ _</span></div>
         </div>
-      </div>
-      <div class="install-card">
-        <div class="lbl">☁ Instant — on <a href="https://exe.dev" style="color:var(--green);">exe.dev</a></div>
-        <div class="cmd" onclick="copyCmd(this, this.dataset.cmd)" data-cmd="VM=$(ssh exe.dev 'new --json --no-email' | jq -r .vm_name) && ssh -t $VM.exe.xyz 'curl -fsSL taskyou.dev/install.sh | bash && ~/.local/bin/ty'">
-          <span class="ctext"><span class="prompt">$</span> ssh exe.dev — new VM + ty, one line</span>
-          <span class="copy">COPY</span>
+      </header>
+      <section class="board-section container" aria-label="The TaskYou terminal board">
+        <div class="screen-bar"><span><i></i><i></i><i></i></span><span>ty · all projects</span><a href="media/hero-board.png">View full size ↗</a></div>
+        <a class="screen-image" href="media/hero-board.png" aria-label="Open the full-resolution TaskYou board"><img src="media/hero-board.png" width="3840" height="1060" fetchpriority="high" alt="Actual TaskYou TUI with tasks across Backlog, In Progress, Blocked and Done" /></a>
+        <p class="screen-caption">Your tasks, their agents, and the ones waiting on you. All in one board.</p>
+      </section>
+      <section id="how" class="isolation section">
+        <div class="container split">
+          <div><h2>Same repo.<br />Room to work.</h2><p class="section-lead">One agent fixes checkout. Another adds a feature. Neither needs to wait for the other's working directory.</p><p>TaskYou gives each task a git worktree and its own agent session. Open a card to see what’s happening, or leave it running while you work on something else.</p><a class="text-link" href="getting-started.html">Start with one small task ↗</a></div>
+          <div class="worktree-art" role="img" aria-label="The storefront repository branches into isolated checkout and size-guide worktrees, each with its own files and coding agent">
+            <div class="repo"><span aria-hidden="true">⌂</span><strong>storefront</strong><code>main</code></div>
+            <div class="branch-stem" aria-hidden="true"></div>
+            <div class="worktree-pair">
+              <div class="worktree"><span class="branch-name">⑂ checkout-fix</span><div class="file-stack"><span>checkout.tsx</span><span>checkout.test.ts</span></div><div class="agent-slot"><span class="agent-dot"></span>Claude's workspace</div></div>
+              <div class="worktree"><span class="branch-name">⑂ size-guide</span><div class="file-stack"><span>size-guide.tsx</span><span>size-guide.test.ts</span></div><div class="agent-slot"><span class="agent-dot"></span>Codex's workspace</div></div>
+            </div>
+            <p class="art-note">Separate files. Separate branches. Your main checkout stays yours.</p>
+          </div>
         </div>
-      </div>
-    </div>
-    <p class="note"><b>Needs Claude Code.</b> ty drives the agent you already have installed.</p>
-  </div>
-</section>
-
-<footer>
-  <div class="wrap">
-    <span class="fbrand"><img src="images/logo.webp" alt="">taskyou</span>
-    <span class="flinks">
-      <a href="https://github.com/bborn/taskyou">GitHub</a>
-      <a href="https://github.com/bborn/taskyou#readme">Docs</a>
-      <a href="https://twitter.com/taskyoudev">@taskyoudev</a>
-    </span>
-    <span class="meta">
-      <span>MIT License</span>
-      <span>Music: <a href="https://zevboomer.bandcamp.com">Zev Boomer</a></span>
-      <span>calm, cool, a little crazy.</span>
-    </span>
-  </div>
-</footer>
-
-<script>
-  function toggleSound(v){
-    v.muted = !v.muted;
-    if(!v.muted){ v.currentTime = 0; }
-    v.play();
-  }
-  function copyCmd(el, cmd){
-    if(navigator.clipboard){ navigator.clipboard.writeText(cmd); }
-    el.classList.add('copied');
-    const c = el.querySelector('.copy'); const o = c.textContent; c.textContent = 'COPIED!';
-    setTimeout(()=>{ el.classList.remove('copied'); c.textContent = o; }, 1600);
-  }
-</script>
-</body>
+      </section>
+      <section id="workflows" class="workflow-section section">
+        <div class="container">
+          <div class="workflow-intro"><h2>You shouldn't have <br />to carry every handoff.</h2><div><p class="section-lead">Plan it. Build it. Get a second opinion.<br />Then deal with the findings.</p><p>A workflow connects the tasks. When a step finishes, TaskYou starts the steps that depend on it. Two reviews can run alongside each other before the final pass.</p></div></div>
+          <div class="workflow-diagram" role="img" aria-label="Feature workflow: Plan leads to Implement, which branches into Code review and Test review in parallel. Both lead to Finish.">
+            <div class="flow-node"><span class="flow-count">01</span><strong>Plan</strong><small>Set the scope</small></div><div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node"><span class="flow-count">02</span><strong>Implement</strong><small>Make the change</small></div><div class="flow-arrow" aria-hidden="true">↗<br />↘</div>
+            <div class="review-branch"><div class="flow-node"><span class="flow-count">03a</span><strong>Code review</strong><small>Check the approach</small></div><div class="flow-node"><span class="flow-count">03b</span><strong>Test review</strong><small>Find the gaps</small></div></div><div class="flow-arrow" aria-hidden="true">↘<br />↗</div>
+            <div class="flow-node finish"><span class="flow-count">04</span><strong>Finish</strong><small>Resolve the findings</small></div>
+          </div>
+          <div class="workflow-proof"><span class="proof-mark" aria-hidden="true">✓</span><p>We ran this recipe against a small storefront project. The reviews caught gaps. The final step addressed them, and all 14 tests passed.</p><a href="workflows.html#tested-in-the-qa-harness">Read the run notes ↗</a></div>
+          <div class="recipes"><a href="workflows.html#fix-a-bug"><strong>Fix a bug <span>↗</span></strong><span>Reproduce → fix → review</span></a><a href="workflows.html#build-a-feature"><strong>Build a feature <span>↗</span></strong><span>The five-step workflow above</span></a><a href="workflows.html#refactor-with-checks"><strong>Refactor <span>↗</span></strong><span>Baseline → refactor → review</span></a></div>
+          <p class="workflow-note">Editable YAML. These recipes push a branch and open a pull request for review.</p>
+        </div>
+      </section>
+      <section id="review" class="review-section section container">
+        <div class="review-heading"><h2>“Done” is where<br />you take a look.</h2><div><p class="section-lead">The agent’s answer on one side.<br />Its worktree shell on the other.</p><p>Read the summary. Run the tests yourself. Inspect what changed before you merge. If it needs another pass, retry the task with feedback.</p></div></div>
+        <figure class="product-shot"><div class="screen-bar"><span>Inside a completed task</span><a href="media/task-review-tui.png">View full size ↗</a></div><a class="screen-image" href="media/task-review-tui.png"><img src="media/task-review-tui.png" width="3840" height="2160" loading="lazy" alt="TaskYou completed size-guide task: agent summary in the left pane and seven passing tests in its worktree shell on the right" /></a><figcaption>A real run: add a product size guide, implement unit conversion, and check the result.</figcaption></figure>
+      </section>
+      <section id="demo" class="demo-section section">
+        <div class="container"><div class="demo-heading"><h2>From “can you…”<br />to “take a look.”</h2><p>A task, an agent, and a working size guide.<br />53 seconds through the actual TUI.</p></div>
+          <video controls playsinline preload="metadata" width="3840" height="2160" poster="media/taskyou-tour-poster.jpg?v=executor-2" aria-label="TaskYou tour: create a task, watch the executor, and check the result"><source src="media/taskyou-tour.mp4?v=executor-2" type="video/mp4" /><track kind="captions" src="media/taskyou-tour.vtt?v=executor-2" srclang="en" label="English" default /><a href="media/taskyou-tour.mp4">Watch the tour</a></video>
+          <p class="fine">Recorded in our QA harness. Waiting time shortened.</p>
+        </div>
+      </section>
+      <section class="practical section container">
+        <div><h3>Bring your coding agent.</h3><p>Claude Code, Codex, Gemini, Cursor, Pi, and more. Choose the executor per task using the tools you’ve already set up.</p><a href="reference.html#task-executors">Supported executors ↗</a></div>
+        <div><h3>Keep your editor.</h3><p>TaskYou runs in your terminal. Use your editor for the work you want to do yourself; let the board look after the rest.</p><a href="reference.html#the-tui--first-class">Explore the TUI ↗</a></div>
+        <div><h3>Put it on a server.</h3><p>Want work to continue with your laptop closed? Run TaskYou on a server and connect over SSH.</p><a href="reference.html#ssh-access--deployment">SSH setup ↗</a></div>
+      </section>
+      <section id="install" class="install-section section">
+        <div class="container install-layout"><div><img class="install-mug" src="images/logo.webp" width="96" height="96" alt="" /><h2>Give your backlog<br />a coffee break.</h2><p>Start with one task you’ve been putting off.</p></div><div class="install-box"><h3>Get TaskYou</h3><p>macOS &amp; Linux · Free and open source</p><button class="command" type="button" aria-label="Copy install command"><code>curl -fsSL taskyou.dev/install.sh | bash</code><span class="copy">Copy</span></button><p>Then run <code>ty</code> in your repo.<br />Press <kbd>n</kbd> to add a task, <kbd>x</kbd> to start it.</p><a class="button" href="getting-started.html">Walk through your first task ↗</a><p class="fine">Needs Git, tmux, and an authenticated coding agent.</p><a class="practice" href="downloads/taskyou-storefront.zip">Want a practice repo? Download the storefront.</a></div></div>
+      </section>
+    </main>
+    <footer class="container"><a class="brand" href="./"><img src="images/logo.webp" width="36" height="36" alt="" />taskyou</a><span>Calm, cool, a little crazy.</span><div><a href="https://github.com/bborn/taskyou">GitHub</a><a href="getting-started.html">Docs</a><span>MIT License</span></div></footer>
+    <div class="sr-only" id="copy-status" role="status"></div>
+    <script src="assets/home.js"></script>
+  </body>
 </html>
