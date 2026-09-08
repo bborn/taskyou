@@ -2868,7 +2868,8 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 			"-s", m.claudePaneID,
 			"-t", daemonSession+":",
 			"-n", windowName).Run()
-		if newWindowErr != nil {
+		returned := newWindowErr == nil
+		if !returned {
 			log.Warn("breakTmuxPanes: break-pane also failed: %v - leaving pane in place", newWindowErr)
 			// Last resort: leave panes in task-ui rather than kill Claude
 			// The panes will be visible but Claude keeps running
@@ -2880,8 +2881,16 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 			osExec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
 			m.workdirPaneID = ""
 		}
-		m.claudePaneID = ""
-		m.daemonSessionID = ""
+		// Only forget the Claude pane once it has actually left task-ui. Clearing it
+		// unconditionally reported a clean handoff for a pane that is still sitting
+		// in the TUI window: the board released the executor lock and moved on, and
+		// the next join's "kill leftover panes in task-ui" step was then free to kill
+		// a live executor. Keeping the ID makes detachDetail surface the failure
+		// (see detailCleanupMsg.failed) instead of orphaning the session silently.
+		if returned {
+			m.claudePaneID = ""
+			m.daemonSessionID = ""
+		}
 		if resizeTUI {
 			osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 		}
