@@ -2740,6 +2740,7 @@ func (m *AppModel) detachDetail(saveHeight bool) tea.Cmd {
 	m.detailCleanupInFlight = true
 	return func() tea.Msg {
 		detail.paneWork.Wait()
+		defer detail.resetBoardPaneStyle()
 		detail.closeRemotePane(true)
 		if detail.claudePaneID != "" || detail.workdirPaneID != "" {
 			detail.breakTmuxPanes(saveHeight, true)

@@ -1424,9 +1424,37 @@ func (m *DetailModel) paneCommand(work tea.Cmd) tea.Cmd {
 	}
 }
 
+// resetBoardPaneStyle clears detail presentation even when no local panes were joined.
+// Target the actual TUI pane: it need not be pane zero or in the current window.
+func (m *DetailModel) resetBoardPaneStyle() {
+	paneID := m.titlePaneID()
+	if os.Getenv("TMUX") == "" || paneID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	runTmuxBatch(ctx, [][]string{
+		{"set-option", "-t", paneID, "status-right", " "},
+		{"set-option", "-t", paneID, "pane-border-lines", "single"},
+		{"set-option", "-t", paneID, "pane-border-indicators", "off"},
+		{"set-option", "-t", paneID, "pane-border-style", "fg=#374151"},
+		{"set-option", "-t", paneID, "pane-active-border-style", "fg=#61AFEF"},
+		{"set-option", "-t", paneID, "window-style", "default"},
+		{"set-option", "-t", paneID, "window-active-style", "default"},
+		{"unbind-key", "-T", "root", "S-Down"},
+		{"unbind-key", "-T", "root", "S-Right"},
+		{"unbind-key", "-T", "root", "S-Up"},
+		{"unbind-key", "-T", "root", "S-Left"},
+		{"unbind-key", "-T", "root", "M-S-Up"},
+		{"unbind-key", "-T", "root", "M-S-Down"},
+		{"select-pane", "-t", paneID, "-T", "Tasks"},
+	})
+}
+
 // Cleanup should be called when leaving detail view.
 // It saves the current pane height before breaking the panes.
 func (m *DetailModel) Cleanup() {
+	defer m.resetBoardPaneStyle()
 	m.closeRemotePane(true)
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(true, true) // saveHeight=true, resizeTUI=true
@@ -1440,6 +1468,7 @@ func (m *DetailModel) Cleanup() {
 // Use this during task transitions (prev/next) to avoid rounding errors
 // that accumulate with each transition and cause the pane to shrink.
 func (m *DetailModel) CleanupWithoutSaving() {
+	defer m.resetBoardPaneStyle()
 	m.closeRemotePane(true)
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
@@ -2773,25 +2802,6 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 			m.database.SetSetting(config.SettingDetailPaneHeight, fmt.Sprintf("%d%%", currentHeight))
 		}
 	}
-
-	// Reset status bar and pane styling
-	log.Debug("breakTmuxPanes: resetting status bar and pane styling")
-	runTmuxBatch(ctx, [][]string{
-		{"set-option", "-t", m.uiSessionName, "status-right", " "},
-		{"set-option", "-t", m.uiSessionName, "pane-border-lines", "single"},
-		{"set-option", "-t", m.uiSessionName, "pane-border-indicators", "off"},
-		{"set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151"},
-		{"set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF"},
-		{"set-option", "-t", m.uiSessionName, "window-style", "default"},
-		{"set-option", "-t", m.uiSessionName, "window-active-style", "default"},
-		{"unbind-key", "-T", "root", "S-Down"},
-		{"unbind-key", "-T", "root", "S-Right"},
-		{"unbind-key", "-T", "root", "S-Up"},
-		{"unbind-key", "-T", "root", "S-Left"},
-		{"unbind-key", "-T", "root", "M-S-Up"},
-		{"unbind-key", "-T", "root", "M-S-Down"},
-		{"select-pane", "-t", m.uiSessionName + ":.0", "-T", "Tasks"},
-	})
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
