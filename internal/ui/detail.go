@@ -921,7 +921,7 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 		// Resolve the actual UI session name (avoid prefix-matching the wrong
 		// session, and avoid naming another instance's — see ownSessionName).
 		sessionCtx, cancelSession := context.WithTimeout(context.Background(), 5*time.Second)
-		m.uiSessionName = m.ownSessionName(sessionCtx)
+		m.uiSessionName = ownSessionName(sessionCtx)
 		cancelSession()
 
 		// Find the task's existing window (one tmux call).
@@ -1060,7 +1060,7 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 	defer cancel()
 
 	if m.uiSessionName == "" {
-		m.uiSessionName = m.ownSessionName(ctx)
+		m.uiSessionName = ownSessionName(ctx)
 	}
 
 	tuiPaneID := ownPaneID()
@@ -1773,7 +1773,7 @@ func ownPaneID() string {
 // ownSessionName resolves the session holding this process's own pane. Scoped to
 // ownPaneID for the same reason: an unscoped query names the foremost client's
 // session, which is how one instance ends up operating inside another's.
-func (m *DetailModel) ownSessionName(ctx context.Context) string {
+func ownSessionName(ctx context.Context) string {
 	if pane := ownPaneID(); pane != "" {
 		if out, err := osExec.CommandContext(ctx, "tmux", "display-message",
 			"-t", pane, "-p", "#{session_name}").Output(); err == nil {
@@ -1904,7 +1904,8 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 	}
 
 	// Get the total window height
-	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
+	cmd = osExec.CommandContext(ctx, "tmux", "display-message",
+		"-t", m.titlePaneID(), "-p", "#{window_height}")
 	totalHeightOut, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -2181,14 +2182,14 @@ func (m *DetailModel) joinTmuxPanes() {
 	}
 	log.Debug("joinTmuxPanes: daemonSessionID=%q", m.daemonSessionID)
 
-	// Get current pane ID before joining (so we can select it after)
-	currentPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-	currentPaneOut, err := currentPaneCmd.Output()
-	if err != nil {
-		log.Error("joinTmuxPanes: failed to get current pane ID: %v", err)
+	// The pane to come back to after joining is this process's own — see
+	// ownPaneID. Asking tmux for "the current" one names the foremost client's
+	// pane, and the cleanup below kills everything around whatever we name here.
+	tuiPaneID := ownPaneID()
+	if tuiPaneID == "" {
+		log.Error("joinTmuxPanes: no $TMUX_PANE; refusing to guess this instance's pane")
 		return
 	}
-	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
 	m.tuiPaneID = tuiPaneID
 	log.Debug("joinTmuxPanes: tuiPaneID=%q", tuiPaneID)
 
@@ -2383,19 +2384,19 @@ func (m *DetailModel) joinTmuxPanes() {
 				userShell = "/bin/zsh"
 			}
 			log.Debug("joinTmuxPanes: split-window for shell, workdir=%q, shell=%q", workdir, userShell)
-			err = osExec.CommandContext(ctx, "tmux", "split-window",
+			shellPaneOut, err := osExec.CommandContext(ctx, "tmux", "split-window",
 				"-h", "-l", shellWidth,
+				"-P", "-F", "#{pane_id}",
 				"-t", m.claudePaneID,
 				"-c", workdir,
-				userShell).Run() // user's shell to prevent immediate exit
+				userShell).Output() // user's shell to prevent immediate exit
 			if err != nil {
 				log.Error("joinTmuxPanes: split-window for shell failed: %v", err)
 				m.workdirPaneID = ""
 			} else {
-				// Get the new shell pane ID
-				workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-				workdirPaneOut, _ := workdirPaneCmd.Output()
-				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				// split-window -P -F prints the pane it just made. Asking which
+				// pane is active afterwards names the foremost client's instead.
+				m.workdirPaneID = strings.TrimSpace(string(shellPaneOut))
 				log.Debug("joinTmuxPanes: created shell pane, workdirPaneID=%q", m.workdirPaneID)
 				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 				// Set environment variables in the newly created shell pane
@@ -2620,20 +2621,21 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 		if userShell == "" {
 			userShell = "/bin/zsh"
 		}
-		err := osExec.CommandContext(ctx, "tmux", "split-window",
+		shellSplitOut, err := osExec.CommandContext(ctx, "tmux", "split-window",
 			"-h", "-l", shellWidth,
+			"-P", "-F", "#{pane_id}",
 			"-t", m.claudePaneID,
 			"-c", workdir,
 			userShell,
-		).Run()
+		).Output()
 		if err != nil {
 			log.Error("showShellPane: split-window failed: %v", err)
 			return
 		}
-		// Get the new shell pane ID
-		workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-		if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
-			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+		// The pane id comes from the split that made it (-P -F above), never from
+		// asking which pane is active — that names the foremost client's.
+		if newPane := strings.TrimSpace(string(shellSplitOut)); newPane != "" {
+			m.workdirPaneID = newPane
 			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 		}
 	}
@@ -3113,9 +3115,13 @@ func (m *DetailModel) focusStateCmd() tea.Cmd {
 		if inTmux && paneID != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
-			out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+			// Ask about this pane specifically. An unscoped read returns the
+			// foremost client's active pane, so a second ty attached to the same
+			// server made this instance believe it had lost focus.
+			out, err := osExec.CommandContext(ctx, "tmux", "display-message",
+				"-t", paneID, "-p", "#{pane_active}").Output()
 			if err == nil {
-				focused = strings.TrimSpace(string(out)) == paneID
+				focused = strings.TrimSpace(string(out)) == "1"
 			}
 		}
 		return focusStateMsg{detail: m, focused: focused}

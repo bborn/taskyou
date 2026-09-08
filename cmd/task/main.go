@@ -4350,9 +4350,13 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	if os.Getenv("TMUX") != "" {
 		sessionName := getUISessionName()
 		// Check if we're in this instance's session
-		tmuxCmd := osexec.Command("tmux", "display-message", "-p", "#{session_name}")
+		// Scope the question to this process's own pane. Unscoped, tmux answers
+		// for the foremost client, which with a second ty attached is a different
+		// session — and the answer decides whether we kill a session.
+		pane := os.Getenv("TMUX_PANE")
+		tmuxCmd := osexec.Command("tmux", "display-message", "-t", pane, "-p", "#{session_name}")
 		out, err := tmuxCmd.Output()
-		if err == nil && strings.TrimSpace(string(out)) == sessionName {
+		if pane != "" && err == nil && strings.TrimSpace(string(out)) == sessionName {
 			osexec.Command("tmux", "kill-session", "-t", sessionName).Run()
 		}
 	}

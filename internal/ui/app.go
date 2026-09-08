@@ -720,9 +720,13 @@ func (m *AppModel) Init() tea.Cmd {
 
 	// Enable mouse support for click-to-focus on tmux panes
 	if os.Getenv("TMUX") != "" {
-		// Get actual session name to avoid prefix-matching wrong session
-		if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
-			sessionName := strings.TrimSpace(string(out))
+		// Get actual session name to avoid prefix-matching wrong session, scoped
+		// to this process's own pane so a second ty cannot have mouse mode set
+		// on its session by this one (see ownSessionName).
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sessionName := ownSessionName(ctx)
+		cancel()
+		if sessionName != "" {
 			osExec.Command("tmux", "set-option", "-t", sessionName, "mouse", "on").Run()
 		}
 	}
