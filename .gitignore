@@ -6,6 +6,10 @@
 *.swo
 *~
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Environment
 .env
 .env.local
@@ -57,6 +61,7 @@ ty-chrome.zip
 .pr-body.md
 .pr-comment.md
 .qacfg/
+.taskyou-metrics/
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
