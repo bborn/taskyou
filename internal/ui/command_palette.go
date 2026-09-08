@@ -36,6 +36,11 @@ type CommandPaletteModel struct {
 	searchInFlight bool
 	searchPending  bool
 	enterPending   bool
+	// resultsQuery is the query filteredTasks was computed from. While it
+	// differs from what is typed, the list on screen belongs to an older query
+	// and says nothing about the current one, so it must not be presented (or
+	// selected from) as if it were a result set.
+	resultsQuery string
 
 	// Action mode: entered by typing a leading ">". Filters plugin actions
 	// instead of tasks. Task-switching behavior is unchanged when not in it.
@@ -130,7 +135,14 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 			return m, m.searchAsync()
 		}
 		m.searchPending = false
+		staleList := m.resultsQuery != msg.query
 		m.filteredTasks = msg.tasks
+		m.resultsQuery = msg.query
+		if staleList {
+			// These rows replace an unrelated list; an index picked against
+			// those rows points at an arbitrary task here.
+			m.selectedIndex = 0
+		}
 		m.selectedIndex = min(m.selectedIndex, max(0, len(msg.tasks)-1))
 		if m.enterPending {
 			m.enterPending = false
@@ -211,6 +223,16 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 	return m, nil
 }
 
+// resultsStale reports whether filteredTasks was computed from a different
+// query than the one currently typed. A stale list is rendered as the searching
+// state rather than as rows: drawn normally it is indistinguishable from real
+// results — same rows, same selection highlight — so a user acts on a task the
+// query never matched, which is how a paste of "task/5174-..." could open an
+// unrelated task sitting at the top of the previous list.
+func (m *CommandPaletteModel) resultsStale() bool {
+	return m.resultsQuery != m.searchInput.Value()
+}
+
 // Search uses a private snapshot and one worker. Closing/reopening the palette
 // cannot apply an old worker's results to a different palette instance.
 type paletteSearchMsg struct {
@@ -224,6 +246,7 @@ func (m *CommandPaletteModel) searchAsync() tea.Cmd {
 	if strings.TrimSpace(query) == "" || strings.HasPrefix(strings.TrimSpace(query), ">") {
 		m.searchPending = false
 		m.filter()
+		m.resultsQuery = query
 		return nil
 	}
 	m.actionMode = false
@@ -360,6 +383,8 @@ func (m *CommandPaletteModel) filterTasks() {
 			m.filteredTasks[i] = st.task
 		}
 	}
+
+	m.resultsQuery = query
 
 	// Clamp selected index
 	if m.selectedIndex >= len(m.filteredTasks) {
@@ -742,12 +767,12 @@ func (m *CommandPaletteModel) View() string {
 	var taskList strings.Builder
 	if m.actionMode {
 		m.renderActionList(&taskList, modalWidth-6)
-	} else if len(m.filteredTasks) == 0 {
+	} else if len(m.filteredTasks) == 0 || m.resultsStale() {
 		emptyStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Italic(true).
 			Padding(1, 0)
-		if m.searchPending {
+		if m.searchPending || m.resultsStale() {
 			taskList.WriteString(emptyStyle.Render("Searching tasks…"))
 		} else if query != "" {
 			// Show AI command hint when there's input but no matching tasks
