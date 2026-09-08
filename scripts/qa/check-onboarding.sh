@@ -12,6 +12,18 @@ export TY_PLUGINS_DIR="$CHECK_ROOT/plugins"
 export TMUX_TMPDIR="$CHECK_ROOT/tmux"
 unset TMUX
 mkdir -p "$TY_WORKFLOWS_DIR" "$TY_PLUGINS_DIR" "$TMUX_TMPDIR"
+# CLI commands normally check GitHub for updates. Seed that cache with the
+# binary under test so this smoke check stays deterministic and offline.
+TY_CHECK_VERSION="$("$TY_CHECK_BIN" --version)"
+python3 - "$CHECK_ROOT/version-check.json" "$TY_CHECK_VERSION" <<'PY'
+import datetime, json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps({
+    "version": sys.argv[2],
+    "url": "",
+    "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}))
+PY
 unzip -q "$REPO_ROOT/docs/downloads/taskyou-storefront.zip" -d "$CHECK_ROOT"
 cd "$CHECK_ROOT/taskyou-storefront"
 git init -q
