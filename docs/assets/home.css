@@ -211,7 +211,7 @@ h3 {
   box-shadow:12px 12px 0 #211a2b;
 }
 
-.art-heading,.art-bottom {
+.art-heading {
   display:flex;
   justify-content:space-between;
   gap:14px;
@@ -284,10 +284,8 @@ h3 {
   margin-right:8px;
 }
 
-.art-bottom {
-  border-top:1px dashed var(--line);
-  padding-top:20px;
-  margin-top:5px;
+.hero-art .tree-line:last-child {
+  padding-bottom:0;
 }
 
 .board-section {
@@ -373,6 +371,11 @@ h3 {
   margin-top:25px;
 }
 
+.worktree-art {
+  --worktree-gap:24px;
+  min-width:0;
+}
+
 .repo {
   margin:auto;
   width:220px;
@@ -382,7 +385,7 @@ h3 {
   padding:17px;
   background:#302339;
   border:1px solid #715372;
-  box-shadow:7px 7px 0 #100c19;
+  border-radius:8px;
 }
 
 .repo>span {
@@ -397,11 +400,7 @@ h3 {
 }
 
 .branch-stem {
-  height:55px;
-  width:50%;
-  margin:auto;
-  border-top:0;
-  border-bottom:1px solid var(--orange);
+  height:48px;
   position:relative;
 }
 
@@ -409,31 +408,37 @@ h3 {
   content:'';
   position:absolute;
   left:50%;
-  height:100%;
+  top:0;
+  height:24px;
   border-left:1px solid var(--orange);
 }
 
 .worktree-pair {
+  position:relative;
   display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:25px;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:var(--worktree-gap);
+}
+
+.worktree-pair:before {
+  content:'';
+  position:absolute;
+  top:-24px;
+  height:24px;
+  left:calc(25% - var(--worktree-gap) / 4);
+  right:calc(25% - var(--worktree-gap) / 4);
+  border:1px solid var(--orange);
+  border-bottom:0;
+  border-radius:8px 8px 0 0;
 }
 
 .worktree {
-  position:relative;
-  background:#100c19;
+  min-width:0;
+  background:var(--bg);
   border:1px solid #645171;
+  border-radius:8px;
   padding:20px 15px 0;
-  box-shadow:6px 6px 0 #291e33;
-}
-
-.worktree:before {
-  content:'';
-  position:absolute;
-  height:20px;
-  top:-20px;
-  left:50%;
-  border-left:1px solid var(--orange);
+  overflow:hidden;
 }
 
 .branch-name {
@@ -447,22 +452,20 @@ h3 {
 
 .file-stack span {
   display:block;
-  padding:9px 12px;
-  border:1px solid var(--line);
+  padding:8px 0;
   font:11px var(--mono);
-  background:#21192d;
+  color:var(--muted);
 }
 
 .file-stack span+span {
-  margin-top:7px;
-  margin-left:8px;
+  border-top:1px solid var(--line);
 }
 
 .agent-slot {
   display:flex;
   align-items:center;
   gap:8px;
-  border-top:1px dashed var(--line);
+  border-top:1px solid var(--line);
   font:10px var(--mono);
   padding:15px 0;
   color:var(--mint);
@@ -583,13 +586,30 @@ h3 {
 
 .recipes {
   display:grid;
-  grid-template-columns:repeat(3,1fr);
+  grid-template-columns:repeat(3,minmax(0,1fr));
   margin-top:32px;
-  gap:35px;
+  border:1px solid #9a452880;
+  border-radius:8px;
+  overflow:hidden;
+  background:#ffffff18;
 }
 
 .recipes>a {
+  padding:24px;
   text-decoration:none;
+}
+
+.recipes>a+a {
+  border-left:1px solid #9a452880;
+}
+
+.recipes>a:hover {
+  background:#ffffff20;
+}
+
+.recipes>a:focus-visible {
+  outline:3px solid #29150f;
+  outline-offset:-4px;
 }
 
 .recipes strong {
@@ -999,8 +1019,8 @@ footer>.brand {
     margin-left:42px;
   }
 
-  .recipes {
-    gap:25px;
+  .recipes>a {
+    padding:20px;
   }
 
   .recipes strong {
@@ -1156,12 +1176,8 @@ footer>.brand {
     font-size:9px;
   }
 
-  .art-bottom {
-    font-size:9px;
-  }
-
-  .worktree-pair {
-    gap:13px;
+  .worktree-art {
+    --worktree-gap:13px;
   }
 
   .worktree {
@@ -1221,12 +1237,11 @@ footer>.brand {
 
   .recipes {
     grid-template-columns:1fr;
-    gap:20px;
   }
 
-  .recipes>a {
-    border-bottom:1px solid #9a452860;
-    padding-bottom:18px;
+  .recipes>a+a {
+    border-left:0;
+    border-top:1px solid #9a452880;
   }
 
   .recipes strong {
