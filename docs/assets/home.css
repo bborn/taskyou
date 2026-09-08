@@ -134,40 +134,19 @@ h3 {
 }
 
 .hero {
-  display:grid;
-  grid-template-columns:1.05fr 1fr;
-  gap:72px;
-  align-items:center;
-  padding-block:76px 70px;
-}
-
-.hello {
-  display:flex;
-  align-items:center;
-  gap:18px;
-  font:13px var(--mono);
-  color:var(--mint);
-  margin-bottom:30px;
-}
-
-.hello img {
-  image-rendering:pixelated;
-}
-
-.lead {
-  font-size:27px;
-  margin-top:28px;
+  padding-block:64px 56px;
+  text-align:center;
 }
 
 .intro {
-  font-size:18px;
+  font-size:22px;
   color:var(--muted);
-  max-width:44ch;
-  margin-top:14px;
+  margin:24px auto 0;
 }
 
 .actions {
   display:flex;
+  justify-content:center;
   gap:28px;
   align-items:center;
   margin-top:30px;
@@ -200,92 +179,6 @@ h3 {
   font-size:13px;
   color:var(--muted);
   margin-top:23px;
-}
-
-.hero-art {
-  padding:30px 25px 20px;
-  background:radial-gradient(ellipse at 60% 50%,#382139,transparent 75%);
-  border:1px solid var(--line);
-  border-radius:10px;
-  position:relative;
-  box-shadow:12px 12px 0 #211a2b;
-}
-
-.art-heading {
-  display:flex;
-  justify-content:space-between;
-  gap:14px;
-  font:11px var(--mono);
-  color:var(--muted);
-}
-
-.activity {
-  color:var(--mint);
-}
-
-.art-heading {
-  margin-bottom:35px;
-}
-
-.job {
-  position:relative;
-  display:flex;
-  align-items:center;
-  gap:14px;
-  padding:21px 15px;
-  border:1px solid #75627f;
-  background:#241c30;
-  box-shadow:5px 5px 0 #0c0911;
-  border-left:3px solid var(--orange);
-}
-
-.job strong {
-  font-size:16px;
-  font-weight:500;
-}
-
-.job div>span {
-  display:block;
-  font:11px var(--mono);
-  color:var(--muted);
-  margin-top:7px;
-}
-
-.job-number {
-  font:11px var(--mono);
-  color:var(--orange);
-}
-
-.job-two {
-  margin-left:20px;
-}
-
-.job-three {
-  margin-left:40px;
-}
-
-.pulse {
-  width:6px;
-  height:6px;
-  background:var(--mint);
-  margin-left:auto;
-  flex-shrink:0;
-  box-shadow:0 0 12px #8ce5bc60;
-}
-
-.tree-line {
-  font:11px var(--mono);
-  padding:12px 0 23px 30px;
-  color:var(--muted);
-}
-
-.tree-line span {
-  color:var(--orange);
-  margin-right:8px;
-}
-
-.hero-art .tree-line:last-child {
-  padding-bottom:0;
 }
 
 .board-section {
@@ -822,35 +715,6 @@ footer>.brand {
 }
 
 @media(max-width:1100px) {
-  .hero {
-    gap:40px;
-  }
-
-  .job {
-    padding:17px 10px;
-    gap:10px;
-  }
-
-  .job strong {
-    font-size:14px;
-  }
-
-  .job div>span {
-    font-size:10px;
-  }
-
-  .hero-art {
-    padding:25px 18px;
-  }
-
-  .job-three {
-    margin-left:20px;
-  }
-
-  .job-two {
-    margin-left:10px;
-  }
-
   .split {
     gap:40px;
   }
@@ -908,47 +772,11 @@ footer>.brand {
   }
 
   .hero {
-    grid-template-columns:1fr;
     padding-top:36px;
-    gap:45px;
-  }
-
-  .hero-copy {
-    max-width:580px;
   }
 
   .hero h1 {
     font-size:72px;
-  }
-
-  .hero-art {
-    max-width:600px;
-    width:100%;
-    padding:28px;
-  }
-
-  .job strong {
-    font-size:18px;
-  }
-
-  .job div>span {
-    font-size:12px;
-  }
-
-  .job {
-    padding:20px;
-  }
-
-  .job-two {
-    margin-left:20px;
-  }
-
-  .job-three {
-    margin-left:40px;
-  }
-
-  .hero-art .tree-line {
-    padding-bottom:22px;
   }
 
   .split,.workflow-intro,.review-heading,.install-layout {
@@ -1105,22 +933,7 @@ footer>.brand {
   }
 
   .hero h1 {
-    font-size:61px;
-  }
-
-  .hello {
-    font-size:10px;
-    gap:12px;
-    margin-bottom:22px;
-  }
-
-  .hello img {
-    width:54px;
-    height:54px;
-  }
-
-  .lead {
-    font-size:24px;
+    font-size:48px;
   }
 
   .intro {
@@ -1135,45 +948,6 @@ footer>.brand {
   .button {
     padding:13px 16px;
     gap:12px;
-  }
-
-  .hero-art {
-    padding:22px 14px;
-    box-shadow:6px 6px 0 #211a2b;
-  }
-
-  .art-heading {
-    font-size:9px;
-    margin-bottom:24px;
-  }
-
-  .job {
-    padding:17px 10px;
-    gap:9px;
-  }
-
-  .job strong {
-    font-size:13px;
-  }
-
-  .job div>span {
-    font-size:9px;
-  }
-
-  .job-two {
-    margin-left:10px;
-  }
-
-  .job-three {
-    margin-left:20px;
-  }
-
-  .job-number {
-    font-size:9px;
-  }
-
-  .tree-line {
-    font-size:9px;
   }
 
   .worktree-art {

@@ -56,7 +56,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="assets/home.css" />
+    <link rel="stylesheet" href="assets/home.css?v=simple-hero-static" />
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -67,21 +67,10 @@
     <main id="main">
       <header class="hero container">
         <div class="hero-copy">
-          <p class="hello"><img src="images/logo.webp" width="72" height="72" alt="Pixel coffee mug wearing sunglasses" />Calm, cool, a little crazy.</p>
           <h1>Kanban for<br />code agents.</h1>
-          <p class="lead">Your backlog has help.</p>
-          <p class="intro">Give a task to a coding agent. It gets its own worktree, gets to work, and keeps its progress on the board. You decide what ships.</p>
+          <p class="intro">Run coding agents from one board.<br />Give them tasks. Review what ships.</p>
           <div class="actions"><a class="button" href="#install">Put a task to work <span aria-hidden="true">↗</span></a><a class="text-link" href="#demo">Watch it happen</a></div>
           <p class="fine">Open source. Runs in your terminal. macOS &amp; Linux.</p>
-        </div>
-        <div class="hero-art" role="img" aria-label="Three separate tasks, each connected to its own coding agent and git worktree">
-          <div class="art-heading"><span>On your board</span><span class="activity">3 agents at work</span></div>
-          <div class="job job-one"><span class="job-number">#24</span><div><strong>Fix checkout on mobile</strong><span>Claude · adjusting the layout</span></div><span class="pulse" aria-hidden="true"></span></div>
-          <div class="tree-line"><span>↳</span> worktree / checkout-fix</div>
-          <div class="job job-two"><span class="job-number">#25</span><div><strong>Add the size guide</strong><span>Codex · writing tests</span></div><span class="pulse" aria-hidden="true"></span></div>
-          <div class="tree-line"><span>↳</span> worktree / size-guide</div>
-          <div class="job job-three"><span class="job-number">#26</span><div><strong>Speed up product search</strong><span>Claude · checking the query</span></div><span class="pulse" aria-hidden="true"></span></div>
-          <div class="tree-line"><span>↳</span> worktree / product-search</div>
         </div>
       </header>
       <section class="board-section container" aria-label="The TaskYou terminal board">
@@ -138,6 +127,6 @@
     </main>
     <footer class="container"><a class="brand" href="./"><img src="images/logo.webp" width="36" height="36" alt="" />taskyou</a><span>Calm, cool, a little crazy.</span><div><a href="https://github.com/bborn/taskyou">GitHub</a><a href="getting-started.html">Docs</a><span>MIT License</span></div></footer>
     <div class="sr-only" id="copy-status" role="status"></div>
-    <script src="assets/home.js"></script>
+    <script src="assets/home.js?v=static-install"></script>
   </body>
 </html>
