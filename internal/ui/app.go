@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
 	"github.com/muesli/termenv"
 
@@ -4394,7 +4395,7 @@ func actionResultSummary(output string) string {
 			continue
 		}
 		if len(line) > 80 {
-			return line[:79] + "…"
+			return ansi.Truncate(line, 80, "…")
 		}
 		return line
 	}
@@ -4742,7 +4743,7 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 				// Use first line of body, truncated
 				firstLine := strings.Split(strings.TrimSpace(t.Body), "\n")[0]
 				if len(firstLine) > 50 {
-					firstLine = firstLine[:50] + "..."
+					firstLine = ansi.Truncate(firstLine, 53, "...")
 				}
 				t.Title = firstLine
 			}

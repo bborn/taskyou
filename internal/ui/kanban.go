@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
@@ -1362,9 +1363,17 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
-	}
+	// ansi.Truncate measures display columns and never cuts inside a rune. The
+	// old form sliced by BYTES: a title carrying any multi-byte character (a "·"
+	// in a digest title, an accent, an emoji) could be cut mid-rune, leaving a
+	// dangling byte. The terminal and lipgloss then disagreed about the line's
+	// width, so the card's background and border stopped short of the column.
+	// ansi.Truncate measures display columns and never cuts inside a rune. The
+	// old form sliced by BYTES: a title carrying any multi-byte character (a "·"
+	// in a digest title, an accent, an emoji) could be cut mid-rune, leaving a
+	// dangling byte. The terminal and lipgloss then disagreed about the line's
+	// width, so the card's background and border stopped short of the column.
+	title = ansi.Truncate(title, maxTitleLen, "…")
 
 	leftLine := b.String()
 	indicatorText := strings.Join(indicators, " ")
