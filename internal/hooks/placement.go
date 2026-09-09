@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/bborn/workflow/internal/textutil"
 )
 
 // EventTaskPlacement is the one hook ty *consults* rather than merely notifies.
@@ -184,5 +186,5 @@ func truncateForLog(s string) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return textutil.Truncate(s, max+1, "…")
 }

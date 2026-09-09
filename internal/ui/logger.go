@@ -6,14 +6,37 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
-// UILogger provides file-based logging for the UI package.
-// Logs are written to ~/.local/share/task/ui.log
+// UILogger provides file-based logging for the UI package. The TUI draws on
+// stdout, so diagnostics cannot go there; they go to ui.log beside the database.
+//
+// Three properties this file depends on, each learned the hard way:
+//
+//   - It sits next to the database, so an isolated instance (a QA harness with
+//     its own WORKTREE_DB_PATH) writes to its own log. Sharing one file made a
+//     QA run's errors look like they came from the live TUI.
+//   - Every line carries the pid. Several ty processes append concurrently —
+//     TUIs, the daemon — and without it there is no way to tell who wrote what.
+//   - It rotates. Unrotated, this file reached 205MB and eight months of history.
 type UILogger struct {
-	mu   sync.Mutex
-	file *os.File
+	mu     sync.Mutex
+	file   *os.File
+	path   string
+	pid    int
+	writes int
 }
+
+// maxLogBytes is the size at which the log is rotated to ui.log.1. One previous
+// generation is kept: enough to span a restart, bounded on disk.
+const maxLogBytes = 16 << 20
+
+// logSyncEvery flushes to disk every N lines rather than on every one. A crash
+// can now lose a few trailing lines; in exchange the UI is not paying an fsync
+// per log statement, which at debug volume is thousands per task switch.
+const logSyncEvery = 64
 
 var uiLogger *UILogger
 var loggerOnce sync.Once
@@ -29,28 +52,24 @@ func GetLogger() *UILogger {
 }
 
 func (l *UILogger) init() {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	logPath := LogPath()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 		return
 	}
-
-	logDir := filepath.Join(home, ".local", "share", "task")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return
-	}
-
-	logPath := filepath.Join(logDir, "ui.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return
 	}
 	l.file = f
+	l.path = logPath
+	l.pid = os.Getpid()
 }
 
-// LogPath returns the path to the log file.
+// LogPath returns the path to the log file: ui.log beside the database, so an
+// instance pointed at another database logs beside that one instead of into the
+// live instance's file.
 func LogPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "task", "ui.log")
+	return filepath.Join(filepath.Dir(db.DefaultPath()), "ui.log")
 }
 
 // CloseLogger closes the log file.
@@ -69,9 +88,36 @@ func (l *UILogger) log(level, format string, args ...interface{}) {
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
 	msg := fmt.Sprintf(format, args...)
-	line := fmt.Sprintf("[%s] %s: %s\n", timestamp, level, msg)
+	line := fmt.Sprintf("[%s] [%d] %s: %s\n", timestamp, l.pid, level, msg)
 	l.file.WriteString(line)
-	l.file.Sync()
+
+	l.writes++
+	if l.writes%logSyncEvery == 0 {
+		l.file.Sync()
+		l.rotateIfLarge()
+	}
+}
+
+// rotateIfLarge moves the log aside once it passes maxLogBytes, keeping one
+// previous generation. Caller holds the mutex.
+func (l *UILogger) rotateIfLarge() {
+	if l.path == "" {
+		return
+	}
+	info, err := l.file.Stat()
+	if err != nil || info.Size() < maxLogBytes {
+		return
+	}
+	// Other ty processes hold their own descriptor on the same inode. Renaming
+	// leaves them writing to the rotated file until they notice; reopening here
+	// is what moves this process onto the fresh one. Nothing is lost either way.
+	_ = os.Rename(l.path, l.path+".1")
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	_ = l.file.Close()
+	l.file = f
 }
 
 // Info logs an info message.

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bborn/workflow/internal/textutil"
+
 	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/pipeline"
@@ -502,7 +504,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 				ts := l.CreatedAt.Time.Format("15:04:05")
 				content := l.Content
 				if len(content) > 300 {
-					content = content[:300] + "..."
+					content = textutil.Truncate(content, 303, "...")
 				}
 				sb.WriteString(fmt.Sprintf("- `%s` [%s] %s\n", ts, l.LineType, content))
 			}

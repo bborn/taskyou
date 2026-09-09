@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bborn/workflow/internal/textutil"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/tasksummary"
@@ -159,7 +161,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if title == "" && req.Body != "" {
 		title = req.Body
 		if len(title) > 50 {
-			title = title[:50] + "..."
+			title = textutil.Truncate(title, 53, "...")
 		}
 	}
 

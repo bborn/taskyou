@@ -14,6 +14,7 @@
 .claude/*
 !.claude/settings.json
 .crush/
+.codex/
 
 # Archives
 *.tar.gz

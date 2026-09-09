@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bborn/workflow/internal/textutil"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
@@ -825,7 +827,7 @@ Examples:
 				if strings.TrimSpace(title) == "" {
 					firstLine := strings.Split(strings.TrimSpace(body), "\n")[0]
 					if len(firstLine) > 50 {
-						firstLine = firstLine[:50] + "..."
+						firstLine = textutil.Truncate(firstLine, 53, "...")
 					}
 					title = firstLine
 				}
@@ -3499,7 +3501,7 @@ Examples:
 				// Show truncated instructions
 				instr := t.Instructions
 				if len(instr) > 80 {
-					instr = instr[:77] + "..."
+					instr = textutil.Truncate(instr, 80, "...")
 				}
 				instr = strings.ReplaceAll(instr, "\n", " ")
 				fmt.Printf("    Instructions: %s\n", dimStyle.Render(instr))
@@ -5320,7 +5322,7 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 				if cmd, ok := toolInput["command"].(string); ok {
 					// Truncate long commands
 					if len(cmd) > 100 {
-						cmd = cmd[:100] + "..."
+						cmd = textutil.Truncate(cmd, 103, "...")
 					}
 					return fmt.Sprintf("Bash: %s", cmd)
 				}
@@ -5433,7 +5435,7 @@ func formatPermissionDetail(input *ClaudeHookInput) string {
 
 	// Truncate to keep the approval bar compact
 	if len(detail) > 200 {
-		detail = detail[:200] + "..."
+		detail = textutil.Truncate(detail, 203, "...")
 	}
 
 	return detail
@@ -5661,7 +5663,7 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return textutil.Truncate(s, maxLen, "...")
 }
 
 // execCommandRunner implements web.CommandRunner using os/exec.
@@ -5700,7 +5702,7 @@ func listSessions() {
 			// Truncate title to 40 chars
 			title := s.taskTitle
 			if len(title) > 40 {
-				title = title[:37] + "..."
+				title = textutil.Truncate(title, 40, "...")
 			}
 			titleStr = title
 		}
@@ -6070,7 +6072,7 @@ func suspendSessions(taskIDs []int, all bool) {
 
 		title := s.taskTitle
 		if len(title) > 40 {
-			title = title[:37] + "..."
+			title = textutil.Truncate(title, 40, "...")
 		}
 
 		memStr := ""

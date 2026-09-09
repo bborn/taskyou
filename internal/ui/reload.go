@@ -41,7 +41,12 @@ func (m *AppModel) checkReload() tea.Cmd {
 }
 
 func (m *AppModel) beginReload() tea.Cmd {
-	if m.reloadWrites.Load() > 0 || !m.reloadPending || m.reloadReady || m.detailCleanupInFlight || m.taskTransitionInProgress {
+	// transitionInProgress(), not the bare field: a task switch holds that guard
+	// until its panes report back, and if that report is ever lost only the
+	// deadline reopens it. Reading the field directly let one stuck switch block
+	// every future reload, so a TUI left in a detail view silently never picked
+	// up a new binary no matter how often the reload was requested.
+	if m.reloadWrites.Load() > 0 || !m.reloadPending || m.reloadReady || m.detailCleanupInFlight || m.transitionInProgress() {
 		return nil
 	}
 	if m.currentView != ViewDashboard && m.currentView != ViewDetail {
