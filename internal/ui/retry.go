@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -105,7 +106,7 @@ func (m *RetryModel) View() string {
 
 	title := m.task.Title
 	if len(title) > 60 {
-		title = title[:57] + "..."
+		title = ansi.Truncate(title, 60, "...")
 	}
 	subtitle := Dim.Render(title)
 

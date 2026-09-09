@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -955,7 +956,7 @@ func (m *CommandPaletteModel) renderTaskItem(task *db.Task, isSelected bool, wid
 		maxTitleLen = 10
 	}
 	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "..."
+		title = ansi.Truncate(title, maxTitleLen, "...")
 	}
 
 	titleStyle := lipgloss.NewStyle()
