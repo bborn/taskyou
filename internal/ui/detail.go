@@ -1233,17 +1233,41 @@ func (m *DetailModel) spinnerTick() tea.Cmd {
 	})
 }
 
-// headerHeight is the vertical space reserved for the box chrome around the
-// viewport.
+// headerHeight is the vertical space reserved above the viewport: the rendered
+// header plus the box chrome around it.
+//
+// It is measured, not assumed. renderHeader emits a variable number of lines —
+// the badge row, a PR link, a server URL, host and placement lines, a pane
+// notice, an executor failure, the stand — and a fixed reservation made every
+// extra line overflow the pane by a row. The terminal then scrolled the top
+// away, taking the box border and the badge row (status, PINNED, project, PR
+// status) with it. renderHeader costs ~12µs, so measuring it here is cheap.
 func (m *DetailModel) headerHeight() int {
-	return 6
+	if m.task == nil {
+		return headerChromeHeight
+	}
+	h := lipgloss.Height(m.renderHeader()) + headerChromeHeight
+	if IsGlobalDangerousMode() {
+		h++ // full-width danger banner above the box
+	}
+	return h
+}
+
+// headerChromeHeight is the non-header vertical space View() puts around the
+// viewport: the box's top and bottom border rows, and the scroll-percentage row
+// below the content.
+const headerChromeHeight = 3
+
+// footerHeight is the vertical space the help row below the box occupies. Like
+// the header it is measured — the help bar carries vertical padding and its
+// height is a style decision, not a constant to keep in sync by hand.
+func (m *DetailModel) footerHeight() int {
+	return lipgloss.Height(m.renderHelp())
 }
 
 func (m *DetailModel) initViewport() {
-	footerHeight := 2
-
 	// If we have joined panes, we have less height (tmux split takes space)
-	vpHeight := m.height - m.headerHeight() - footerHeight
+	vpHeight := m.height - m.headerHeight() - m.footerHeight()
 
 	m.viewport = viewport.New(m.width-4, vpHeight)
 	m.setViewportContent()
@@ -1264,9 +1288,8 @@ func (m *DetailModel) reflowViewport() {
 	if !m.ready {
 		return
 	}
-	footerHeight := 2
 	m.viewport.Width = m.width - 4
-	m.viewport.Height = m.height - m.headerHeight() - footerHeight
+	m.viewport.Height = m.height - m.headerHeight() - m.footerHeight()
 	m.setViewportContent()
 }
 
@@ -2459,9 +2482,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	// This prevents the header (with task title) from being pushed off screen
 	if actualHeight := m.getActualPaneHeight(tuiPaneID); actualHeight > 0 {
 		m.height = actualHeight
-		headerHeight := 6
-		footerHeight := 2
-		vpHeight := m.height - headerHeight - footerHeight
+		vpHeight := m.height - m.headerHeight() - m.footerHeight()
 		if vpHeight > 0 && m.ready {
 			m.viewport.Height = vpHeight
 			m.setViewportContent()
