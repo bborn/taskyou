@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bborn/workflow/internal/textutil"
+
 	"github.com/spf13/cobra"
 
 	"github.com/bborn/workflow/internal/db"
@@ -181,7 +183,7 @@ func fetchTaskCompletions(toComplete string) ([]string, cobra.ShellCompDirective
 	for _, t := range tasks {
 		desc := t.Title
 		if len(desc) > 40 {
-			desc = desc[:37] + "..."
+			desc = textutil.Truncate(desc, 40, "...")
 		}
 		completions = append(completions, fmt.Sprintf("%d\t[%s] %s", t.ID, t.Status, desc))
 	}

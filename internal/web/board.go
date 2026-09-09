@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/textutil"
+
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -180,5 +182,5 @@ func truncateTitle(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return textutil.Truncate(s, maxLen, "...")
 }
