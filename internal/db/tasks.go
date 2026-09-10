@@ -2519,10 +2519,134 @@ func (t *Task) HasArchiveState() bool {
 	return t.ArchiveRef != "" && t.ArchiveCommit != ""
 }
 
+// ClearTaskWorktreeRefs drops every reference a task holds to a directory on
+// disk: the live worktree_path and the archive_worktree_path recorded when it was
+// archived. Used when the recorded path turns out not to be a worktree at all
+// (most commonly the project's own main checkout), where there is nothing to
+// remove and nothing to restore.
+//
+// Deliberately does NOT touch updated_at: the row is being corrected by a
+// background sweep, not modified by the user, and bumping the timestamp makes a
+// months-old task resurface at the top of every recently-touched view — which is
+// exactly what the hourly re-archive of task 1201 did for five months.
+func (db *DB) ClearTaskWorktreeRefs(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_path = '', archive_worktree_path = ''
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task worktree refs: %w", err)
+	}
+	return nil
+}
+
+// MarkWorktreeSweepFailed records that the stale-worktree sweeper could not
+// archive this task's worktree, excluding the row from future automatic sweeps.
+// Like ClearTaskWorktreeRefs it leaves updated_at alone.
+func (db *DB) MarkWorktreeSweepFailed(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_sweep_failed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("mark worktree sweep failed: %w", err)
+	}
+	return nil
+}
+
+// ClearWorktreeSweepFailure removes the un-sweepable marker. Called whenever a
+// task gets a worktree set up again: the new worktree has never failed to
+// archive, so the old verdict no longer applies.
+func (db *DB) ClearWorktreeSweepFailure(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_sweep_failed_at = NULL
+		WHERE id = ? AND worktree_sweep_failed_at IS NOT NULL
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear worktree sweep failure: %w", err)
+	}
+	return nil
+}
+
+// WorktreeSweepFailedAt returns when the sweeper marked this task un-sweepable,
+// or nil if it never did.
+func (db *DB) WorktreeSweepFailedAt(taskID int64) (*time.Time, error) {
+	var at sql.NullTime
+	err := db.QueryRow(`SELECT worktree_sweep_failed_at FROM tasks WHERE id = ?`, taskID).Scan(&at)
+	if err != nil {
+		return nil, fmt.Errorf("read worktree sweep failure: %w", err)
+	}
+	if !at.Valid {
+		return nil, nil
+	}
+	t := at.Time
+	return &t, nil
+}
+
+// WorktreeRef is one task row's claim on a directory: the live worktree and the
+// path an archive would be restored to. Used by the worktree audit, which needs
+// every row that names a directory regardless of status.
+type WorktreeRef struct {
+	TaskID       int64
+	Title        string
+	Project      string
+	Status       string
+	WorktreePath string
+	ArchivePath  string
+}
+
+// ListWorktreeRefs returns every non-deleted task that names a directory on disk
+// through worktree_path or archive_worktree_path.
+func (db *DB) ListWorktreeRefs() ([]WorktreeRef, error) {
+	rows, err := db.Query(`
+		SELECT id, title, project, status,
+		       COALESCE(worktree_path, ''), COALESCE(archive_worktree_path, '')
+		FROM tasks
+		WHERE deleted_at IS NULL
+		  AND (COALESCE(worktree_path, '') != '' OR COALESCE(archive_worktree_path, '') != '')
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query worktree refs: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []WorktreeRef
+	for rows.Next() {
+		var r WorktreeRef
+		if err := rows.Scan(&r.TaskID, &r.Title, &r.Project, &r.Status, &r.WorktreePath, &r.ArchivePath); err != nil {
+			return nil, fmt.Errorf("scan worktree ref: %w", err)
+		}
+		refs = append(refs, r)
+	}
+	return refs, rows.Err()
+}
+
 // GetStaleWorktreeTasks returns done/archived tasks that have worktree paths set
 // and were completed more than maxAge ago. These are candidates for cleanup.
+//
+// Rows already marked un-sweepable (worktree_sweep_failed_at set, see
+// MarkWorktreeSweepFailed) are excluded: their archive has already failed once
+// and nothing about a retry would go differently, so the automatic sweep must
+// not keep attempting them.
 func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
+	return db.staleWorktreeTasks(maxAge, false)
+}
+
+// GetStaleWorktreeTasksIncludingFailed is GetStaleWorktreeTasks plus the rows a
+// prior sweep marked un-sweepable. Used by the on-demand `task worktrees cleanup`
+// command: a human asking for a cleanup is entitled to a retry (and to see the
+// error again), which is exactly what the unattended hourly sweep must not do.
+func (db *DB) GetStaleWorktreeTasksIncludingFailed(maxAge time.Duration) ([]*Task, error) {
+	return db.staleWorktreeTasks(maxAge, true)
+}
+
+func (db *DB) staleWorktreeTasks(maxAge time.Duration, includeFailed bool) ([]*Task, error) {
 	cutoff := time.Now().Add(-maxAge).UTC()
+	failedFilter := "AND worktree_sweep_failed_at IS NULL"
+	if includeFailed {
+		failedFilter = ""
+	}
 	query := `
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
@@ -2542,6 +2666,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		  AND deleted_at IS NULL
 		  AND completed_at IS NOT NULL
 		  AND completed_at < ?
+		  ` + failedFilter + `
 		ORDER BY completed_at ASC
 	`
 	rows, err := db.Query(query, cutoff)
