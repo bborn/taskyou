@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,31 @@ var ErrNoWorktree = errors.New("task has no worktree yet")
 // another host.
 var ErrPlacedRemotely = errors.New("task is running on another machine")
 
+// ErrWorktreeMissing means the task still records a worktree path, but nothing
+// is there any more — the worktree was reaped (or moved) while the DB row kept
+// pointing at it.
+//
+// It must be its own failure, and it must be fatal to the start path. tmux's
+// `new-window -c <dir>` does NOT fail on a missing directory: it silently starts
+// the window in $HOME. So a task whose worktree had been reaped would launch an
+// agent in the user's home directory, where the ownership check that follows
+// ("is this pane in the task's worktree?") could never accept the pane it had
+// just created — and the detail view would start another one. That loop burned
+// 178 Claude sessions and $43 in 30 minutes on one task.
+var ErrWorktreeMissing = errors.New("task worktree no longer exists")
+
+// worktreeUsable reports whether path is a directory that exists right now.
+// Only a definite "not there" counts as missing: a stat that fails for any other
+// reason (permissions, a flaky network mount) is treated as usable so a
+// transient error never blocks a legitimate start.
+func worktreeUsable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return info.IsDir()
+}
+
 // RemoteTaskLocation describes where a remotely placed task actually lives, for
 // surfaces (the TUI, `ty show`) that can only say so rather than show it.
 type RemoteTaskLocation struct {
@@ -291,12 +317,20 @@ func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
 		return "", fmt.Errorf("%w: task %d was placed on %s", ErrPlacedRemotely, task.ID, task.PlacementTarget)
 	}
 	if task.WorktreePath != "" {
+		// Recorded but gone: fail loudly rather than let tmux quietly start the
+		// agent in $HOME (see ErrWorktreeMissing).
+		if !worktreeUsable(task.WorktreePath) {
+			return "", fmt.Errorf("%w: task %d records %s, which is not on disk", ErrWorktreeMissing, task.ID, task.WorktreePath)
+		}
 		return task.WorktreePath, nil
 	}
 	// A project that does not use worktrees shares the project directory by
 	// design; that is its normal, isolated-enough working directory.
 	if task.Project != "" && !e.config.ProjectUsesWorktrees(task.Project) {
 		if dir := e.GetProjectDir(task.Project); dir != "" {
+			if !worktreeUsable(dir) {
+				return "", fmt.Errorf("%w: project %s directory %s is not on disk", ErrWorktreeMissing, task.Project, dir)
+			}
 			return dir, nil
 		}
 	}

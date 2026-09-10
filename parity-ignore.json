@@ -1,1 +1,3 @@
-{}
+{
+  "RecreateWorktree": "TUI-only recovery for a task whose worktree was reaped: it rebuilds the worktree from the task's branch on the machine running the TUI. The desktop app has no worktree API surface (it covers OpenWorktree only) and does not run on the host that owns the worktree, so there is nothing for it to act on. Revisit if the GUI gains worktree management."
+}

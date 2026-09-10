@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io/fs"
 	"os"
 	osExec "os/exec"
 	"path/filepath"
@@ -55,12 +56,19 @@ const (
 	// window doesn't exist yet — the daemon's executor will create it shortly;
 	// keep polling for it instead of starting our own.
 	paneActionWaitForExecutor
+	// paneActionWorktreeMissing: the task records a worktree that is no longer on
+	// disk. Nothing may be started (tmux would run the agent in $HOME) and nothing
+	// may be joined (no pane could ever pass the worktree ownership check). The
+	// view says so and offers to recreate the worktree.
+	paneActionWorktreeMissing
 )
 
 // pendingPaneAction decides what to do when a task has no existing tmux window.
 // Extracted as a pure function (no tmux I/O) so the open-path decision tree can
 // be unit-tested without a running tmux server.
-func pendingPaneAction(task *db.Task) paneAction {
+// worktreeMissing says the task's recorded worktree is gone from disk; see
+// taskWorktreeMissing for how that is established.
+func pendingPaneAction(task *db.Task, worktreeMissing bool) paneAction {
 	if shouldSkipAutoExecutor(task) {
 		return paneActionSkip
 	}
@@ -81,7 +89,60 @@ func pendingPaneAction(task *db.Task) paneAction {
 	if task.Status == db.StatusQueued || task.Status == db.StatusProcessing {
 		return paneActionWaitForExecutor
 	}
+	// The worktree the task records was reaped while the row kept pointing at it.
+	// Starting here is what looped: tmux's `new-window -c <gone>` does not fail,
+	// it starts the agent in $HOME, and the pane it creates can never satisfy the
+	// "is this pane in the task's worktree?" check that follows — so setup ran
+	// again, and again. Stop instead, and let the user recreate the worktree.
+	if worktreeMissing {
+		return paneActionWorktreeMissing
+	}
 	return paneActionStartExecutor
+}
+
+// taskWorktreeMissing returns the task's recorded worktree path when that path
+// is no longer on disk (or is no longer a directory), and "" otherwise.
+//
+// Only a definite "not there" counts: a stat failing for any other reason
+// (permissions, a slow network mount) leaves the task startable, so a transient
+// error never wedges a healthy task. A remotely placed task has no local
+// worktree by design and is never reported missing.
+func taskWorktreeMissing(task *db.Task) (string, bool) {
+	if task == nil || task.WorktreePath == "" || task.PlacementTarget != "" {
+		return "", false
+	}
+	info, err := os.Stat(task.WorktreePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return task.WorktreePath, true
+		}
+		return "", false
+	}
+	if !info.IsDir() {
+		return task.WorktreePath, true
+	}
+	return "", false
+}
+
+// worktreeMissingMessage is the user-visible explanation, and the recovery, for
+// a task whose worktree is gone. It names the key that rebuilds it so the state
+// is a dead end only until the user presses one key.
+func worktreeMissingMessage(path string) string {
+	return fmt.Sprintf("Worktree missing: %s — nothing started. Press W to recreate it.", path)
+}
+
+// spawnLoopMessage explains a tripped spawn breaker (see executor_spawn_guard.go).
+func spawnLoopMessage(executorName string) string {
+	return fmt.Sprintf("Stopped starting %s: %d launches in %s never produced a usable pane. Press W to rebuild the worktree, or reopen this task to try again later.",
+		executorName, maxExecutorSpawns, executorSpawnWindow)
+}
+
+// adoptRejectedMessage explains a refused pane adopt. The refusal itself is
+// correct (the pane is not in this task's worktree); what used to be wrong was
+// falling straight back into pane setup, which started yet another executor.
+func adoptRejectedMessage(executorName string) string {
+	return fmt.Sprintf("Refused to attach: the %s pane is not in this task's worktree. Nothing was started. Press W to rebuild the worktree, or reopen this task to retry.",
+		executorName)
 }
 
 // waitForExecutorTimeout bounds how long the detail view waits for the daemon to
@@ -258,6 +319,20 @@ type DetailModel struct {
 	// as information, not as a failure, because nothing failed.
 	paneNotice string
 
+	// paneSetupHalted is the reason pane setup stopped deliberately and must NOT
+	// be retried automatically: a missing worktree, a refused pane adopt, or a
+	// tripped spawn breaker. It is the terminal state the respawn loop lacked —
+	// while it is set, the health poll stays quiet and no start path may run, so
+	// the view shows one clear explanation instead of starting another executor
+	// every ten seconds. Cleared by explicit user recovery (recreating the
+	// worktree) or by reopening the task.
+	paneSetupHalted string
+
+	// paneAdoptRejected is set by joinTmuxPanes when the candidate executor pane
+	// failed the worktree ownership check, so the caller can turn that refusal
+	// into a halt rather than looping back into setup.
+	paneAdoptRejected bool
+
 	// remotePaneID is the LOCAL pane holding an ssh client attached to a remotely
 	// placed task's tmux session. It is not a joined daemon pane and must never be
 	// broken back to one: nothing on this machine owns it, so it is created and
@@ -304,6 +379,12 @@ type panesJoinedMsg struct {
 // showing the loading spinner and let ensureTmuxPanesJoined poll the executor's
 // panes in once the daemon creates them.
 type paneWaitForExecutorMsg struct{}
+
+// paneSetupHaltedMsg reports that pane setup stopped on purpose and will not be
+// retried on its own. reason is shown to the user verbatim and explains the
+// recovery; nothing about it should read as "trying again shortly", because
+// trying again shortly is the bug it exists to prevent.
+type paneSetupHaltedMsg struct{ reason string }
 
 // paneRemoteMsg is returned by the pane setup when the task was placed on
 // another machine. The detail view's pane machinery is entirely local — there is
@@ -624,6 +705,10 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 		// Start the new session with handoff context
 		if err := m.startResumableSession("", handoffContext); err != nil {
 			log.Error("restartForExecutorSwitch: failed to start %s: %v", newExecutor, err)
+			if reason, halted := m.haltReason(err); halted {
+				m.logExecutorFailure(reason)
+				return paneSetupHaltedMsg{reason: reason}
+			}
 			userMsg := m.executorFailureMessage(err.Error())
 			m.logExecutorFailure(userMsg)
 			return panesJoinedMsg{err: err, userMessage: userMsg}
@@ -893,12 +978,29 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 func (m *DetailModel) setupPanesAsync() tea.Cmd {
 	taskID := m.task.ID
 	sessionID := m.task.ClaudeSessionID
-	action := pendingPaneAction(m.task)
+	worktreePath, worktreeMissing := taskWorktreeMissing(m.task)
+	action := pendingPaneAction(m.task, worktreeMissing)
 	remoteLoc, isRemote := m.remoteTaskLocation()
 
 	return m.paneCommand(func() tea.Msg {
 		log := GetLogger()
 		log.Info("setupPanesAsync: starting for task %d", taskID)
+
+		// A deliberate halt (missing worktree, refused adopt, tripped breaker) is
+		// terminal until the user acts. Never re-enter setup while it stands.
+		if m.paneSetupHalted != "" {
+			log.Info("setupPanesAsync: task %d halted (%s); not retrying", taskID, m.paneSetupHalted)
+			return paneSetupHaltedMsg{reason: m.paneSetupHalted}
+		}
+
+		// Worktree gone: stop before any tmux call. There is nothing to start (the
+		// agent would land in $HOME) and nothing to join (no pane in $HOME could
+		// pass the worktree ownership check).
+		if action == paneActionWorktreeMissing {
+			log.Error("setupPanesAsync: task %d records worktree %q, which is not on disk; not starting an executor", taskID, worktreePath)
+			m.logExecutorFailure(fmt.Sprintf("Worktree %s is missing; no executor was started for this task.", worktreePath))
+			return paneSetupHaltedMsg{reason: worktreeMissingMessage(worktreePath)}
+		}
 
 		// Placed on another machine: there is no local window to join, and every
 		// tmux call below would search this machine's server for one that only
@@ -945,6 +1047,9 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 			m.joinTmuxPane()
 			if m.executorBusyElsewhere {
 				return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+			}
+			if m.paneAdoptRejected {
+				return paneSetupHaltedMsg{reason: adoptRejectedMessage(m.executorDisplayName())}
 			}
 			log.Info("setupPanesAsync: joined existing window, claudePaneID=%q, workdirPaneID=%q",
 				m.claudePaneID, m.workdirPaneID)
@@ -1171,6 +1276,10 @@ func (m *DetailModel) startAndJoinSession(sessionID string) tea.Msg {
 
 	// Start the Claude session (creates tmux window)
 	if err := m.startResumableSession(sessionID); err != nil {
+		if reason, halted := m.haltReason(err); halted {
+			m.logExecutorFailure(reason)
+			return paneSetupHaltedMsg{reason: reason}
+		}
 		userMsg := m.executorFailureMessage(err.Error())
 		m.logExecutorFailure(userMsg)
 		return panesJoinedMsg{err: err, userMessage: userMsg}
@@ -1194,6 +1303,13 @@ func (m *DetailModel) startAndJoinSession(sessionID string) tea.Msg {
 	if m.executorBusyElsewhere {
 		return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
 	}
+	// The pane we just started was refused as not ours. Falling back into pane
+	// setup here is what respawned an executor every ~10 seconds; stop instead.
+	if m.paneAdoptRejected {
+		reason := adoptRejectedMessage(m.executorDisplayName())
+		m.logExecutorFailure(reason)
+		return paneSetupHaltedMsg{reason: reason}
+	}
 
 	log.Info("startAndJoinSession: completed, claudePaneID=%q, workdirPaneID=%q",
 		m.claudePaneID, m.workdirPaneID)
@@ -1214,6 +1330,27 @@ func (m *DetailModel) logExecutorFailure(message string) {
 	}
 	// Best effort - ignore error, logs table already handles concurrency.
 	m.database.AppendTaskLog(m.task.ID, "error", message)
+}
+
+// errExecutorSpawnLoop is returned by startResumableSession when the per-task
+// spawn breaker refuses another launch.
+var errExecutorSpawnLoop = errors.New("executor spawn breaker tripped")
+
+// haltReason maps a start failure that must NOT be retried automatically to the
+// message the view shows for it. Ordinary failures ("claude: command not found")
+// return false and keep the existing retryable error path.
+func (m *DetailModel) haltReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, executor.ErrWorktreeMissing):
+		path := ""
+		if m.task != nil {
+			path = m.task.WorktreePath
+		}
+		return worktreeMissingMessage(path), true
+	case errors.Is(err, errExecutorSpawnLoop):
+		return spawnLoopMessage(m.executorDisplayName()), true
+	}
+	return "", false
 }
 
 // executorFailureMessage formats a user-friendly error string for the header.
@@ -1336,6 +1473,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		} else {
 			log.Info("panesJoinedMsg: claudePaneID=%q, workdirPaneID=%q",
 				msg.claudePaneID, msg.workdirPaneID)
+			if msg.claudePaneID != "" && m.task != nil {
+				// A launch finally produced a usable pane: forget this task's spawn
+				// history so a long-running healthy view never trips the breaker.
+				executorSpawns.adopted(m.task.ID)
+			}
 			m.claudePaneID = msg.claudePaneID
 			m.workdirPaneID = msg.workdirPaneID
 			m.daemonSessionID = msg.daemonSessionID
@@ -1347,6 +1489,19 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 				m.focusExecutorPane()
 			}
 		}
+		m.setViewportContent()
+		return m, nil
+
+	case paneSetupHaltedMsg:
+		// Pane setup stopped on purpose. Stop the spinner, show why, and — the
+		// point of the whole change — do not schedule another attempt.
+		log := GetLogger()
+		log.Info("paneSetupHaltedMsg: task %d halted: %s", m.task.ID, msg.reason)
+		m.paneLoading = false
+		m.waitingForExecutor = false
+		m.paneSetupHalted = msg.reason
+		m.paneNotice = ""
+		m.paneError = msg.reason
 		m.setViewportContent()
 		return m, nil
 
@@ -1504,6 +1659,29 @@ func (m *DetailModel) ClearPaneState() {
 	m.joinPaneFailedUntil = time.Time{}
 }
 
+// PaneSetupHalted returns the reason pane setup stopped and is not retrying, or
+// "" when the view is operating normally.
+func (m *DetailModel) PaneSetupHalted() string { return m.paneSetupHalted }
+
+// WorktreeMissing reports whether this view is halted because the task's
+// recorded worktree is gone — the one halt with a one-key recovery.
+func (m *DetailModel) WorktreeMissing() bool {
+	_, missing := taskWorktreeMissing(m.task)
+	return missing
+}
+
+// ClearPaneHalt lifts a halt after the user has fixed what caused it, and lets
+// the task spawn again. Only user recovery calls this: nothing in the automatic
+// paths may clear a halt, or the loop comes back.
+func (m *DetailModel) ClearPaneHalt() {
+	m.paneSetupHalted = ""
+	m.paneAdoptRejected = false
+	m.paneError = ""
+	if m.task != nil {
+		executorSpawns.reset(m.task.ID)
+	}
+}
+
 // RefreshPanesCmd returns a command to refresh the tmux panes.
 // Use this after ClearPaneState() to rejoin panes to a recreated window.
 func (m *DetailModel) RefreshPanesCmd() tea.Cmd {
@@ -1628,6 +1806,22 @@ func (m *DetailModel) startResumableSession(sessionID string, handoffContext ...
 		return fmt.Errorf("task not available")
 	}
 
+	// Two guards stand between this view and an unbounded stream of agents, and
+	// both belong here because this is the single funnel every UI start path goes
+	// through (open, "start session", executor switch).
+	//
+	// 1. A worktree that is recorded but gone. tmux would start the agent in $HOME
+	//    rather than fail, and the pane it produced could never be adopted.
+	if path, missing := taskWorktreeMissing(m.task); missing {
+		log.Error("startResumableSession: task %d records worktree %q, which is not on disk; refusing to start", m.task.ID, path)
+		return fmt.Errorf("%w: %s", executor.ErrWorktreeMissing, path)
+	}
+	// 2. A task that keeps launching executors without ever adopting a pane.
+	if !executorSpawns.allow(m.task.ID, time.Now()) {
+		log.Error("startResumableSession: spawn breaker tripped for task %d; refusing to start another executor", m.task.ID)
+		return errExecutorSpawnLoop
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1683,6 +1877,12 @@ func (m *DetailModel) paneHealthCmd() tea.Cmd {
 	if os.Getenv("TMUX") == "" || m.task == nil || m.paneHealthInFlight || m.paneJoinBlockedByLoad() || time.Now().Before(m.joinPaneFailedUntil) {
 		return nil
 	}
+	// While a halt stands, the poll is the thing that would restart the loop: it
+	// sees no pane, finds the window the last doomed launch left behind, and calls
+	// pane setup again. Leave the halted view alone until the user acts.
+	if m.paneSetupHalted != "" {
+		return nil
+	}
 	m.paneHealthInFlight = true
 	task := *m.task
 	worker := &DetailModel{task: &task}
@@ -1723,7 +1923,11 @@ func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
 		m.paneLoading, m.waitingForExecutor = true, false
 		return m.setupPanesAsync()
 	}
-	if shouldFallBackToStart(m.waitingForExecutor, false, m.task.WorktreePath != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
+	// hasWorktree means "there is an isolated directory to start in", so a
+	// recorded-but-reaped path must not qualify: starting there is precisely what
+	// tmux turns into a run from $HOME.
+	_, worktreeGone := taskWorktreeMissing(m.task)
+	if shouldFallBackToStart(m.waitingForExecutor, false, m.task.WorktreePath != "" && !worktreeGone, time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
 		m.waitingForExecutor = false
 		return m.startPanesAsync()
 	}
@@ -2163,6 +2367,8 @@ func (m *DetailModel) joinTmuxPanes() {
 	log := GetLogger()
 	log.Info("joinTmuxPanes: starting for task %d", m.task.ID)
 
+	m.paneAdoptRejected = false
+
 	// Use cached window target to avoid expensive tmux lookup
 	windowTarget := m.cachedWindowTarget
 	if windowTarget == "" {
@@ -2304,6 +2510,10 @@ func (m *DetailModel) joinTmuxPanes() {
 		m.task.TmuxWindowID = ""
 		m.cachedWindowTarget = ""
 		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
+		// Tell the caller the refusal happened. It used to be invisible: setup
+		// returned "no panes", the health poll saw no pane, and the whole start
+		// path ran again — a fresh executor per cycle, forever.
+		m.paneAdoptRejected = true
 		return
 	}
 
@@ -3942,6 +4152,13 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != "" || (!m.paneLoading && m.remotePaneID != "")
+
+	// A halted view is a dead end without its recovery key, so promote it: the
+	// worktree rebuild is the way out of "worktree missing", a refused adopt and
+	// a tripped spawn breaker alike.
+	if m.paneSetupHalted != "" {
+		keys = append(keys, helpKey{"W", "recreate worktree", false, true})
+	}
 
 	keys = append(keys, helpKey{"e", "edit", false, true})
 
