@@ -2795,6 +2795,62 @@ Examples:
 	worktreesCleanupCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
 	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 24h, 72h, 0 for all). Default: 24h (1 day)")
 	worktreesCmd.AddCommand(worktreesCleanupCmd)
+
+	worktreesAuditCmd := &cobra.Command{
+		Use:   "audit",
+		Short: "Find task rows whose worktree path is a main checkout, not a worktree",
+		Long: `Reports tasks whose worktree_path (or archive_worktree_path) points at a
+project's main checkout instead of a linked git worktree.
+
+Such a row can never be cleaned up - "git worktree remove" always fails on a main
+working tree - and it records a real repo checkout where every caller expects a
+disposable worktree. Use --fix to clear the bogus references.
+
+Examples:
+  task worktrees audit
+  task worktrees audit --fix`,
+		Run: func(cmd *cobra.Command, args []string) {
+			fix, _ := cmd.Flags().GetBool("fix")
+
+			database, err := openTaskDB(db.DefaultPath())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			exec := executor.New(database, config.New(database))
+			issues, err := exec.AuditWorktreePaths(fix)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if len(issues) == 0 {
+				fmt.Println(dimStyle.Render("No task rows point at a main working tree"))
+				return
+			}
+
+			fmt.Printf("%d bad worktree reference(s):\n", len(issues))
+			for _, issue := range issues {
+				status := ""
+				if issue.Fixed {
+					status = successStyle.Render(" [cleared]")
+				} else if fix {
+					status = dimStyle.Render(" [skipped: task running]")
+				}
+				fmt.Printf("  #%-4d %-12s %-22s %s (%s)%s\n",
+					issue.TaskID, issue.Project, issue.Field,
+					dimStyle.Render(issue.Path), issue.Reason, status)
+			}
+			if !fix {
+				fmt.Println(dimStyle.Render("Run with --fix to clear these references"))
+			}
+		},
+	}
+	worktreesAuditCmd.Flags().Bool("fix", false, "Clear the bogus worktree references")
+	worktreesCmd.AddCommand(worktreesAuditCmd)
+
 	rootCmd.AddCommand(worktreesCmd)
 
 	// Update command - self-update via install script

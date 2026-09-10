@@ -1769,6 +1769,17 @@ func (e *Executor) cleanupStaleWorktrees() {
 			continue
 		}
 
+		// Never touch a main working tree. `git worktree remove` can never
+		// succeed against one, so attempting it is a guaranteed failure repeated
+		// on every sweep forever (one row did exactly that hourly for five
+		// months), and a row that names a real checkout is one bad code path away
+		// from something destructive running against main. Drop the bogus
+		// reference silently — there is no worktree here to archive or restore.
+		if isMainWorkingTree(task.WorktreePath) {
+			e.db.ClearTaskWorktreeRefs(task.ID)
+			continue
+		}
+
 		age := time.Since(task.CompletedAt.Time)
 		e.logger.Info("Archiving stale worktree",
 			"task", task.ID,
@@ -1776,12 +1787,20 @@ func (e *Executor) cleanupStaleWorktrees() {
 			"age", age.Round(time.Hour),
 		)
 
-		// Archive the worktree (preserves changes in git refs) then remove it
+		// Archive the worktree (preserves changes in git refs) then remove it.
+		// A failure here is recorded so the automatic sweep never retries this
+		// row: whatever made the archive impossible will still be true in ten
+		// minutes, and the only thing a retry produces is another log line and
+		// another git invocation. `task worktrees cleanup` still retries on
+		// demand, and setting up a worktree for the task again clears the mark.
 		if err := e.ArchiveWorktree(task); err != nil {
-			e.logger.Warn("Failed to archive stale worktree",
+			e.logger.Warn("Failed to archive stale worktree - marking un-sweepable, will not retry automatically",
 				"task", task.ID,
 				"error", err,
 			)
+			if markErr := e.db.MarkWorktreeSweepFailed(task.ID); markErr != nil {
+				e.logger.Debug("Failed to mark task un-sweepable", "task", task.ID, "error", markErr)
+			}
 			continue
 		}
 
@@ -1871,7 +1890,10 @@ func (e *Executor) getWorktreeCleanupMaxAge() time.Duration {
 // CleanupStaleWorktreesManual runs stale worktree cleanup on demand and returns
 // the list of tasks that were cleaned up. If dryRun is true, no changes are made.
 func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool) ([]*db.Task, error) {
-	tasks, err := e.db.GetStaleWorktreeTasks(maxAge)
+	// Include rows a prior automatic sweep marked un-sweepable: this run was asked
+	// for by a human, who gets the retry (and the error) the unattended sweep must
+	// not keep taking on its own.
+	tasks, err := e.db.GetStaleWorktreeTasksIncludingFailed(maxAge)
 	if err != nil {
 		return nil, fmt.Errorf("list stale worktree tasks: %w", err)
 	}
@@ -1896,13 +1918,26 @@ func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool
 			continue
 		}
 
+		// A main working tree is not a worktree: nothing to archive, nothing that
+		// can be removed. Drop the reference rather than running a git removal
+		// that is certain to fail.
+		if isMainWorkingTree(task.WorktreePath) {
+			e.db.ClearTaskWorktreeRefs(task.ID)
+			cleaned = append(cleaned, task)
+			continue
+		}
+
 		if err := e.ArchiveWorktree(task); err != nil {
 			e.logger.Warn("Failed to archive stale worktree",
 				"task", task.ID,
 				"error", err,
 			)
+			if markErr := e.db.MarkWorktreeSweepFailed(task.ID); markErr != nil {
+				e.logger.Debug("Failed to mark task un-sweepable", "task", task.ID, "error", markErr)
+			}
 			continue
 		}
+		e.db.ClearWorktreeSweepFailure(task.ID)
 		cleaned = append(cleaned, task)
 	}
 
@@ -5050,6 +5085,24 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 		}
 	}
 
+	// This task is being set up to run again, so any verdict a previous sweep
+	// reached about its old worktree no longer applies.
+	e.db.ClearWorktreeSweepFailure(task.ID)
+
+	// A recorded path that IS the project's main checkout is never a worktree.
+	// It means the task was created against the checkout directly, or the project
+	// was switched from shared-dir to worktree isolation after this task ran.
+	// Reusing it would run an "isolated" task straight in main and leave behind a
+	// row the worktree sweeper can never clean up. Drop it and build a real
+	// worktree instead.
+	if task.WorktreePath != "" && (sameDir(task.WorktreePath, projectDir) || isMainWorkingTree(task.WorktreePath)) {
+		e.logger.Warn("Recorded worktree path is the project's main checkout - creating an isolated worktree instead",
+			"task", task.ID, "project", task.Project, "path", task.WorktreePath)
+		task.WorktreePath = ""
+		task.BranchName = ""
+		e.db.ClearTaskWorktreeRefs(task.ID)
+	}
+
 	// If task already has a worktree path, reuse it (don't recalculate from title)
 	// This prevents creating duplicate worktrees when a task is renamed
 	if task.WorktreePath != "" {
@@ -6477,6 +6530,18 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
+
+	// A worktree_path naming the project's own checkout is not a worktree, no
+	// matter what the column says — it predates this project switching to
+	// worktree isolation, or a task was created against the checkout directly.
+	// Archiving it would write an archive ref for the main tree and then fail
+	// forever at `git worktree remove` ("fatal: is a main working tree"). Drop
+	// the bogus reference instead; there is nothing here to preserve or remove.
+	if sameDir(task.WorktreePath, projectDir) || isMainWorkingTree(task.WorktreePath) {
+		e.db.ClearTaskWorktreeRefs(task.ID)
+		return nil
+	}
+
 	paths := e.claudePathsForTask(task)
 
 	// Get current HEAD commit

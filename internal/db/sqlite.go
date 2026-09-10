@@ -396,6 +396,14 @@ func (db *DB) migrate() error {
 		// does not exist here.
 		`ALTER TABLE tasks ADD COLUMN remote_worktree_path TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN remote_branch TEXT DEFAULT ''`,
+		// When the stale-worktree sweeper last failed to archive this task's
+		// worktree. A sweep target whose archive fails is un-sweepable until
+		// something changes: retrying it every 10 minutes forever only spams the
+		// daemon log and burns a git invocation per attempt (one row did exactly
+		// that hourly for five months). Set once on failure, cleared whenever the
+		// task gets a worktree again, and used to exclude the row from the
+		// automatic sweep — `task worktrees cleanup` still retries on demand.
+		`ALTER TABLE tasks ADD COLUMN worktree_sweep_failed_at DATETIME`,
 	}
 
 	for _, m := range alterMigrations {
