@@ -654,7 +654,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
 		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
-		WHERE (
+		WHERE deleted_at IS NULL
+		AND (
 			title LIKE ? COLLATE NOCASE
 			OR project LIKE ? COLLATE NOCASE
 			OR CAST(id AS TEXT) LIKE ?
