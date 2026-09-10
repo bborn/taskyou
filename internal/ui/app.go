@@ -106,6 +106,8 @@ type KeyMap struct {
 	OpenBrowser key.Binding
 	// Open PR
 	OpenPR key.Binding
+	// Rebuild a task's missing worktree (detail view recovery)
+	RecreateWorktree key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -282,6 +284,10 @@ func DefaultKeyMap() KeyMap {
 		OpenPR: key.NewBinding(
 			key.WithKeys("G"),
 			key.WithHelp("G", "open PR"),
+		),
+		RecreateWorktree: key.NewBinding(
+			key.WithKeys("W"),
+			key.WithHelp("W", "recreate worktree"),
 		),
 	}
 }
@@ -1507,6 +1513,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.notifyUntil = time.Now().Add(3 * time.Second)
+
+	case worktreeRecreatedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+			break
+		}
+		m.notification = fmt.Sprintf("%s Worktree recreated at %s", IconDone(), msg.task.WorktreePath)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		m.selectedTask = msg.task
+		m.updateTaskInList(msg.task)
+		if m.detailView != nil {
+			m.detailView.UpdateTask(msg.task)
+			// The halt was correct while the worktree was gone; it isn't any more.
+			m.detailView.ClearPaneHalt()
+			m.detailView.ClearPaneState()
+			cmds = append(cmds, m.detailView.RefreshPanesCmd())
+		}
 
 	case worktreeOpenedMsg:
 		if msg.err != nil {
@@ -2971,6 +2995,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenPR) && m.selectedTask != nil && m.selectedTask.PRURL != "" {
 		return m, m.openPR(m.selectedTask)
+	}
+	// Recovery for a halted detail view: rebuild the task's worktree, then let it
+	// start again. Offered only while the view is halted, so the key can't be used
+	// to rebuild the worktree of a task that is happily running in one.
+	if key.Matches(keyMsg, m.keys.RecreateWorktree) && m.selectedTask != nil &&
+		m.detailView != nil && m.detailView.PaneSetupHalted() != "" {
+		m.notification = fmt.Sprintf("%s Recreating worktree for #%d…", IconInProgress(), m.selectedTask.ID)
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return m, m.recreateWorktree(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		return m, m.detailView.ToggleShellPane()
@@ -5017,6 +5050,41 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 		}
 
 		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
+	}
+}
+
+// worktreeRecreatedMsg reports the result of rebuilding a task's missing
+// worktree from the detail view.
+type worktreeRecreatedMsg struct {
+	task *db.Task
+	err  error
+}
+
+// recreateWorktree rebuilds the isolated worktree of a task whose recorded one
+// was reaped, and hands the refreshed task row back so the detail view can start
+// its executor in a real directory.
+//
+// This is the recovery half of the missing-worktree fix: the view now refuses to
+// start anything when the worktree is gone, so it has to offer the user a way to
+// put one back. EnsureLocalWorktree already does exactly the right thing with a
+// stale path — setupWorktree clears it and creates the worktree fresh — so the
+// "recreate" and "clear the stale path" recoveries are the same key.
+func (m *AppModel) recreateWorktree(taskID int64) tea.Cmd {
+	return func() tea.Msg {
+		task, err := m.db.GetTask(taskID)
+		if err != nil {
+			return worktreeRecreatedMsg{err: fmt.Errorf("load task #%d: %w", taskID, err)}
+		}
+		if _, _, err := m.executor.EnsureLocalWorktree(task); err != nil {
+			return worktreeRecreatedMsg{err: fmt.Errorf("recreate worktree: %w", err)}
+		}
+		// EnsureLocalWorktree writes the new path through the DB; re-read so the
+		// view works from the stored row rather than a half-updated copy.
+		refreshed, err := m.db.GetTask(taskID)
+		if err != nil {
+			return worktreeRecreatedMsg{err: fmt.Errorf("reload task #%d: %w", taskID, err)}
+		}
+		return worktreeRecreatedMsg{task: refreshed}
 	}
 }
 
