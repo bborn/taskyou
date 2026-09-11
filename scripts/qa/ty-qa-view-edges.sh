@@ -4,6 +4,8 @@
 #
 #   E1. twelve Down/Up presses in a row inside a task
 #   E2. a finished task's window closes while it is viewed: nothing restarts
+#   E2b. a blocked task's window closes while it is viewed, as the idle sweep
+#       leaves it: it is not restarted, and the view says its session closed
 #   E3. ctrl+c while a task is open
 #   E4. `ty open 3` typed outside tmux, in a 190x48 terminal
 #   E5. a running task's window closes while it is viewed: ty waits for the
@@ -125,6 +127,23 @@ check "no view pane left in the TUI (found $(count "$(viewers_in "$TY_UI_PANE")"
 check "no view session left" no_views
 check "every other agent alive" alive 1,2,3
 
+echo "== E2b. a blocked task's window closes while it is viewed (the idle sweep does this)"
+tmux send-keys -t "$TY_UI_PANE" Escape; sleep 2
+select_task 2 || bad "could not select task 2"
+"$DIR/ty-qa-key.sh" Enter
+opened2() { state_is detail.task_id 2 && state_is detail.has_panes True; }
+check "task 2 opens" wait_until opened2
+# What the sweep leaves behind: a task parked for hours, its window killed.
+dbq "UPDATE tasks SET status='blocked', completed_at=datetime('now','-7 hours') WHERE id=2"
+sleep 3
+tmux kill-window -t "$TY_DAEMON_SESSION:task-2"
+sleep 12                                           # several health checks
+check "the blocked task is not restarted" no_window 2
+says_closed() { tmux capture-pane -p -t "$TY_UI_PANE" | grep -q 'Session closed'; }
+check "the view says its session closed" says_closed
+check "no view session left" no_views
+check "every other agent alive" alive 1,3
+
 echo "== E3. ctrl+c while a task is open"
 tmux send-keys -t "$TY_UI_PANE" Escape; sleep 2
 select_task 1 || bad "could not select task 1"
@@ -133,7 +152,7 @@ wait_until state_is detail.has_panes True || bad "task 1 did not open"
 tmux send-keys -t "$TY_UI_PANE" C-c
 check "the TUI's session goes away" wait_until session_gone "$TY_UI_SESSION"
 check "its view session goes too" wait_until no_views
-check "every agent alive after the quit" alive 1,2,3
+check "every agent alive after the quit" alive 1,3
 
 echo "== E4. ty open 3 typed outside tmux"
 FIFO="$TY_QA_ROOT/open.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
@@ -166,14 +185,14 @@ else
   bad "task 3 was not shown again within 100s; its screen:"
   tmux capture-pane -p -t "$T3" | grep -v '^[[:space:]]*$' | head -8 | sed 's/^/        /'
 fi
-check "every other agent alive" alive 1,2
+check "every other agent alive" alive 1
 check "exactly one task-3 window" [ "$(tmux list-windows -t "=$TY_DAEMON_SESSION" -F '#{window_name}' | grep -cx task-3)" = 1 ]
 
 echo "== E6. the TUI is killed (kill -9) while a task is open"
 TYPID=$(tmux display-message -p -t "$T3" '#{pane_pid}')
 TYPROC=$(pgrep -P "$TYPID" -f "$TY_BIN" | head -1); [ -z "$TYPROC" ] && TYPROC=$TYPID
 kill -9 "$TYPROC" 2>/dev/null; sleep 3
-check "every agent alive after the crash" alive 1,2,3
+check "every agent alive after the crash" alive 1,3
 check "no task pane stranded in a TUI session" nothing_in_ui
 left=$(tmux list-panes -s -t "=$S3" -F '#{pane_id} #{pane_current_command} viewer=#{@ty_viewer}' 2>/dev/null | tr '\n' ';')
 check "nothing of the crashed TUI is left${left:+ (left: $left)}" [ -z "$left" ]

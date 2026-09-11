@@ -1920,16 +1920,12 @@ func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
 		return m.setupPanesAsync()
 	}
 	// The task's window closed while it was on screen: its agent was killed, the
-	// tmux server went away, or the daemon is replacing the executor. Set up
-	// again exactly as opening the task does, from the status it has now: a
-	// finished task is left alone, and a running one waits for the daemon's
-	// executor before ty starts one itself. The clock restarts so that wait is
-	// the full one. A task the database did not return (deleted) gets nothing.
+	// tmux server went away, or the daemon suspended or replaced the executor.
+	// What happens next goes by the status the task has now. A task the database
+	// did not return (deleted) gets nothing.
 	if msg.claudePaneID != "" && msg.task != nil && msg.task.ID == m.task.ID {
 		m.task = msg.task
-		m.paneLoading, m.waitingForExecutor = true, false
-		m.paneLoadingStart = time.Now()
-		return m.setupPanesAsync()
+		return m.afterWindowClosed()
 	}
 	// hasWorktree means "there is an isolated directory to start in", so a
 	// recorded-but-reaped path must not qualify: starting there is precisely what
@@ -1939,6 +1935,38 @@ func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
 		m.waitingForExecutor = false
 		return m.startPanesAsync()
 	}
+	return nil
+}
+
+// sessionClosedNotice is what a blocked task's view says once its session has
+// closed under it.
+const sessionClosedNotice = "Session closed (suspended or ended). Reopen the task to resume it."
+
+// afterWindowClosed decides what the view does once the task's window has
+// closed under it, from the task's current status.
+//
+//   - Queued or processing: the task should be running. Set up again as
+//     opening it does: wait for the daemon's executor, then start one. The
+//     wait starts over, so ty never races the daemon.
+//   - Blocked: most often the idle sweep suspended it to reclaim its memory.
+//     Starting it here would undo that, and the sweep would suspend it again
+//     on its next pass, a minute later, for as long as the task stayed open.
+//     Say so instead; reopening the task resumes it.
+//   - Backlog, done, archived: nothing runs for these when opened either.
+//
+// If the window comes back (ty retry, a reopen in another TUI), the next health
+// check joins it.
+func (m *DetailModel) afterWindowClosed() tea.Cmd {
+	switch m.task.Status {
+	case db.StatusQueued, db.StatusProcessing:
+		m.paneLoading, m.waitingForExecutor = true, false
+		m.paneLoadingStart = time.Now()
+		return m.setupPanesAsync()
+	case db.StatusBlocked:
+		m.paneNotice = sessionClosedNotice
+	}
+	m.paneLoading, m.waitingForExecutor = false, false
+	m.setViewportContent()
 	return nil
 }
 

@@ -555,7 +555,10 @@ Each pane is tagged with its task and role (`@ty_task`, and `@ty_role` set to `a
 - **Shift+↓ / Shift+→** go to the next pane and **Shift+↑ / Shift+←** to the previous one, round task details → agent → shell → task details, the same cycle as before the view existed. Clicking works too.
 - Every key goes to the agent or the shell: the view has no prefix key of its own. Scroll with the mouse wheel.
 - `\` hides the shell. A hidden shell keeps running in a `_hidden_shell_<id>` window in the daemon session.
-- If the task's window closes (its agent was killed, or the tmux server went away), the view closes with it rather than show another task. ty then sets the task up again as if you had just opened it, going by the status the task has now. A finished task is left alone. For a running one, ty waits up to a minute for the daemon's executor, then starts the agent itself and shows it again.
+- If the task's window closes (its agent was killed, it was suspended, or the tmux server went away), the view closes with it rather than show another task. What happens next depends on the task's status at that moment:
+  - A queued or running task: ty waits up to a minute for the daemon's executor, then starts the agent itself and shows it again.
+  - A blocked task is not restarted. The idle sweep suspends parked tasks to free their memory, and restarting one would undo that. The view says the session closed; open the task again to resume it.
+  - A finished task is left alone.
 - If the TUI crashes or is killed, its view pane closes within a second. The agent keeps running.
 
 #### Which tmux server

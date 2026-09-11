@@ -269,40 +269,52 @@ func TestViewGoesWhenTheTUIDies(t *testing.T) {
 	assertInDaemonWindow(t, f.shell, "task-7")
 }
 
-// When the task's window closes under the view, ty sets the task up again the
-// way opening it does, from the status the database has now: a running task
-// waits for the daemon's executor (the full wait, not what is left of the
-// first one), and a finished task is left alone.
-func TestWindowClosingUnderTheViewSetsUpAgain(t *testing.T) {
-	for _, status := range []string{db.StatusProcessing, db.StatusDone} {
-		t.Run(status, func(t *testing.T) {
+// When the task's window closes under the view, what happens next goes by the
+// status the database has now. A queued or running task is set up again the
+// way opening it does: it waits for the daemon's executor, and that wait starts
+// over rather than count the time the view was open. A blocked task, most
+// often suspended by the idle sweep, is not restarted (the sweep would only
+// suspend it again) and the view says why. A finished one is left alone.
+func TestWindowClosingUnderTheView(t *testing.T) {
+	for _, tc := range []struct {
+		status     string
+		setsUp     bool
+		wantNotice bool
+	}{
+		{db.StatusQueued, true, false},
+		{db.StatusProcessing, true, false},
+		{db.StatusBlocked, false, true},
+		{db.StatusDone, false, false},
+		{db.StatusBacklog, false, false},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
 			tmuxtest.Isolate(t)
 			stale := &db.Task{ID: 7, Title: "View fixture", Status: db.StatusProcessing, WorktreePath: t.TempDir()}
 			fresh := *stale
-			fresh.Status = status
+			fresh.Status = tc.status
 			m := &DetailModel{task: stale, claudePaneID: "%1", viewerPaneID: "%2", paneLoadingStart: time.Now().Add(-time.Hour)}
 
 			cmd := m.applyPaneHealth(paneHealthMsg{claudePaneID: "%1", viewerPaneID: "%2", task: &fresh})
-			if cmd == nil {
-				t.Fatal("nothing was set up after the window closed")
+			if m.task.Status != tc.status {
+				t.Errorf("decided from status %q, want the database's %q", m.task.Status, tc.status)
 			}
-			if m.task.Status != status {
-				t.Errorf("decided from status %q, want the database's %q", m.task.Status, status)
+			if got := m.paneNotice != ""; got != tc.wantNotice {
+				t.Errorf("a %s task: notice %q, want one: %v", tc.status, m.paneNotice, tc.wantNotice)
+			}
+			if !tc.setsUp {
+				if cmd != nil || m.paneLoading {
+					t.Fatalf("a %s task was set up again", tc.status)
+				}
+				return
+			}
+			if cmd == nil {
+				t.Fatalf("a %s task was not set up again", tc.status)
 			}
 			if time.Since(m.paneLoadingStart) > time.Minute {
 				t.Error("the wait for the daemon's executor did not start over")
 			}
-			switch res := cmd().(detailPaneResultMsg).result.(type) {
-			case paneWaitForExecutorMsg:
-				if status != db.StatusProcessing {
-					t.Errorf("a %s task waits for an executor", status)
-				}
-			case panesJoinedMsg:
-				if status != db.StatusDone || res.claudePaneID != "" || res.err != nil {
-					t.Errorf("a %s task got %+v", status, res)
-				}
-			default:
-				t.Errorf("a %s task got %T", status, res)
+			if r := cmd().(detailPaneResultMsg).result; r != (paneWaitForExecutorMsg{}) {
+				t.Errorf("a %s task got %T, want to wait for the daemon's executor", tc.status, r)
 			}
 		})
 	}

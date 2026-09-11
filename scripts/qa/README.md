@@ -131,8 +131,9 @@ isolated instance with fake agents only.
 - **`ty-qa-view-edges.sh`** covers twelve task switches in a row, ctrl+c and
   `kill -9` of the TUI mid-view, and `ty open` typed outside tmux. It also closes
   a task's window while it is on screen. A finished task is then left alone. A
-  running one gets its agent back once the TUI's 60-second wait for the daemon
-  runs out. The `claude` on its PATH is a fake and its Claude config dir is a
+  blocked one, as the idle sweep leaves it, is not restarted, and the view says
+  its session closed. A running one gets its agent back once the TUI's
+  60-second wait for the daemon runs out. The `claude` on its PATH is a fake and its Claude config dir is a
   throwaway, so that restart never starts a real session.
 
 ## Pipeline stress test — slow init + concurrency
