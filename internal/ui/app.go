@@ -740,7 +740,7 @@ func (m *AppModel) Init() tea.Cmd {
 		sessionName := ownSessionName(ctx)
 		cancel()
 		if sessionName != "" {
-			osExec.Command("tmux", "set-option", "-t", sessionName, "mouse", "on").Run()
+			uiTmux(context.Background(), "set-option", "-t", sessionName, "mouse", "on").Run()
 		}
 	}
 
@@ -1177,22 +1177,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case detailCleanupMsg:
 		m.detailCleanupInFlight = false
-		if msg.failed != nil {
-			m.detailView = msg.failed
-			m.reloadPending = false
-			m.reloadPrepared = false
-			m.currentView = ViewDetail
-			m.pendingDetailLoad = nil
-			m.taskLoadRevision++
-			m.endTaskTransition()
-			m.notification = "Could not return task panes to the daemon; the running process was preserved. Try Back again."
-			m.detailView.paneError = m.notification
-			if m.detailView.task != nil {
-				m.kanban.SelectTask(m.detailView.task.ID)
-			}
-			m.notifyUntil = time.Now().Add(10 * time.Second)
-			return m, nil
-		}
 		if m.pendingDetailLoad != nil {
 			pending := *m.pendingDetailLoad
 			m.pendingDetailLoad = nil
@@ -2796,9 +2780,10 @@ func scoreTaskFields(task *db.Task, query string, includeProject bool) int {
 	return best
 }
 
-type detailCleanupMsg struct {
-	failed *DetailModel
-}
+// detailCleanupMsg reports that a closed detail view has finished tearing down
+// its view. It cannot fail in a way that needs handling: the view borrowed no
+// pane, so there is nothing that could fail to go back.
+type detailCleanupMsg struct{}
 
 // taskTransitionTimeout bounds how long a task switch may hold the navigation
 // guard while waiting for its panes. Joins are normally well under a second but
@@ -2851,13 +2836,7 @@ func (m *AppModel) detachDetail(saveHeight bool) tea.Cmd {
 		detail.paneWork.Wait()
 		defer detail.resetBoardPaneStyle()
 		detail.closeRemotePane(true)
-		if detail.claudePaneID != "" || detail.workdirPaneID != "" {
-			detail.breakTmuxPanes(saveHeight, true)
-		}
-		if detail.claudePaneID != "" {
-			return detailCleanupMsg{failed: detail}
-		}
-		detail.releaseExecutorLock()
+		detail.closeTaskWindowView(saveHeight)
 		return detailCleanupMsg{}
 	}
 }
@@ -4900,7 +4879,7 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 
 		// Kill the task window to clean up both Claude and workdir panes
 		windowTarget := executor.TmuxSessionName(id)
-		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+		agentTmux(context.Background(), "kill-window", "-t", windowTarget).Run()
 
 		return taskClosedMsg{err: err}
 	}
@@ -4953,7 +4932,7 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 
 			// Kill the task window to clean up both Claude and workdir panes
 			windowTarget := executor.TmuxSessionName(id)
-			osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+			agentTmux(context.Background(), "kill-window", "-t", windowTarget).Run()
 
 			// Archive worktree (saves uncommitted changes and removes worktree)
 			if task != nil && task.WorktreePath != "" {
@@ -5013,7 +4992,7 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 
 		// Kill tmux window (ignore errors)
 		windowTarget := executor.TmuxSessionName(id)
-		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+		agentTmux(context.Background(), "kill-window", "-t", windowTarget).Run()
 
 		// Trash the task — worktree + transcript are preserved for recovery.
 		err := m.db.SoftDeleteTask(id)
@@ -5271,7 +5250,7 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 
 		// Kill tmux window (ignore errors)
 		windowTarget := executor.TmuxSessionName(oldTask.ID)
-		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+		agentTmux(context.Background(), "kill-window", "-t", windowTarget).Run()
 
 		// Clean up worktree and Claude sessions if they exist
 		if oldTask.WorktreePath != "" {
@@ -5393,7 +5372,7 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 
 		// Check if tmux session is still alive
 		sessionName := executor.TmuxSessionName(id)
-		if err := osExec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
+		if err := agentTmux(context.Background(), "has-session", "-t", sessionName).Run(); err == nil {
 			// Session alive - prepare attachments and send feedback via send-keys
 			feedbackToSend := feedback
 
@@ -5437,7 +5416,7 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 
 			if feedbackToSend != "" {
 				database.AppendTaskLog(id, "text", "Feedback: "+feedbackToSend)
-				osExec.Command("tmux", "send-keys", "-t", sessionName, feedbackToSend, "Enter").Run()
+				agentTmux(context.Background(), "send-keys", "-t", sessionName, feedbackToSend, "Enter").Run()
 			}
 			// Update status to processing
 			database.UpdateTaskStatus(id, db.StatusProcessing)

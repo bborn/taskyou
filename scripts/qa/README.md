@@ -30,19 +30,24 @@ New QA screens and flows should hold to this bar, not just the two examples belo
 
 ## Why
 
-Lots of features can only really be verified by driving the actual TUI — pane
-join/break, status transitions, forms, keybindings, detail rendering. This harness
+Lots of features can only really be verified by driving the actual TUI — the task
+view, status transitions, forms, keybindings, detail rendering. This harness
 makes that scriptable and repeatable instead of a manual one-off.
 
 ## Isolation
 
-Everything is namespaced off two env vars (set automatically by `lib.sh`):
+Everything is namespaced off a few env vars (set automatically by `lib.sh`):
 
 | | live instance | this harness |
 |---|---|---|
 | DB (`WORKTREE_DB_PATH`) | `~/.local/share/task/tasks.db` | `/tmp/ty-qa/tasks.db` |
-| tmux (`WORKTREE_SESSION_ID`) | pid-based | `task-{ui,daemon}-qa` |
+| tmux server (`TMUX_TMPDIR`, `TASKYOU_TMUX_SOCKET`) | recorded per install | `tmux -L taskyou` under `/tmp/ty-qa/tmux` |
+| tmux sessions (`WORKTREE_SESSION_ID`) | pid-based | `task-{ui,daemon}-qa` |
 | projects (`projects_dir`) | `~/Projects` | `/tmp/ty-qa/projects` |
+
+`lib.sh`'s `tmux` wrapper targets that server, and recreates `TMUX_TMPDIR` before
+every call: when that directory is missing, tmux falls back to `/tmp`, which is
+the live server.
 
 Override location/id with `TY_QA_ROOT` and `TY_QA_SID`.
 
@@ -63,7 +68,7 @@ screenshot** — see the content standard above. When you drive the TUI by hand
 against seeded data, run `scripts/qa/ty-qa-freeze.sh` first so the auto-started
 daemon doesn't execute your `queued` tasks (`--off` to undo).
 
-To watch live while scripting: `tmux attach -t task-ui-qa`.
+To watch live while scripting: `TMUX_TMPDIR=/tmp/ty-qa/tmux tmux -L taskyou attach -t task-ui-qa`.
 
 ## Asserting state
 
@@ -72,7 +77,7 @@ The TUI runs with `--debug-state-file`, dumping JSON on every update.
 
 ```bash
 scripts/qa/ty-qa-state.sh '.view'                 # "dashboard" | "detail" | "new_task" | ...
-scripts/qa/ty-qa-state.sh '.detail.has_panes'     # true once panes are joined
+scripts/qa/ty-qa-state.sh '.detail.has_panes'     # true once the task's view is up
 scripts/qa/ty-qa-state.sh '.dashboard.selected_task_id'
 ```
 
@@ -82,7 +87,7 @@ Board: `P`/`B`/`L`/`D` focus In-Progress/Backlog/Blocked/Done · `Up`/`Down` sel
 `Enter` open detail · `n` new · `e` edit · `x` execute · `X` execute dangerous ·
 `!` toggle dangerous/safe · `S` change status · `/` filter · `?` help.
 
-Detail: `Enter` (from board) opens it and fires the real `joinTmuxPane` · `!` toggles
+Detail: `Enter` (from board) opens it and the real task view (`viewTaskWindow`) · `!` toggles
 mode (fires the resume path → `agentSendTarget` "continue working") · `\` toggle shell
 pane · `Esc` close.
 
@@ -93,13 +98,27 @@ pane · `Esc` close.
 
 2. **Live panes without the daemon** — `ty-qa-agent.sh <task-id>`. Stands up a real
    agent window for a task and points its DB row at it, so opening the task in the TUI
-   exercises the real `joinTmuxPane` / nudge / shell-pane code. Use this for pane and
+   exercises the real task view / nudge / shell-pane code. Use this for pane and
    executor-interaction QA. (Needed because ty's daemon lock is global — you can't run
    a second daemon next to the live one.)
 
 3. **Full daemon** — only if no other ty daemon is running (stop the live one first),
    then `WORKTREE_DB_PATH=… WORKTREE_SESSION_ID=qa "$TY_BIN" daemon`. Real end-to-end
    executor spawning. Heaviest; depends on Claude auth/trust.
+
+## Task view — the agent never leaves the daemon
+
+```
+scripts/qa/ty-qa-views.sh      # PASS/FAIL per check, exits non-zero on any failure
+```
+
+Run this after touching the detail view's pane code (`internal/ui/detail_view.go`),
+`internal/tmuxctl`, or how the executor creates task windows. On its own isolated
+instance, with fake agents only, it opens a task and checks that the agent shows
+through the view and takes keystrokes. It then hides and shows the shell, switches
+tasks, reloads the TUI mid-view, opens the same task from a second TUI, and runs
+`ty` inside a separate tmux server standing in for your own. After every step it
+checks that no task pane has moved out of the daemon session.
 
 ## Pipeline stress test — slow init + concurrency
 
@@ -145,19 +164,19 @@ Two lessons are baked into this script:
 
 ## Worked example — the pane-routing regression
 
-Reproduces "executor stops working when the detail view is open": with the detail
-view open, the agent pane is joined into the UI session and a nudge sent to the
-window's pane `.0` lands in the shell instead of the agent.
+Reproduces "executor stops working when the detail view is open". The detail view
+used to move the agent pane into the UI session, so a nudge sent to the window's pane
+`.0` landed in the shell. The agent now never leaves the daemon session:
 
 ```bash
 scripts/qa/ty-qa-up.sh
 "$TY_BIN" create "pane routing" -p qa
 scripts/qa/ty-qa-agent.sh 1                 # live agent for task 1
 scripts/qa/ty-qa-tui.sh
-scripts/qa/ty-qa-key.sh P Enter             # open detail -> real joinTmuxPane
-scripts/qa/ty-qa-state.sh '.detail.has_panes'   # => true (panes joined)
-# the agent pane is now in task-ui-qa; sending to the persisted claude_pane_id reaches
-# the agent, while the old window-relative target (task-daemon-qa:task-1.0) does not.
+scripts/qa/ty-qa-key.sh P Enter             # open detail -> the real task view
+scripts/qa/ty-qa-state.sh '.detail.has_panes'   # => true (view up)
+# the agent pane is still in task-daemon-qa, so both the persisted claude_pane_id and
+# the window-relative target (task-daemon-qa:task-1.0) reach the agent.
 scripts/qa/ty-qa-down.sh --purge
 ```
 
@@ -184,11 +203,10 @@ profile's render time comes from cache-miss frames (navigation, task changes).
 
 The **detail view** (Enter on a card) is tuned the same way:
 
-- **Opening is instant.** All tmux work — the window search plus the ~30-call
-  join/split/resize that happens when an executor is already running — runs off
-  the Bubble Tea update thread (`setupPanesAsync`), so the view paints
-  immediately with a loading spinner and the panes drop in when ready, instead
-  of freezing the UI for the whole join.
+- **Opening is instant.** All tmux work — the window search plus the calls that
+  set up the task's view when an executor is already running — runs off the
+  Bubble Tea update thread (`setupPanesAsync`), so the view paints immediately
+  with a loading spinner and the panes appear when ready.
 - **`DetailModel.View()` is render-cached** by a signature of its inputs (same
   trick as the board): idle frames skip the expensive `viewport.View()` +
   bordered `box.Render()` (~2ms / ~2.7MB) and cost only the cheap header/help
@@ -269,7 +287,9 @@ remote returns 403 on PutObject); override via `TY_QA_R2_REMOTE`/`TY_QA_R2_BUCKE
   `queued` tasks. For static/seeded screenshots that churn ruins the shot, so
   `ty-qa-shoot.sh` freezes the daemon when `TY_QA_SHOT_KEEP_DB=1`; if you drive
   the TUI by hand, run `ty-qa-freeze.sh` yourself. `ty-qa-down.sh` clears it.
-- The TUI must run **inside** `task-ui-<sid>` — `joinTmuxPane` attaches agent panes there.
+- The TUI must run **inside** tmux: the task view is a pane split from the TUI's own. `ty-qa-tui.sh` does that.
+- `tmux display-message -t %N` succeeds even when pane `%N` is gone: it falls back to another pane. To check a pane is alive, compare the `#{pane_id}` it prints with the one you asked for.
+- In a session grouped with another, a pane's `#{session_name}` names whichever session used it last. To check which session holds a pane, list that session's panes (`list-panes -s -t =<session>`).
 - An agent's `pane_current_command` shows as the Claude **version string** (e.g. `2.1.162`), not `claude`.
 - Claude's folder-trust prompt needs one `Enter` unless `~/.claude.json` already trusts the worktree (`ty-qa-agent.sh` sends it).
 - Requires `tmux`, `go`, `python3`; `jq` and `sqlite3` for state filters / the agent helper.

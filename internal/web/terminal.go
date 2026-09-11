@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 var upgrader = websocket.Upgrader{
@@ -289,10 +290,18 @@ type paneTerminal struct {
 func (terminal paneTerminal) output(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(terminal.ctx, 15*time.Second)
 	defer cancel()
-	return terminal.runner.Command(ctx, "", "tmux", args...).Output()
+	return terminal.runner.Command(ctx, "", "tmux", terminal.tmuxArgs(args)...).Output()
 }
 func (terminal paneTerminal) run(args ...string) error {
 	ctx, cancel := context.WithTimeout(terminal.ctx, 15*time.Second)
 	defer cancel()
-	return terminal.runner.Command(ctx, "", "tmux", args...).Run()
+	return terminal.runner.Command(ctx, "", "tmux", terminal.tmuxArgs(args)...).Run()
+}
+
+// tmuxArgs addresses the agent server when the terminal is local (see tmuxctl).
+func (terminal paneTerminal) tmuxArgs(args []string) []string {
+	if terminal.runner.Target() == "" {
+		return tmuxctl.AgentArgs(args...)
+	}
+	return args
 }

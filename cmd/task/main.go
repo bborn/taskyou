@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
@@ -37,6 +38,7 @@ import (
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/routine"
 	"github.com/bborn/workflow/internal/taskref"
+	"github.com/bborn/workflow/internal/tmuxctl"
 	"github.com/bborn/workflow/internal/tuireload"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
@@ -396,11 +398,11 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 			if hardRestart {
 				fmt.Println(dimStyle.Render("Killing tmux sessions..."))
 				// Kill all task-daemon-* and task-ui-* sessions
-				out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+				out, _ := agentTmuxCmd("list-sessions", "-F", "#{session_name}").Output()
 				for _, session := range strings.Split(string(out), "\n") {
 					session = strings.TrimSpace(session)
 					if strings.HasPrefix(session, "task-daemon-") || strings.HasPrefix(session, "task-ui-") {
-						osexec.Command("tmux", "kill-session", "-t", session).Run()
+						agentTmuxCmd("kill-session", "-t", session).Run()
 					}
 				}
 			} else {
@@ -2590,7 +2592,7 @@ Examples:
 			// Build and send tmux send-keys commands
 			// If --key specified, send that first
 			if specialKey != "" {
-				keyCmd := osexec.Command("tmux", "send-keys", "-t", paneID, specialKey)
+				keyCmd := agentTmuxCmd("send-keys", "-t", paneID, specialKey)
 				if err := keyCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending key to pane %s: %v", paneID, err)))
 					os.Exit(1)
@@ -2600,7 +2602,7 @@ Examples:
 			// Send the message text (literally, so a message that looks like a tmux
 			// key name such as "Enter" or "Up" isn't interpreted as a keypress).
 			if message != "" {
-				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "-l", message)
+				sendCmd := agentTmuxCmd("send-keys", "-t", paneID, "-l", message)
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending input to pane %s (task may have finished): %v", paneID, err)))
 					os.Exit(1)
@@ -2617,7 +2619,7 @@ Examples:
 				if message != "" {
 					time.Sleep(100 * time.Millisecond)
 				}
-				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "Enter")
+				sendCmd := agentTmuxCmd("send-keys", "-t", paneID, "Enter")
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending Enter to pane %s (task may have finished): %v", paneID, err)))
 					os.Exit(1)
@@ -2692,7 +2694,7 @@ Examples:
 			}
 
 			// Capture pane content
-			captureCmd := osexec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines))
+			captureCmd := agentTmuxCmd("capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines))
 			output, err := captureCmd.Output()
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Executor pane no longer exists for task #%d", taskID)))
@@ -4258,15 +4260,15 @@ func execInTmux() error {
 	envCmd := fmt.Sprintf("WORKTREE_SESSION_ID=%s %s", sessionID, cmdStr)
 
 	// Check if session already exists
-	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+	if agentTmuxCmd("has-session", "-t", sessionName).Run() == nil {
 		// Reset window styling that may have been left over from a previous detail view
 		// (joinTmuxPanes sets window-style to dim inactive panes, but if the session
 		// wasn't cleanly shut down, the dimming persists on re-attach)
-		osexec.Command("tmux", "set-option", "-t", sessionName, "window-style", "default").Run()
-		osexec.Command("tmux", "set-option", "-t", sessionName, "window-active-style", "default").Run()
+		agentTmuxCmd("set-option", "-t", sessionName, "window-style", "default").Run()
+		agentTmuxCmd("set-option", "-t", sessionName, "window-active-style", "default").Run()
 
 		// Session exists, attach to it instead
-		cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
+		cmd := agentTmuxCmd("attach-session", "-t", sessionName)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -4278,34 +4280,42 @@ func execInTmux() error {
 
 	// Create detached session first so we can configure it
 	// The task TUI runs in the main (top) pane
-	if err := osexec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", cwd, envCmd).Run(); err != nil {
+	// Create the session at the terminal's real size, so the TUI lays itself out
+	// for the screen it is about to be shown on. A detached session otherwise
+	// starts at 80x24 and everything reflows when the client attaches.
+	sizeArgs := tmuxctl.DefaultSizeArgs()
+	if cols, rows, err := term.GetSize(int(os.Stdin.Fd())); err == nil && cols > 0 && rows > 0 {
+		sizeArgs = []string{"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)}
+	}
+	newSession := append([]string{"new-session", "-d", "-s", sessionName}, sizeArgs...)
+	if err := agentTmuxCmd(append(newSession, "-c", cwd, envCmd)...).Run(); err != nil {
 		return fmt.Errorf("create tmux session: %w", err)
 	}
 
 	// Configure status bar
-	osexec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#1e293b,fg=#94a3b8").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "status-left", " ").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "status-right", " ").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "status", "on").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "status-style", "bg=#1e293b,fg=#94a3b8").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "status-left", " ").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "status-right", " ").Run()
 
 	// Override global tmux window-style to prevent dimming from other tools (e.g. dmux)
-	osexec.Command("tmux", "set-option", "-t", sessionName, "window-style", "default").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "window-active-style", "default").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "window-style", "default").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "window-active-style", "default").Run()
 
 	// Enable pane border labels
-	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "pane-border-status", "top").Run()
 	// Use conditional formatting: pane 0 (task detail) always uses bright color, others follow border style
 	// This prevents the task detail title from being dimmed when other panes are focused
-	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-format",
-		"#{?#{==:#{pane_index},0},#[fg=#9CA3AF] #{pane_title} , #{pane_title} }").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-style", "fg=#374151").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-active-border-style", "fg=#61AFEF").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "pane-border-format",
+		"#{?#{@ty_viewer},,#{?#{==:#{pane_index},0},#[fg=#9CA3AF] #{pane_title} , #{pane_title} }}").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "pane-border-style", "fg=#374151").Run()
+	agentTmuxCmd("set-option", "-t", sessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
 	// Set pane title for the task TUI
-	osexec.Command("tmux", "select-pane", "-t", sessionName+":.0", "-T", "Tasks").Run()
+	agentTmuxCmd("select-pane", "-t", sessionName+":.0", "-T", "Tasks").Run()
 
 	// Now attach to the session
-	cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
+	cmd := agentTmuxCmd("attach-session", "-t", sessionName)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -5796,11 +5806,25 @@ func truncate(s string, maxLen int) string {
 type execCommandRunner struct{}
 
 func (r *execCommandRunner) Run(name string, args ...string) error {
-	return osexec.Command(name, args...).Run()
+	return r.command(name, args...).Run()
 }
 
 func (r *execCommandRunner) Output(name string, args ...string) ([]byte, error) {
-	return osexec.Command(name, args...).Output()
+	return r.command(name, args...).Output()
+}
+
+// command sends tmux to the agent server; anything else runs as named.
+func (r *execCommandRunner) command(name string, args ...string) *osexec.Cmd {
+	if name == "tmux" {
+		args = tmuxctl.AgentArgs(args...)
+	}
+	return osexec.Command(name, args...)
+}
+
+// agentTmuxCmd builds a tmux command for the server TaskYou's agents and its own
+// sessions live on (see tmuxctl).
+func agentTmuxCmd(args ...string) *osexec.Cmd {
+	return osexec.Command("tmux", tmuxctl.AgentArgs(args...)...)
 }
 
 // listSessions lists all running agent task windows in task-daemon.
@@ -5879,7 +5903,7 @@ func executorLabel(executor, model, effort string) string {
 // getSessions returns all running task-* windows across all task-daemon-* sessions.
 func getSessions() []agentSession {
 	// First, get all task-daemon-* sessions
-	sessionsCmd := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}")
+	sessionsCmd := agentTmuxCmd("list-sessions", "-F", "#{session_name}")
 	sessionsOut, err := sessionsCmd.Output()
 	if err != nil {
 		return nil
@@ -5910,7 +5934,7 @@ func getSessions() []agentSession {
 	seen := make(map[int]bool) // Avoid duplicates if same task appears in multiple sessions
 
 	for _, daemonSession := range daemonSessions {
-		cmd := osexec.Command("tmux", "list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
+		cmd := agentTmuxCmd("list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
 		output, err := cmd.Output()
 		if err != nil {
 			continue
@@ -6075,12 +6099,12 @@ func killSession(taskID int) error {
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Check if window exists
-	if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
+	if err := agentTmuxCmd("list-panes", "-t", windowTarget).Run(); err != nil {
 		return fmt.Errorf("no window for task %d", taskID)
 	}
 
 	// Kill the window
-	if err := osexec.Command("tmux", "kill-window", "-t", windowTarget).Run(); err != nil {
+	if err := agentTmuxCmd("kill-window", "-t", windowTarget).Run(); err != nil {
 		return fmt.Errorf("failed to kill window: %w", err)
 	}
 
@@ -6090,7 +6114,7 @@ func killSession(taskID int) error {
 // killSessionAcrossDaemons kills a task's tmux window across all task-daemon-* sessions.
 // Returns true if a window was found and killed.
 func killSessionAcrossDaemons(taskID int) bool {
-	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	sessionsOut, err := agentTmuxCmd("list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		return false
 	}
@@ -6103,10 +6127,10 @@ func killSessionAcrossDaemons(taskID int) bool {
 			continue
 		}
 		windowTarget := fmt.Sprintf("%s:%s", session, windowName)
-		if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
+		if err := agentTmuxCmd("list-panes", "-t", windowTarget).Run(); err != nil {
 			continue // Window doesn't exist in this session
 		}
-		if err := osexec.Command("tmux", "kill-window", "-t", windowTarget).Run(); err == nil {
+		if err := agentTmuxCmd("kill-window", "-t", windowTarget).Run(); err == nil {
 			killed = true
 		}
 	}
@@ -6243,7 +6267,7 @@ func recoverStaleTmuxRefs(dryRun bool) {
 
 	// Step 1: Find all active daemon sessions
 	activeSessions := make(map[string]bool)
-	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	sessionsOut, err := agentTmuxCmd("list-sessions", "-F", "#{session_name}").Output()
 	if err == nil {
 		for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
 			if strings.HasPrefix(session, "task-daemon-") {
@@ -6265,7 +6289,7 @@ func recoverStaleTmuxRefs(dryRun bool) {
 	// Step 2: Find all valid window IDs across all daemon sessions
 	validWindowIDs := make(map[string]bool)
 	for session := range activeSessions {
-		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_id}").Output()
+		windowsOut, err := agentTmuxCmd("list-windows", "-t", session, "-F", "#{window_id}").Output()
 		if err == nil {
 			for _, windowID := range strings.Split(strings.TrimSpace(string(windowsOut)), "\n") {
 				if windowID != "" {
@@ -6398,7 +6422,7 @@ func cleanupOrphanedSessions(force bool) {
 		ownedByUs bool
 	}
 
-	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	sessionsOut, err := agentTmuxCmd("list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error listing tmux sessions: "+err.Error()))
 		return
@@ -6430,7 +6454,7 @@ func cleanupOrphanedSessions(force bool) {
 		// never allowed to have a window killed merely for being ABSENT from the
 		// database: absence is what a foreign task looks like.
 		ownedByUs := owner == localOwner
-		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
+		windowsOut, err := agentTmuxCmd("list-windows", "-t", session, "-F", "#{window_name}").Output()
 		if err != nil {
 			continue
 		}
@@ -6537,8 +6561,8 @@ func killWindow(target string, force bool) error {
 	if force {
 		// Best-effort: collect pane PIDs first so we can SIGKILL them after
 		// killing the window. tmux kill-window itself can't escalate signals.
-		out, _ := osexec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
-		if err := osexec.Command("tmux", "kill-window", "-t", target).Run(); err != nil {
+		out, _ := agentTmuxCmd("list-panes", "-t", target, "-F", "#{pane_pid}").Output()
+		if err := agentTmuxCmd("kill-window", "-t", target).Run(); err != nil {
 			return err
 		}
 		for _, pidStr := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -6552,7 +6576,7 @@ func killWindow(target string, force bool) error {
 		}
 		return nil
 	}
-	return osexec.Command("tmux", "kill-window", "-t", target).Run()
+	return agentTmuxCmd("kill-window", "-t", target).Run()
 }
 
 // moveTask moves a task to a different project by cleaning up old resources,
@@ -7363,7 +7387,7 @@ func parseKeyEvents(input string) []tea.Msg {
 // caller treats unknown the same as its own only for windows whose task it can
 // actually see in the database.
 func tmuxSessionOwner(session string) string {
-	out, err := osexec.Command("tmux", "show-options", "-qv", "-t", session, executor.TmuxOwnerOption).Output()
+	out, err := agentTmuxCmd("show-options", "-qv", "-t", session, executor.TmuxOwnerOption).Output()
 	if err != nil {
 		return ""
 	}

@@ -548,6 +548,27 @@ When you execute a task:
 3. Spawns the configured executor (Claude or Codex) with environment variables and the task prompt
 4. Creates a shell pane for manual intervention
 
+Each pane is tagged with its task and role (`@ty_task`, and `@ty_role` set to `agent` or `shell`), so ty finds a task's panes by asking tmux instead of trusting a pane ID it stored earlier. Sessions nobody is looking at are sized 200×50, and `ty` sizes its own session to your terminal before attaching, so nothing reflows when you open it.
+
+**Opening a task never moves its panes.** The detail view splits the TUI's own pane and runs a nested tmux client in it, attached to a throwaway session that is grouped with the daemon session and pointed at the task's window. The agent and shell stay in the daemon session the whole time. Quitting, reloading or crashing the TUI cannot take them with it, and several TUIs can show the same task at once. In the view:
+
+- **Shift+↑ / Shift+↓** move between the task details and the view. **Shift+← / Shift+→** move between the agent and the shell inside it. Clicking works too.
+- Every key goes to the agent or the shell: the view has no prefix key of its own. Scroll with the mouse wheel.
+- `\` hides the shell. A hidden shell keeps running in a `_hidden_shell_<id>` window in the daemon session.
+- If the task's window closes, the view closes with it rather than show another task.
+
+#### Which tmux server
+
+New installs run their agents on a private tmux server, `tmux -L taskyou`, so ty's sessions, options and key bindings never mix with your own tmux. An install whose agents were already on tmux's default server when it first ran this version keeps using the default server, so no running agent drops out of sight. The choice is recorded in `tmux-socket` next to the database (`~/.local/share/task/tmux-socket`). The desktop app reads the same file.
+
+| To | Do |
+|---|---|
+| Attach to the agents by hand | `tmux -L taskyou attach -t task-daemon-<id>` (on the default server, plain `tmux attach`) |
+| Override the choice | Set `TASKYOU_TMUX_SOCKET=taskyou` (or `default`) for every ty process |
+| Move an existing install to the private server | Stop its agents with `ty restart --hard`, then `echo taskyou > ~/.local/share/task/tmux-socket` |
+
+`ty` still works inside your own tmux: the TUI stays in your session, and the task view attaches across to the agent server.
+
 #### Session Tracking
 
 Each task tracks its executor state in the database:
@@ -557,6 +578,7 @@ Each task tracks its executor state in the database:
 | `SessionID` | Executor session ID (Claude only, for resumption) |
 | `TmuxWindowID` | Unique window target for tmux commands |
 | `daemon_session` | Which `task-daemon-*` owns this task |
+| `ClaudePaneID`, `ShellPaneID` | The task's pane IDs, kept as a cache; the pane tags win when they disagree |
 | `Port` | Unique port (3100-4099) for the worktree |
 
 #### Managing Executor Processes

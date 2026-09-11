@@ -12,6 +12,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executorlock"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // spawnLockTimeout bounds how long a spawner waits for the per-task executor
@@ -176,6 +177,9 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 
 	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
 	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	// The split made the shell active. A view's keystrokes go to the active pane,
+	// so hand it back to the agent, as ensureShellPane does.
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0").Run()
 
 	// Persist pane IDs so other clients (HTTP API, TUI) can target the panes.
 	e.savePaneIDs(ctx, windowTarget, task.ID)
@@ -368,9 +372,12 @@ func findOrCreateDaemonSession(ctx context.Context) (string, error) {
 
 	daemonSession := fmt.Sprintf("task-daemon-%d", os.Getpid())
 	// "tail -f /dev/null" keeps the placeholder window alive (empty windows exit immediately).
-	if err := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
+	args := append([]string{"new-session", "-d", "-s", daemonSession}, tmuxctl.DefaultSizeArgs()...)
+	if err := tmuxCmd(ctx, append(args, "-n", "_placeholder", "tail", "-f", "/dev/null")...).Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session failed: %w", err)
 	}
+	// New task windows start at this size while nobody is attached.
+	_ = tmuxCmd(ctx, "set-option", "-t", daemonSession, "default-size", tmuxctl.DefaultSize()).Run()
 	tagSessionOwner(ctx, daemonSession)
 	return daemonSession, nil
 }
@@ -399,4 +406,30 @@ func LocalOwnerTag() string {
 // Best-effort: an untagged session is treated as "unknown", never as "mine".
 func tagSessionOwner(ctx context.Context, session string) {
 	_ = tmuxCmd(ctx, "set-option", "-t", session, TmuxOwnerOption, LocalOwnerTag()).Run()
+}
+
+// tagPane labels a pane with its task and role on the agent server (see
+// tmuxctl.PaneTaskOption). Best effort: an untagged pane is still found the old
+// way, by stored ID or position.
+func tagPane(ctx context.Context, pane string, taskID int64, role string) {
+	if pane == "" {
+		return
+	}
+	for _, args := range tmuxctl.TagPaneArgs(pane, taskID, role) {
+		_ = tmuxCmd(ctx, args...).Run()
+	}
+}
+
+// taggedPane returns the pane in windowTarget tagged with role, or "".
+func taggedPane(ctx context.Context, windowTarget, role string) string {
+	out, err := tmuxCmd(ctx, "list-panes", "-t", windowTarget, "-F", "#{pane_id} #{"+tmuxctl.PaneRoleOption+"}").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if id, r, _ := strings.Cut(strings.TrimSpace(line), " "); r == role {
+			return id
+		}
+	}
+	return ""
 }

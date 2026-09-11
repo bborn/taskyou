@@ -25,6 +25,10 @@ export WORKTREE_SESSION_ID="$TY_QA_SID"
 export TMUX_TMPDIR="$TY_QA_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
 unset TMUX
+# ty runs its agents, and the sessions it creates for itself, on a private
+# server (`tmux -L taskyou`, see internal/tmuxctl) under that same TMUX_TMPDIR.
+# Pin the name so the harness and ty always look at the same server.
+export TASKYOU_TMUX_SOCKET="${TASKYOU_TMUX_SOCKET:-taskyou}"
 # Resolve the real binary once instead of using `command tmux` inside the
 # wrapper: macOS stock bash 3.2 has an errexit bug where a failing
 # `command foo || true` still aborts a `set -e` script, which broke every
@@ -35,7 +39,7 @@ TY_QA_TMUX_BIN="$(command -v tmux)"
 # tmux silently falls back to /tmp — the user's LIVE server. After
 # `ty-qa-down.sh --purge` deletes the instance dir, any later tmux call in the
 # same shell would otherwise land there.
-tmux() { mkdir -p "$TMUX_TMPDIR"; env -u TMUX "$TY_QA_TMUX_BIN" "$@"; }
+tmux() { mkdir -p "$TMUX_TMPDIR"; env -u TMUX "$TY_QA_TMUX_BIN" -L "$TASKYOU_TMUX_SOCKET" "$@"; }
 
 # Derived handles.
 TY_BIN="${TY_BIN:-$TY_QA_ROOT/ty}"

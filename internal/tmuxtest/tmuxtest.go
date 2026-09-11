@@ -26,6 +26,7 @@ func Isolate(t testing.TB) {
 	t.Setenv("TMUX_TMPDIR", dir)
 	t.Setenv("TMUX", "")
 	t.Setenv("TMUX_PANE", "")
+	t.Setenv(socketEnv, "default")
 	t.Cleanup(func() {
 		_ = exec.Command("tmux", "kill-server").Run()
 		_ = os.RemoveAll(dir)
@@ -43,6 +44,7 @@ func Main(m *testing.M) int {
 	}
 	_ = os.Unsetenv("TMUX")
 	_ = os.Unsetenv("TMUX_PANE")
+	_ = os.Setenv(socketEnv, "default")
 	code := m.Run()
 	if err == nil {
 		_ = exec.Command("tmux", "kill-server").Run()
@@ -50,6 +52,12 @@ func Main(m *testing.M) int {
 	}
 	return code
 }
+
+// socketEnv is tmuxctl.EnvSocket, pinned here to tmux's default socket: tests
+// talk to tmux with plain `tmux` calls, and the code under test must reach the
+// same (isolated) server rather than choosing, and recording on disk, a
+// private one. Spelled out rather than imported to keep this package a leaf.
+const socketEnv = "TASKYOU_TMUX_SOCKET"
 
 // socketDir is short on purpose: a socket path is capped near 104 bytes, and
 // os.TempDir() on darwin is already long.

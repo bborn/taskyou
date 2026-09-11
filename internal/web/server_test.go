@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tmuxtest"
 )
 
 // mockRunner records commands instead of executing them. Guarded by a mutex
@@ -750,6 +751,8 @@ func TestCORS(t *testing.T) {
 	}
 }
 
+// TestMain keeps every test in this package off the live tmux server; see
+// internal/tmuxtest.
 func TestMain(m *testing.M) {
-	os.Exit(m.Run())
+	os.Exit(tmuxtest.Main(m))
 }
