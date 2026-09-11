@@ -196,6 +196,23 @@ func AgentShell() string {
 	return "env -u TMUX -u TMUX_PANE tmux"
 }
 
+// AgentShellDQ is AgentShell with the socket name in double quotes, for shell
+// scripts that are themselves wrapped in single quotes. Anything but letters,
+// digits, dot, dash and underscore is dropped from the name.
+func AgentShellDQ() string {
+	s := Socket()
+	if s == "" {
+		return "env -u TMUX -u TMUX_PANE tmux"
+	}
+	safe := strings.Map(func(r rune) rune {
+		if r == '.' || r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return r
+		}
+		return -1
+	}, s)
+	return `env -u TMUX -u TMUX_PANE tmux -L "` + safe + `"`
+}
+
 // ViewAttachScript is the shell line a detail-view pane runs to show a task's
 // window without moving any pane: a nested client attached to view, a session
 // grouped with the daemon's that the caller has pointed at the task window.

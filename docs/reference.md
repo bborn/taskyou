@@ -552,7 +552,7 @@ Each pane is tagged with its task and role (`@ty_task`, and `@ty_role` set to `a
 
 **Opening a task never moves its panes.** The detail view splits the TUI's own pane and runs a nested tmux client in it, attached to a throwaway session that is grouped with the daemon session and pointed at the task's window. The agent and shell stay in the daemon session the whole time. Quitting, reloading or crashing the TUI cannot take them with it, and several TUIs can show the same task at once. In the view:
 
-- **Shift+↑ / Shift+↓** move between the task details and the view. **Shift+← / Shift+→** move between the agent and the shell inside it. Clicking works too.
+- **Shift+↓ / Shift+→** go to the next pane and **Shift+↑ / Shift+←** to the previous one, round task details → agent → shell → task details, the same cycle as before the view existed. Clicking works too.
 - Every key goes to the agent or the shell: the view has no prefix key of its own. Scroll with the mouse wheel.
 - `\` hides the shell. A hidden shell keeps running in a `_hidden_shell_<id>` window in the daemon session.
 - If the task's window closes, the view closes with it rather than show another task.

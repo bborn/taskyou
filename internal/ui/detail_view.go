@@ -40,6 +40,14 @@ func uiTmux(ctx context.Context, args ...string) *osExec.Cmd { return tmuxctl.UI
 // none of ty's business.
 const viewerOption = "@ty_viewer"
 
+// Pairing between a TUI pane and its local task view, read by Shift+arrow
+// navigation (bindPaneNavigation) to cross between them.
+const (
+	viewTUIOption     = "@ty_tui"       // on a view pane: the TUI pane it belongs to
+	viewPaneOption    = "@ty_view_pane" // on a TUI pane: its current view pane
+	viewSessionOption = "@ty_view"      // on a TUI pane: the session its view shows
+)
+
 // Pane tags on the agent server; see tmuxctl.PaneTaskOption.
 const (
 	paneTaskOption = tmuxctl.PaneTaskOption
@@ -347,7 +355,12 @@ func (m *DetailModel) openViewerPane(ctx context.Context, tuiPaneID, view string
 	if viewer == "" {
 		return "", fmt.Errorf("split-window printed no pane id")
 	}
-	uiTmux(ctx, "set-option", "-p", "-t", viewer, viewerOption, view).Run()
+	runTmuxBatchOn(ctx, uiTmux, [][]string{
+		{"set-option", "-p", "-t", viewer, viewerOption, view},
+		{"set-option", "-p", "-t", viewer, viewTUIOption, tuiPaneID},
+		{"set-option", "-p", "-t", tuiPaneID, viewPaneOption, viewer},
+		{"set-option", "-p", "-t", tuiPaneID, viewSessionOption, view},
+	})
 	return viewer, nil
 }
 
@@ -421,6 +434,12 @@ func (m *DetailModel) closeTaskWindowView(saveLayout bool) {
 	m.saveLayout(ctx, saveLayout)
 	if m.viewerPaneID != "" {
 		uiTmux(ctx, "kill-pane", "-t", m.viewerPaneID).Run()
+	}
+	if m.tuiPaneID != "" {
+		runTmuxBatchOn(ctx, uiTmux, [][]string{
+			{"set-option", "-pu", "-t", m.tuiPaneID, viewPaneOption},
+			{"set-option", "-pu", "-t", m.tuiPaneID, viewSessionOption},
+		})
 	}
 	if m.viewSession != "" {
 		agentTmux(ctx, "kill-session", "-t", "="+m.viewSession).Run()
@@ -516,20 +535,22 @@ func (m *DetailModel) focusExecutorPane() {
 // A bare ";" would instead terminate the tmux command line itself.
 const tmuxCmdSep = `\;`
 
-// bindPaneNavigation installs Shift+arrow navigation on the UI server.
-// Up/Down move between the TUI and the pane under it. Left/Right move between
-// the agent and the shell inside a view (or cycle panes anywhere else).
+// bindPaneNavigation installs Shift+arrow navigation on the UI server, with
+// the same cycle as when the panes sat side by side in one window:
+// Shift+Down/Right go to the next pane and Shift+Up/Left to the previous one,
+// round TUI → agent → shell → TUI. With a local task view, the agent and shell
+// are inside one pane here (on the agent server), so crossing into or out of
+// it takes a small script; anywhere else the keys cycle this window's panes.
 func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
-	inner := func(dir string) string {
-		return fmt.Sprintf(`run-shell -b "%s select-pane -t '#{%s}:%s'"`, tmuxctl.AgentShell(), viewerOption, dir)
-	}
+	inView := "#{||:#{" + viewTUIOption + "},#{" + viewPaneOption + "}}"
+	cycle := func(next bool) string { return "run-shell -b '" + paneCycleScript(next) + "'" }
 	// One invocation per binding, not a batch: each bind-key's body carries its
 	// own escaped separator, and keeping them apart keeps that easy to see.
 	for _, bind := range [][]string{
-		{"bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+"},
-		{"bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-"},
-		{"bind-key", "-T", "root", "S-Right", "if-shell", "-F", "#{" + viewerOption + "}", inner(".+"), "select-pane -t :.+"},
-		{"bind-key", "-T", "root", "S-Left", "if-shell", "-F", "#{" + viewerOption + "}", inner(".-"), "select-pane -t :.-"},
+		{"bind-key", "-T", "root", "S-Down", "if-shell", "-F", inView, cycle(true), "select-pane -t :.+"},
+		{"bind-key", "-T", "root", "S-Right", "if-shell", "-F", inView, cycle(true), "select-pane -t :.+"},
+		{"bind-key", "-T", "root", "S-Up", "if-shell", "-F", inView, cycle(false), "select-pane -t :.-"},
+		{"bind-key", "-T", "root", "S-Left", "if-shell", "-F", inView, cycle(false), "select-pane -t :.-"},
 		// Forward an internal navigation key to the TUI. The task loader focuses
 		// the executor after pane setup completes, including slow SSH attachments.
 		//
@@ -543,6 +564,30 @@ func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
 	} {
 		uiTmux(ctx, bind...).Run()
 	}
+}
+
+// paneCycleScript is the shell that run-shell executes to move one step along
+// the Shift+arrow cycle when a task view is involved.
+//
+// In a view pane: step to the next (or previous) pane inside the view, or, at
+// its right (left) edge, back out to the TUI. In a TUI pane with a view: step
+// into the view, landing on its leftmost (rightmost) pane.
+//
+// tmux expands #{...} against the active pane before running it; ##{...}
+// survives that as #{...} for the agent server to expand. The script is wrapped
+// in single quotes for tmux, so it must not contain any.
+func paneCycleScript(next bool) string {
+	edge, step, entry := "##{pane_at_left}", "{left-of}", "{right}"
+	if next {
+		edge, step, entry = "##{pane_at_right}", "{right-of}", "{left}"
+	}
+	agent := tmuxctl.AgentShellDQ()
+	ui := `tmux -S "#{socket_path}"`
+	return fmt.Sprintf(`if [ -n "#{%[1]s}" ]; then `+
+		`if [ "$(%[2]s display-message -p -t "#{%[3]s}:" "%[4]s")" = 1 ]; then %[5]s select-pane -t "#{%[1]s}"; `+
+		`else %[2]s select-pane -t "#{%[3]s}:.%[6]s"; fi; `+
+		`else %[5]s select-pane -t "#{%[7]s}"; %[2]s select-pane -t "#{%[8]s}:.%[9]s"; fi`,
+		viewTUIOption, agent, viewerOption, edge, ui, step, viewPaneOption, viewSessionOption, entry)
 }
 
 // getCurrentShellPaneWidth returns the shell's share of the agent+shell width

@@ -163,7 +163,26 @@ func TestViewShowsTheTaskWindowWithoutMovingPanes(t *testing.T) {
 	if got := viewTmux(t, "show-options", "-pqv", "-t", f.agent, paneRoleOption); got != paneRoleAgent {
 		t.Errorf("agent pane role = %q", got)
 	}
+	// Shift+arrow navigation finds the view from the TUI pane and back.
+	if got := viewTmux(t, "show-options", "-pqv", "-t", f.tui, viewPaneOption); got != m.viewerPaneID {
+		t.Errorf("TUI pane's view pane = %q, want %q", got, m.viewerPaneID)
+	}
+	if got := viewTmux(t, "show-options", "-pqv", "-t", m.viewerPaneID, viewTUIOption); got != f.tui {
+		t.Errorf("view pane's TUI pane = %q, want %q", got, f.tui)
+	}
 	f.waitForClient(t)
+}
+
+func TestPaneCycleScriptFitsInSingleQuotes(t *testing.T) {
+	for _, next := range []bool{true, false} {
+		s := paneCycleScript(next)
+		if strings.Contains(s, "'") {
+			t.Errorf("paneCycleScript(%v) contains a single quote: %s", next, s)
+		}
+		if !strings.Contains(s, "##{pane_at_") {
+			t.Errorf("paneCycleScript(%v) lets tmux expand the edge test on the wrong server: %s", next, s)
+		}
+	}
 }
 
 func TestClosingTheViewLeavesTheTaskRunning(t *testing.T) {
@@ -175,6 +194,9 @@ func TestClosingTheViewLeavesTheTaskRunning(t *testing.T) {
 	f.m.closeTaskWindowView(false)
 
 	waitForTmux(t, func() bool { return !paneAlive(viewer) }, "viewer pane survived closing the view")
+	if got := viewTmux(t, "show-options", "-pqv", "-t", f.tui, viewPaneOption); got != "" {
+		t.Errorf("TUI pane still points at a closed view: %q", got)
+	}
 	waitForTmux(t, func() bool { return !viewTmuxOK("has-session", "-t", "="+view) }, "view session survived closing the view")
 	assertInDaemonWindow(t, f.agent, "task-7")
 	assertInDaemonWindow(t, f.shell, "task-7")
