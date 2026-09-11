@@ -32,6 +32,18 @@ The terminal UI is TaskYou's primary interface — everything ships here first. 
 [![New Task Form](screenshots/new-task-form.png)](screenshots/new-task-form.png)
 *Creating a new task with project selection, type, executor, effort, permissions, and attachments*
 
+### Show the focused task in your tab title
+
+The TUI publishes the task you are looking at (the open task in the detail view, otherwise the highlighted card) as iTerm2 user variables:
+
+| Variable | Example |
+|---|---|
+| `user.taskyouTask` | `#5202 Fix login` |
+| `user.taskyouTaskId` | `5202` |
+| `user.taskyouTaskTitle` | `Fix login` |
+
+They are session variables. Badges and status bar components can use `\(user.taskyouTask)` directly. Tab titles are evaluated in tab scope, so reach the session through `currentSession`: to keep your own tab name and append the task, choose **Edit Tab Title** and enter `ty \(currentSession.user.taskyouTask)`. Other terminals ignore the variables, so nothing changes unless you reference them.
+
 ## The CLI
 
 Everything the TUI can do, the CLI can do too — create, execute, retry, and inspect tasks, read executor output, even send keystrokes to a running executor. That makes TaskYou trivial to drive from scripts, cron jobs, and AI agents.
@@ -319,7 +331,16 @@ make build
 ```bash
 # Launch the TUI (auto-starts background daemon)
 ./bin/ty
+
+# Launch straight into a task. An ID, #ID, task branch or GitHub PR URL opens
+# its detail view (esc goes back to the board); other text opens the board
+# with the go-to-task palette searching for it.
+./bin/ty open 123
+./bin/ty open https://github.com/org/repo/pull/456
+./bin/ty open draft offers
 ```
+
+In zsh with `interactivecomments` set, quote a leading `#` (`ty open '#123'`), or the shell drops it as a comment.
 
 ### Daemon management
 

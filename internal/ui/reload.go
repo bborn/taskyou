@@ -26,6 +26,7 @@ func (m *AppModel) RestoreReloadState(state ReloadState) {
 	m.filterText = state.Filter
 	m.filterInput.SetValue(state.Filter)
 	m.pendingFocusTaskID = state.TaskID
+	m.pendingPaletteQuery = "" // a reload returns to where the user was, not to `ty open`'s search
 	if state.Filter != "" {
 		m.reloadSelectionID = state.TaskID
 	}

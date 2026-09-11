@@ -2,9 +2,7 @@ package ui
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -13,14 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
-)
-
-// Patterns for extracting task IDs and PR numbers from pasted input
-var (
-	// Matches branch names like "task/1068-description" or "task/1068"
-	branchTaskIDPattern = regexp.MustCompile(`(?:^|/)(\d+)(?:-|$)`)
-	// Matches GitHub PR URLs like "https://github.com/org/repo/pull/123"
-	githubPRURLPattern = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/(\d+)`)
+	"github.com/bborn/workflow/internal/taskref"
 )
 
 // CommandPaletteModel represents the Command+P task switcher and AI command input.
@@ -122,6 +113,13 @@ func (m *CommandPaletteModel) activeLen() int {
 // Init initializes the command palette.
 func (m *CommandPaletteModel) Init() tea.Cmd {
 	return textinput.Blink
+}
+
+// SetQuery types query into the search box, as if the user had.
+func (m *CommandPaletteModel) SetQuery(query string) {
+	m.searchInput.SetValue(query)
+	m.searchInput.CursorEnd()
+	m.filter()
 }
 
 // Update handles messages.
@@ -483,28 +481,15 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 
 // extractTaskID tries to extract a task ID from a branch name pattern.
 // Supports patterns like "task/1068-description", "feature/1068-foo", "1068-description".
+// Shared with `ty open` through taskref, so both accept the same references.
 func extractTaskID(input string) int64 {
-	matches := branchTaskIDPattern.FindStringSubmatch(input)
-	if len(matches) >= 2 {
-		id, err := strconv.ParseInt(matches[1], 10, 64)
-		if err == nil {
-			return id
-		}
-	}
-	return 0
+	return taskref.TaskIDFromBranch(input)
 }
 
 // extractPRNumber extracts a PR number from a GitHub PR URL.
 // Supports URLs like "https://github.com/org/repo/pull/123".
 func extractPRNumber(input string) int {
-	matches := githubPRURLPattern.FindStringSubmatch(input)
-	if len(matches) >= 2 {
-		num, err := strconv.Atoi(matches[1])
-		if err == nil {
-			return num
-		}
-	}
-	return 0
+	return taskref.PRNumberFromURL(input)
 }
 
 // matchesQuery checks if a task matches the search query.
