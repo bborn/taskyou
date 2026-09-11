@@ -544,6 +544,9 @@ type AppModel struct {
 	// Debug state file path
 	debugStatePath string
 
+	// Publishes the focused task to the terminal (nil unless enabled)
+	terminalTask *terminalTaskReporter
+
 	// First-time experience
 	isFirstLoad bool // Track if this is the first load of tasks
 	showWelcome bool // Show welcome message when kanban is empty
@@ -555,6 +558,9 @@ type AppModel struct {
 	// pendingFocusTaskID is a task to select once the board has loaded, set by
 	// --task. Zero means no request.
 	pendingFocusTaskID int64
+	// pendingPaletteQuery opens the go-to-task palette with this search once
+	// the board has loaded (`ty open <search>`).
+	pendingPaletteQuery string
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -752,6 +758,8 @@ func (m *AppModel) Init() tea.Cmd {
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	prevView := m.currentView
+	// Deferred so every early return below still publishes the new focus.
+	defer m.reportTerminalTask()
 
 	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.applyWindowSize(sizeMsg.Width, sizeMsg.Height)
@@ -905,15 +913,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Command palette works from any view
 		if key.Matches(msg, m.keys.CommandPalette) {
-			m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
-			m.commandPaletteReturnView = m.currentView
-			if m.currentView == ViewDetail && m.selectedTask != nil {
-				m.commandPaletteReturnTaskID = m.selectedTask.ID
-			} else {
-				m.commandPaletteReturnTaskID = 0
-			}
-			m.currentView = ViewCommandPalette
-			return m, m.commandPaletteView.Init()
+			return m, m.openCommandPalette("")
 		}
 
 		// First-run Welcome fork key handling.
@@ -1121,6 +1121,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingFocusTaskID > 0 {
 			m.kanban.SelectTask(m.pendingFocusTaskID)
 			m.pendingFocusTaskID = 0
+		}
+		if query := m.pendingPaletteQuery; query != "" {
+			m.pendingPaletteQuery = ""
+			if m.currentView == ViewDashboard {
+				cmds = append(cmds, m.openCommandPalette(query))
+			}
 		}
 
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
@@ -5775,4 +5781,34 @@ func (m *AppModel) getProjects() []*db.Project {
 // rather than on whatever the board happens to sort first.
 func (m *AppModel) FocusTaskOnLoad(taskID int64) {
 	m.pendingFocusTaskID = taskID
+}
+
+// OpenTaskOnLoad opens a task's detail view once the board has loaded (`ty
+// open`). It seeds the restore path a reloaded TUI uses. When this process is
+// itself a reload, the RestoreReloadState that follows replaces it, so a restart
+// returns to where the user was, not to the task on the original command line.
+func (m *AppModel) OpenTaskOnLoad(taskID int64) {
+	m.RestoreReloadState(ReloadState{TaskID: taskID, Detail: true})
+}
+
+// OpenPaletteOnLoad opens the go-to-task palette with query typed in once the
+// board has loaded (`ty open <search>`), leaving the pick to the user.
+func (m *AppModel) OpenPaletteOnLoad(query string) {
+	m.pendingPaletteQuery = query
+}
+
+// openCommandPalette shows the go-to-task palette, pre-filled with query.
+func (m *AppModel) openCommandPalette(query string) tea.Cmd {
+	m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
+	if query != "" {
+		m.commandPaletteView.SetQuery(query)
+	}
+	m.commandPaletteReturnView = m.currentView
+	if m.currentView == ViewDetail && m.selectedTask != nil {
+		m.commandPaletteReturnTaskID = m.selectedTask.ID
+	} else {
+		m.commandPaletteReturnTaskID = 0
+	}
+	m.currentView = ViewCommandPalette
+	return m.commandPaletteView.Init()
 }

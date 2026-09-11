@@ -36,6 +36,7 @@ import (
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/routine"
+	"github.com/bborn/workflow/internal/taskref"
 	"github.com/bborn/workflow/internal/tuireload"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
@@ -129,31 +130,38 @@ func main() {
 
 	var dangerous bool
 
+	// launchTUI runs the TUI, starting where launch says. Outside tmux it
+	// re-executes the same command line in a new tmux session, which lands back
+	// here.
+	launchTUI := func(cmd *cobra.Command, launch tuiLaunch) {
+		// TUI requires tmux for split-pane Claude interaction
+		if os.Getenv("TMUX") == "" {
+			if err := execInTmux(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			return
+		}
+
+		debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
+		cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
+		memProfilePath, _ := cmd.Flags().GetString("memprofile")
+
+		// Run locally
+		if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath, launch); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			os.Exit(1)
+		}
+	}
+
 	rootCmd := &cobra.Command{
 		Use:     "ty",
 		Short:   "Task queue manager",
 		Long:    "A beautiful terminal UI for managing your task queue.",
 		Version: version,
 		Run: func(cmd *cobra.Command, args []string) {
-			// TUI requires tmux for split-pane Claude interaction
-			if os.Getenv("TMUX") == "" {
-				if err := execInTmux(); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-					os.Exit(1)
-				}
-				return
-			}
-
 			focusTaskID, _ := cmd.Flags().GetInt64("task")
-			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
-			cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
-			memProfilePath, _ := cmd.Flags().GetString("memprofile")
-
-			// Run locally
-			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath, focusTaskID); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
+			launchTUI(cmd, tuiLaunch{taskID: focusTaskID})
 		},
 	}
 
@@ -164,6 +172,45 @@ func main() {
 	// Not persistent: subcommands have their own meaning for a task argument, and
 	// this only affects the TUI's initial selection.
 	rootCmd.Flags().Int64("task", 0, "Open the TUI with this task selected")
+
+	openCmd := &cobra.Command{
+		Use:   "open <task>",
+		Short: "Open the TUI on a task",
+		Long: `Open the TUI on a task, named any way the go-to-task palette (p) accepts.
+
+A task ID, #ID, task branch or GitHub PR URL that names one task opens its
+detail view; esc goes back to the board. Anything else opens the board with
+the palette already searching for it.
+
+Examples:
+  ty open 5187
+  ty open '#5187'
+  ty open task/5187-draft-offers
+  ty open https://github.com/org/repo/pull/3482
+  ty open draft offers`,
+		ValidArgsFunction: completeTaskIDs,
+		Args:              cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			ref := strings.Join(args, " ")
+			database, err := openTaskDB(db.DefaultPath())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			task, err := taskref.Resolve(database, ref)
+			database.Close()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				launchTUI(cmd, tuiLaunch{query: taskref.SearchText(ref)})
+				return
+			}
+			launchTUI(cmd, tuiLaunch{taskID: task.ID, openTask: true})
+		},
+	}
+	rootCmd.AddCommand(openCmd)
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
 	rootCmd.PersistentFlags().String("cpuprofile", "", "Write a CPU profile here while the TUI runs (analyze with: go tool pprof)")
 	rootCmd.PersistentFlags().String("memprofile", "", "Write a heap profile here when the TUI exits")
@@ -172,6 +219,7 @@ func main() {
 	// Skip for root (TUI has its own check), upgrade, daemon, mcp-server, and claude-hook.
 	skipVersionCheck := map[string]bool{
 		"ty":          true, // root command (TUI)
+		"open":        true, // also the TUI
 		"upgrade":     true,
 		"daemon":      true,
 		"mcp-server":  true,
@@ -4197,8 +4245,13 @@ func execInTmux() error {
 	sessionName := getUISessionName()
 	sessionID := getSessionID()
 
-	// Build command with all original args
+	// Build command with all original args, quoted: tmux runs it through a
+	// shell, where a bare "#5187" is a comment and "?" or "&" in a PR URL mean
+	// something else.
 	args := append([]string{executable}, os.Args[1:]...)
+	for i, a := range args {
+		args[i] = shellQuote(a)
+	}
 	cmdStr := strings.Join(args, " ")
 
 	// Set WORKTREE_SESSION_ID env var so child processes use the same session ID
@@ -4309,7 +4362,15 @@ func setupProfiling(cpuPath, memPath string) func() {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string, focusTaskID int64) error {
+// tuiLaunch says where the TUI starts: a task highlighted on the board, a
+// task's detail view open, or the go-to-task palette searching for query.
+type tuiLaunch struct {
+	taskID   int64
+	openTask bool
+	query    string
+}
+
+func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string, launch tuiLaunch) error {
 	// Optional performance profiling. The CPU profile captures the whole
 	// interactive session (including every render); the heap profile is written
 	// on exit. Analyze with `go tool pprof <binary> <profile>`.
@@ -4354,8 +4415,14 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 		return fmt.Errorf("read TUI reload state: %w", err)
 	}
 	model.EnableReload(token)
-	if focusTaskID > 0 {
-		model.FocusTaskOnLoad(focusTaskID)
+	model.EnableTerminalTaskReport()
+	switch {
+	case launch.query != "":
+		model.OpenPaletteOnLoad(launch.query)
+	case launch.taskID > 0 && launch.openTask:
+		model.OpenTaskOnLoad(launch.taskID)
+	case launch.taskID > 0:
+		model.FocusTaskOnLoad(launch.taskID)
 	}
 	if saved := os.Getenv("TASKYOU_TUI_RELOAD_STATE"); saved != "" {
 		os.Unsetenv("TASKYOU_TUI_RELOAD_STATE")
@@ -4396,12 +4463,15 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 		// the currently loaded build instead, acknowledging the request token.
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Reload failed; resuming current TUI: "+reloadErr.Error()))
 		os.Setenv("TASKYOU_TUI_RELOAD_STATE", string(data))
-		return runLocal(dangerousMode, debugStatePath, cpuProfilePath, memProfilePath, focusTaskID)
+		return runLocal(dangerousMode, debugStatePath, cpuProfilePath, memProfilePath, launch)
 	}
 
 	// Flush profiles now, before the tmux cleanup below may kill our own session
 	// (which would SIGKILL this process and skip the deferred flush).
 	stopProfiling()
+
+	// Before the session goes away, so a tab title stops naming the last task.
+	model.ClearTerminalTask()
 
 	// Kill task-ui tmux session on exit (if we're in it)
 	// This cleans up the session that was created by execInTmux()
