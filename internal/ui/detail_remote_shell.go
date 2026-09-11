@@ -24,7 +24,7 @@ func (m *DetailModel) showRemoteShellPane(ctx context.Context, loc executor.Remo
 	}
 	out, err := uiTmux(ctx, "split-window", "-h", "-d",
 		"-l", m.getShellPaneWidth(), "-t", m.remotePaneID, "-P", "-F", "#{pane_id}",
-		executor.RemoteShellAttachScript(m.task, loc)).Output()
+		diesWithTUI(executor.RemoteShellAttachScript(m.task, loc))).Output()
 	if err != nil {
 		return fmt.Errorf("could not open remote shell view: %w", err)
 	}

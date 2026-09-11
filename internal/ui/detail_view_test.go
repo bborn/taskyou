@@ -242,6 +242,106 @@ func TestViewEndsWhenTheTaskWindowCloses(t *testing.T) {
 		"the view kept running after the task's window closed")
 }
 
+// A TUI that dies without cleaning up (a crash, kill -9) takes its view pane
+// with it, so the terminal is not left showing an agent through a pane nothing
+// manages, and the view session goes too. The agent stays where it is.
+func TestViewGoesWhenTheTUIDies(t *testing.T) {
+	f := newViewFixture(t)
+	tui := exec.Command("sleep", "600")
+	if err := tui.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tui.Process.Kill(); _ = tui.Wait() })
+	orig := tuiPID
+	tuiPID = func() int { return tui.Process.Pid }
+	t.Cleanup(func() { tuiPID = orig })
+
+	f.m.viewTaskWindow()
+	viewer, view := f.m.viewerPaneID, f.m.viewSession
+	f.waitForClient(t)
+
+	_ = tui.Process.Kill()
+	_ = tui.Wait()
+
+	waitForTmux(t, func() bool { return !paneAlive(viewer) }, "the view pane outlived the TUI")
+	waitForTmux(t, func() bool { return !viewTmuxOK("has-session", "-t", "="+view) }, "the view session outlived the TUI")
+	assertInDaemonWindow(t, f.agent, "task-7")
+	assertInDaemonWindow(t, f.shell, "task-7")
+}
+
+// When the task's window closes under the view, ty sets the task up again the
+// way opening it does, from the status the database has now: a running task
+// waits for the daemon's executor (the full wait, not what is left of the
+// first one), and a finished task is left alone.
+func TestWindowClosingUnderTheViewSetsUpAgain(t *testing.T) {
+	for _, status := range []string{db.StatusProcessing, db.StatusDone} {
+		t.Run(status, func(t *testing.T) {
+			tmuxtest.Isolate(t)
+			stale := &db.Task{ID: 7, Title: "View fixture", Status: db.StatusProcessing, WorktreePath: t.TempDir()}
+			fresh := *stale
+			fresh.Status = status
+			m := &DetailModel{task: stale, claudePaneID: "%1", viewerPaneID: "%2", paneLoadingStart: time.Now().Add(-time.Hour)}
+
+			cmd := m.applyPaneHealth(paneHealthMsg{claudePaneID: "%1", viewerPaneID: "%2", task: &fresh})
+			if cmd == nil {
+				t.Fatal("nothing was set up after the window closed")
+			}
+			if m.task.Status != status {
+				t.Errorf("decided from status %q, want the database's %q", m.task.Status, status)
+			}
+			if time.Since(m.paneLoadingStart) > time.Minute {
+				t.Error("the wait for the daemon's executor did not start over")
+			}
+			switch res := cmd().(detailPaneResultMsg).result.(type) {
+			case paneWaitForExecutorMsg:
+				if status != db.StatusProcessing {
+					t.Errorf("a %s task waits for an executor", status)
+				}
+			case panesJoinedMsg:
+				if status != db.StatusDone || res.claudePaneID != "" || res.err != nil {
+					t.Errorf("a %s task got %+v", status, res)
+				}
+			default:
+				t.Errorf("a %s task got %T", status, res)
+			}
+		})
+	}
+}
+
+// A task the database no longer returns (deleted along with its window) gets
+// no agent.
+func TestWindowClosingForADeletedTaskStartsNothing(t *testing.T) {
+	m := &DetailModel{task: &db.Task{ID: 7, Status: db.StatusProcessing, WorktreePath: t.TempDir()}, claudePaneID: "%1"}
+	if cmd := m.applyPaneHealth(paneHealthMsg{claudePaneID: "%1"}); cmd != nil {
+		t.Fatal("set up a task the database did not return")
+	}
+}
+
+func TestPaneProbeReadsTheTaskWhenItsWindowIsGone(t *testing.T) {
+	tmuxtest.Isolate(t)
+	t.Setenv("TMUX", "qa-test") // the probe only runs inside tmux
+	database, err := db.Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	task := &db.Task{Title: "Finished while viewed", Status: db.StatusDone}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	stale := *task
+	stale.Status = db.StatusProcessing
+	m := &DetailModel{task: &stale, database: database, claudePaneID: "%1"}
+
+	msg := m.paneHealthCmd()().(detailPaneResultMsg).result.(paneHealthMsg)
+	if msg.alive || msg.hasWindow {
+		t.Fatalf("the probe found a pane or window on an empty server: %+v", msg)
+	}
+	if msg.task == nil || msg.task.Status != db.StatusDone {
+		t.Fatalf("the probe read %+v, want the database's done task", msg.task)
+	}
+}
+
 // Stale view panes are cleared; the user's own panes in the same window are
 // not (ty may run inside the user's tmux).
 func TestStaleViewersGoButUserPanesStay(t *testing.T) {

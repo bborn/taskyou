@@ -1176,7 +1176,7 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 	// window with the user's (ty run inside their tmux).
 	removeStaleViewers(ctx, tuiPaneID)
 
-	script := executor.RemoteAttachScript(m.task, loc)
+	script := diesWithTUI(executor.RemoteAttachScript(m.task, loc))
 	out, err := uiTmux(ctx, "split-window",
 		"-v", "-d",
 		"-t", tuiPaneID,
@@ -1852,6 +1852,9 @@ func (m *DetailModel) paneJoinBlockedByLoad() bool {
 type paneHealthMsg struct {
 	claudePaneID, remotePaneID, viewerPaneID string
 	alive, hasWindow, viewerAlive            bool
+	// task is the database's copy, read when the task's window is gone, so what
+	// happens next is decided from the status the task has now.
+	task *db.Task
 }
 
 func (m *DetailModel) paneHealthCmd() tea.Cmd {
@@ -1867,6 +1870,7 @@ func (m *DetailModel) paneHealthCmd() tea.Cmd {
 	m.paneHealthInFlight = true
 	task := *m.task
 	worker := &DetailModel{task: &task}
+	database := m.database
 	result := paneHealthMsg{claudePaneID: m.claudePaneID, remotePaneID: m.remotePaneID, viewerPaneID: m.viewerPaneID}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1880,6 +1884,11 @@ func (m *DetailModel) paneHealthCmd() tea.Cmd {
 		result.viewerAlive = paneExists(ctx, uiTmux, result.viewerPaneID)
 		if !result.alive {
 			result.hasWindow = worker.findTaskWindow() != ""
+		}
+		if !result.alive && !result.hasWindow && result.claudePaneID != "" && database != nil {
+			if fresh, err := database.GetTask(task.ID); err == nil && fresh != nil {
+				result.task = fresh
+			}
 		}
 		return detailPaneResultMsg{owner: m, result: result}
 	}
@@ -1907,6 +1916,18 @@ func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
 	m.viewerPaneID, m.viewSession = "", ""
 	if msg.alive || msg.hasWindow {
 		m.paneLoading, m.waitingForExecutor = true, false
+		return m.setupPanesAsync()
+	}
+	// The task's window closed while it was on screen: its agent was killed, the
+	// tmux server went away, or the daemon is replacing the executor. Set up
+	// again exactly as opening the task does, from the status it has now: a
+	// finished task is left alone, and a running one waits for the daemon's
+	// executor before ty starts one itself. The clock restarts so that wait is
+	// the full one. A task the database did not return (deleted) gets nothing.
+	if msg.claudePaneID != "" && msg.task != nil && msg.task.ID == m.task.ID {
+		m.task = msg.task
+		m.paneLoading, m.waitingForExecutor = true, false
+		m.paneLoadingStart = time.Now()
 		return m.setupPanesAsync()
 	}
 	// hasWorktree means "there is an isolated directory to start in", so a

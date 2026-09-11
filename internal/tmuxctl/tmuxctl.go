@@ -226,6 +226,18 @@ func ViewAttachScript(view string) string {
 		AgentShell(), shellQuote(view))
 }
 
+// ExitWithProcess prefixes a pane's shell command with a watcher that closes
+// the pane once process pid is gone. ty's view and remote-attach panes run
+// clients of their own, so a TUI that crashes or is killed -9 would otherwise
+// leave them behind, with the user's terminal showing an agent through a pane
+// nothing manages. The watcher checks once a second and uses the pane's own
+// $TMUX, so it reaches whichever server the pane is on. When the pane closes
+// normally, the watcher gets the pane's SIGHUP and exits with it.
+func ExitWithProcess(pid int, script string) string {
+	return fmt.Sprintf(`(while kill -0 %d 2>/dev/null; do sleep 1; done; tmux kill-pane -t "$TMUX_PANE") >/dev/null 2>&1 & %s`,
+		pid, script)
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

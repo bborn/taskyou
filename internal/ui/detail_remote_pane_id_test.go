@@ -81,7 +81,14 @@ func TestAttachRemotePaneNeverKillsOwnTuiPane(t *testing.T) {
 
 	data, _ := os.ReadFile(calls)
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "kill-pane") && strings.Contains(line, "%42") {
+		fields := strings.Fields(line)
+		for len(fields) >= 2 && (fields[0] == "-L" || fields[0] == "-S") {
+			fields = fields[2:]
+		}
+		// Only a kill-pane call counts. The split-window that opens the remote
+		// pane names %42 as its target and carries a watcher whose own kill-pane
+		// closes that new pane once the TUI is gone, never the TUI's.
+		if len(fields) > 0 && fields[0] == "kill-pane" && strings.Contains(line, "%42") {
 			t.Fatalf("killed its own TUI pane: %q", line)
 		}
 	}

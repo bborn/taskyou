@@ -34,6 +34,14 @@ func agentTmux(ctx context.Context, args ...string) *osExec.Cmd { return tmuxctl
 // uiTmux runs tmux against the server the TUI itself sits in.
 func uiTmux(ctx context.Context, args ...string) *osExec.Cmd { return tmuxctl.UI(ctx, args...) }
 
+// tuiPID is the process that ty's own panes under the TUI must not outlive. A
+// test stands a process of its own in for the TUI.
+var tuiPID = os.Getpid
+
+// diesWithTUI makes a pane's command close its pane once the TUI process is
+// gone (see tmuxctl.ExitWithProcess).
+func diesWithTUI(script string) string { return tmuxctl.ExitWithProcess(tuiPID(), script) }
+
 // viewerOption marks a UI pane as one of ty's views, holding the name of the
 // session it shows. Cleanup removes only panes carrying it: the TUI may share
 // a window with the user's own panes (ty run inside their tmux), and those are
@@ -347,7 +355,7 @@ func (m *DetailModel) ensureViewSession(ctx context.Context, daemonSession, wind
 func (m *DetailModel) openViewerPane(ctx context.Context, tuiPaneID, view string) (string, error) {
 	removeStaleViewers(ctx, tuiPaneID)
 	out, err := uiTmux(ctx, "split-window", "-v", "-d", "-t", tuiPaneID,
-		"-P", "-F", "#{pane_id}", tmuxctl.ViewAttachScript(view)).Output()
+		"-P", "-F", "#{pane_id}", diesWithTUI(tmuxctl.ViewAttachScript(view))).Output()
 	if err != nil {
 		return "", fmt.Errorf("split-window: %w", err)
 	}
