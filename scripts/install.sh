@@ -7,6 +7,7 @@
 #
 # Options:
 #   --no-ssh-server    Skip installing taskd (the SSH server daemon)
+#   --no-restart       Leave a running ty on its old version (see restart_running_ty)
 #
 # Environment variables:
 #   INSTALL_DIR        Installation directory (default: ~/.local/bin)
@@ -16,6 +17,7 @@ set -e
 REPO="bborn/taskyou"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 INSTALL_TASKD=true
+RESTART_TY=true
 
 # Colors for output
 RED='\033[0;31m'
@@ -44,6 +46,10 @@ parse_args() {
                 INSTALL_TASKD=false
                 shift
                 ;;
+            --no-restart)
+                RESTART_TY=false
+                shift
+                ;;
             --help|-h)
                 echo "TaskYou Installation Script"
                 echo ""
@@ -52,6 +58,7 @@ parse_args() {
                 echo ""
                 echo "Options:"
                 echo "  --no-ssh-server    Skip installing taskd (the SSH server daemon)"
+                echo "  --no-restart       Leave a running ty on its old version"
                 echo "  --help, -h         Show this help message"
                 echo ""
                 echo "Environment variables:"
@@ -204,6 +211,37 @@ check_path() {
     fi
 }
 
+# Switch a running ty to the version just installed. `ty restart` restarts the
+# daemon and asks every open TUI to reload the new binary in place, with agent
+# sessions left running. Without it, an upgrade leaves the old daemon and TUIs
+# running the old code next to any new one until someone restarts by hand.
+#
+# Only when a ty daemon is running: `ty restart` starts one, and a fresh install
+# (or a machine where ty is not in use) should not end up with a daemon it never
+# asked for. Only a ty whose restart reloads TUIs in place (its help says
+# "reload"); an older one re-launched the TUI itself, which would take over this
+# installer's terminal.
+restart_running_ty() {
+    local version=$1
+    local bin="${INSTALL_DIR}/ty"
+
+    if [ "$RESTART_TY" != true ]; then
+        info "Not restarting ty (--no-restart). Run 'ty restart' to switch a running ty to ${version}."
+        return 0
+    fi
+    if ! "$bin" daemon status 2>/dev/null | grep -q "Daemon running"; then
+        return 0
+    fi
+    if ! "$bin" restart --help 2>/dev/null | grep -qi "reload"; then
+        warn "This ty cannot restart in place. Run 'ty restart' to switch to ${version}."
+        return 0
+    fi
+    info "Restarting ty on ${version}: the daemon restarts and open TUIs reload in place. Agents keep running."
+    if ! "$bin" restart; then
+        warn "Restart failed. Run 'ty restart' to switch the running ty to ${version}."
+    fi
+}
+
 # Main installation
 main() {
     # Parse command line arguments
@@ -240,6 +278,8 @@ main() {
     else
         info "Skipping taskd installation (--no-ssh-server)"
     fi
+
+    restart_running_ty "$version"
 
     check_path
 

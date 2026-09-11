@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	osExec "os/exec"
-
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -77,7 +75,7 @@ func (m *AppModel) EnableTerminalTaskReport() {
 		// tmux drops passthrough unless the pane allows it. Scoped to this
 		// process's own pane so no other program gains the ability.
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		osExec.CommandContext(ctx, "tmux", "set-option", "-p", "-t", pane, "allow-passthrough", "on").Run()
+		uiTmux(ctx, "set-option", "-p", "-t", pane, "allow-passthrough", "on").Run()
 		cancel()
 	}
 	m.terminalTask = &terminalTaskReporter{inTmux: inTmux, write: writeTTY}

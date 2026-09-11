@@ -23,32 +23,22 @@ func TestReloadWaitsForUnfinishedForms(t *testing.T) {
 	}
 }
 
-func TestReloadReturnsBorrowedPanesBeforeQuitting(t *testing.T) {
+func TestReloadClosesViewBeforeQuitting(t *testing.T) {
 	m, _ := refreshTestModel(t)
 	task := &db.Task{ID: 42, Status: db.StatusBacklog}
-	released := false
 	m.selectedTask = task
 	m.currentView = ViewDetail
-	m.detailView = &DetailModel{task: task, executorLockRelease: func() { released = true }}
+	detail := &DetailModel{task: task, viewerPaneID: "%qa-viewer"}
+	m.detailView = detail
 	m.reloadPending = true
 	cleanup := m.beginReload()
-	if cleanup == nil || m.reloadReady || released {
+	if cleanup == nil || m.reloadReady {
 		t.Fatal("reload skipped asynchronous cleanup")
 	}
 	m.Update(cleanup())
 	state, ready := m.ReloadState()
-	if !ready || !released || !state.Detail || state.TaskID != 42 {
-		t.Fatal("reload lost ownership ordering or task selection")
-	}
-}
-
-func TestFailedPaneHandoffCancelsReload(t *testing.T) {
-	m, _ := refreshTestModel(t)
-	m.reloadPending, m.reloadPrepared = true, true
-	detail := &DetailModel{task: &db.Task{ID: 1}}
-	m.Update(detailCleanupMsg{failed: detail})
-	if m.reloadPending || m.reloadReady || m.detailView != detail {
-		t.Fatal("reload continued after failed handoff")
+	if !ready || detail.viewerPaneID != "" || !state.Detail || state.TaskID != 42 {
+		t.Fatal("reload lost the view cleanup ordering or the task selection")
 	}
 }
 

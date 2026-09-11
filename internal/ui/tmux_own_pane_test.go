@@ -34,10 +34,10 @@ func assertNoUnscopedQueries(t *testing.T, logPath string) {
 	}
 }
 
-// joinTmuxPanes takes the answer as its own TUI pane and then kills every other
-// pane around it. Adopting another instance's pane there destroys that
-// instance's executor panes — the same defect fixed for the remote path.
-func TestJoinTmuxPanesUsesOwnPane(t *testing.T) {
+// viewTaskWindow splits its viewer from the TUI pane it names, and clears view
+// panes around it. Taking another instance's pane would put the view, and that
+// cleanup, in the other instance's window.
+func TestViewTaskWindowUsesOwnPane(t *testing.T) {
 	app, _ := refreshTestModel(t)
 	t.Setenv("TMUX", "/tmp/fake,1,0")
 	t.Setenv("TMUX_PANE", "%42")
@@ -45,10 +45,10 @@ func TestJoinTmuxPanesUsesOwnPane(t *testing.T) {
 
 	m := &DetailModel{database: app.db, task: &db.Task{ID: 900, WorktreePath: t.TempDir()}, shellPaneHidden: true}
 	m.cachedWindowTarget = "task-daemon-1:@5"
-	m.joinTmuxPanes()
+	m.viewTaskWindow()
 
 	if m.tuiPaneID == "%999" {
-		t.Fatal("joinTmuxPanes adopted another instance's pane")
+		t.Fatal("viewTaskWindow adopted another instance's pane")
 	}
 	if m.tuiPaneID != "%42" {
 		t.Fatalf("tuiPaneID = %q, want %%42 from $TMUX_PANE", m.tuiPaneID)

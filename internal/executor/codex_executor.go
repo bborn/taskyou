@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // CodexExecutor implements TaskExecutor for OpenAI's Codex CLI.
@@ -215,7 +216,7 @@ func (c *CodexExecutor) GetProcessID(taskID int64) int {
 	windowName := TmuxWindowName(taskID)
 
 	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}

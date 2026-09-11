@@ -318,6 +318,14 @@ You can also specify a custom install directory:
 curl -fsSL https://taskyou.dev/install.sh | INSTALL_DIR=~/.local/bin bash
 ```
 
+### Upgrading
+
+`ty upgrade` runs the same install script. If a ty daemon is running, the script then runs `ty restart`. The daemon restarts and open TUIs reload the new binary in place, with agents left running. To install without restarting:
+
+```bash
+curl -fsSL https://taskyou.dev/install.sh | bash -s -- --no-restart
+```
+
 ### Build from source
 
 ```bash
@@ -362,6 +370,9 @@ reopen those once with the updated build to enable future automatic reloads.
 `POST /api/tui/reload` requests the same cooperative TUI reload through the HTTP API.
 `ty daemon restart` only restarts the daemon. `ty restart --hard` remains an explicit
 destructive reset that kills TaskYou tmux sessions.
+
+Upgrading does this for you: when a ty daemon is running, `ty upgrade` (and the
+install script it runs) finishes with `ty restart`.
 
 ### Maintenance commands
 
@@ -548,6 +559,41 @@ When you execute a task:
 3. Spawns the configured executor (Claude or Codex) with environment variables and the task prompt
 4. Creates a shell pane for manual intervention
 
+Each pane is tagged with its task and role (`@ty_task`, and `@ty_role` set to `agent` or `shell`), so ty finds a task's panes by asking tmux instead of trusting a pane ID it stored earlier. Sessions nobody is looking at are sized 200×50, and `ty` sizes its own session to your terminal before attaching, so nothing reflows when you open it.
+
+**Opening a task never moves its panes.** The detail view splits the TUI's own pane and runs a nested tmux client in it, attached to a throwaway session that is grouped with the daemon session and pointed at the task's window. The agent and shell stay in the daemon session the whole time. Quitting, reloading or crashing the TUI cannot take them with it, and several TUIs can show the same task at once. In the view:
+
+- **Shift+↓ / Shift+→** go to the next pane and **Shift+↑ / Shift+←** to the previous one, round task details → agent → shell → task details, the same cycle as before the view existed. Clicking works too.
+- Every key goes to the agent or the shell: the view has no prefix key of its own. Scroll with the mouse wheel.
+- `\` hides the shell. A hidden shell keeps running in a `_hidden_shell_<id>` window in the daemon session.
+- If the task's window closes (its agent was killed, it was suspended, or the tmux server went away), the view closes with it rather than show another task. What happens next depends on the task's status at that moment:
+  - A queued or running task: ty waits up to a minute for the daemon's executor, then starts the agent itself and shows it again.
+  - A blocked task is not restarted. The idle sweep suspends parked tasks to free their memory, and restarting one would undo that. The view says the session closed; open the task again to resume it.
+  - A finished task is left alone.
+- If the TUI crashes or is killed, its view pane closes within a second. The agent keeps running.
+
+#### Which tmux server
+
+New installs run their agents on a private tmux server, `tmux -L taskyou`, so ty's sessions, options and key bindings never mix with your own tmux. An install whose agents were already on tmux's default server when it first ran this version keeps using the default server, so no running agent drops out of sight. The choice is recorded in `tmux-socket` next to the database (`~/.local/share/task/tmux-socket`). The desktop app reads the same file.
+
+| To | Do |
+|---|---|
+| Attach to the agents by hand | `tmux -L taskyou attach -t task-daemon-<id>` (on the default server, plain `tmux attach`) |
+| Override the choice | Set `TASKYOU_TMUX_SOCKET=taskyou` (or `default`) for every ty process |
+| Move an existing install to the private server | See below |
+
+To move an existing install to the private server, first stop ty's agents on the default server; otherwise they keep running there, out of ty's sight. Then record the choice while nothing of ty's is running:
+
+1. Quit every open `ty`.
+2. `ty daemon stop`
+3. `tmux ls -F '#{session_name}' | grep -E '^task-(daemon|ui)-' | xargs -n1 tmux kill-session -t`. This stops ty's sessions on the default server and leaves your own alone.
+4. `echo taskyou > ~/.local/share/task/tmux-socket`
+5. `ty`
+
+Opening a task afterwards resumes its Claude session. `ty restart --hard` cannot stand in for steps 1–3: it relaunches `ty` at once, and that reads the old choice before step 4 can change it.
+
+`ty` still works inside your own tmux: the TUI stays in your session, and the task view attaches across to the agent server.
+
 #### Session Tracking
 
 Each task tracks its executor state in the database:
@@ -557,6 +603,7 @@ Each task tracks its executor state in the database:
 | `SessionID` | Executor session ID (Claude only, for resumption) |
 | `TmuxWindowID` | Unique window target for tmux commands |
 | `daemon_session` | Which `task-daemon-*` owns this task |
+| `ClaudePaneID`, `ShellPaneID` | The task's pane IDs, kept as a cache; the pane tags win when they disagree |
 | `Port` | Unique port (3100-4099) for the worktree |
 
 #### Managing Executor Processes

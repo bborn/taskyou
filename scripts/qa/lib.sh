@@ -25,13 +25,21 @@ export WORKTREE_SESSION_ID="$TY_QA_SID"
 export TMUX_TMPDIR="$TY_QA_ROOT/tmux"
 mkdir -p "$TMUX_TMPDIR"
 unset TMUX
+# ty runs its agents, and the sessions it creates for itself, on a private
+# server (`tmux -L taskyou`, see internal/tmuxctl) under that same TMUX_TMPDIR.
+# Pin the name so the harness and ty always look at the same server.
+export TASKYOU_TMUX_SOCKET="${TASKYOU_TMUX_SOCKET:-taskyou}"
 # Resolve the real binary once instead of using `command tmux` inside the
 # wrapper: macOS stock bash 3.2 has an errexit bug where a failing
 # `command foo || true` still aborts a `set -e` script, which broke every
 # ty-qa script at the first `tmux kill-session` against a not-yet-running
 # QA server.
 TY_QA_TMUX_BIN="$(command -v tmux)"
-tmux() { env -u TMUX "$TY_QA_TMUX_BIN" "$@"; }
+# The mkdir is a guard, not housekeeping: when $TMUX_TMPDIR does not exist,
+# tmux silently falls back to /tmp — the user's LIVE server. After
+# `ty-qa-down.sh --purge` deletes the instance dir, any later tmux call in the
+# same shell would otherwise land there.
+tmux() { mkdir -p "$TMUX_TMPDIR"; env -u TMUX "$TY_QA_TMUX_BIN" -L "$TASKYOU_TMUX_SOCKET" "$@"; }
 
 # Derived handles.
 TY_BIN="${TY_BIN:-$TY_QA_ROOT/ty}"
@@ -43,7 +51,7 @@ TY_UI_PANE="$TY_UI_SESSION:tui"
 
 # Run the isolated binary with the instance env. TMUX is cleared (see above) so
 # ty's own tmux calls route to the private server.
-ty() { env -u TMUX "$TY_BIN" "$@"; }
+ty() { mkdir -p "$TMUX_TMPDIR"; env -u TMUX "$TY_BIN" "$@"; }
 
 ty_qa_require_built() {
   if [[ ! -x "$TY_BIN" ]]; then
@@ -79,7 +87,9 @@ ty_qa_freeze_daemon() {
     [[ -n "${p:-}" ]] && kill "$p" 2>/dev/null || true
   fi
   mkdir -p "$TY_QA_ROOT"
-  sleep 100000 &
+  # Detached from the caller's stdio: a decoy that inherits a pipe keeps the
+  # reader waiting for it, so `ty-qa-freeze.sh | tail` never returned.
+  sleep 100000 </dev/null >/dev/null 2>&1 &
   local decoy=$!
   disown "$decoy" 2>/dev/null || true
   echo "$decoy" > "$TY_QA_DAEMON_PID_FILE"

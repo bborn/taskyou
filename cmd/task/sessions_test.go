@@ -10,6 +10,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/tmuxtest"
 )
 
 // requireTmux skips the test if tmux is not available.
@@ -26,6 +27,7 @@ func requireTmux(t *testing.T) {
 // test process — that's the scenario we need to exercise.
 func makeDaemonSession(t *testing.T, sessionID string, taskID int) func() {
 	t.Helper()
+	tmuxtest.Isolate(t)
 	sessionName := fmt.Sprintf("task-daemon-%s", sessionID)
 	windowName := fmt.Sprintf("task-%d", taskID)
 
@@ -220,19 +222,9 @@ func setupCleanupTest(t *testing.T, idTag string) (sessionName string) {
 	// suite, the suite killed the agent's own window, and its shell command came
 	// back "exit code 137".
 	//
-	// TMUX_TMPDIR moves the socket, and both this test's tmux calls and the ones
-	// inside cleanupOrphanedSessions inherit it, so the isolation needs no
-	// production seam. Kept short deliberately: a socket path is capped near 104
-	// bytes and t.TempDir() on darwin is already long.
-	socketDir, err := os.MkdirTemp("/tmp", "tytmux")
-	if err != nil {
-		t.Fatalf("socket dir: %v", err)
-	}
-	t.Setenv("TMUX_TMPDIR", socketDir)
-	t.Cleanup(func() {
-		osexec.Command("tmux", "kill-server").Run()
-		_ = os.RemoveAll(socketDir)
-	})
+	// Both this test's tmux calls and the ones inside cleanupOrphanedSessions
+	// inherit the environment, so the isolation needs no production seam.
+	tmuxtest.Isolate(t)
 
 	if got := db.DefaultPath(); got != dbPath {
 		t.Skipf("db.DefaultPath() does not honor WORKTREE_DB_PATH (got %q)", got)

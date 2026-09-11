@@ -31,6 +31,7 @@ import (
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/tasksummary"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // TaskEvent represents a change to a task.
@@ -902,6 +903,16 @@ func agentSendTargetForPane(claudePaneID, windowTarget string) string {
 // agentSendTarget resolves the send-keys target for a task's agent pane,
 // reading the persisted pane id from the database. See agentSendTargetForPane.
 func (e *Executor) agentSendTarget(taskID int64, windowTarget string) string {
+	// A tagged pane says what it is; prefer that to a stored ID, which tmux may
+	// since have given to a different pane.
+	if windowTarget != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		pane := taggedPane(ctx, windowTarget, tmuxctl.RoleAgent)
+		cancel()
+		if pane != "" {
+			return pane
+		}
+	}
 	claudePaneID := ""
 	if t, err := e.db.GetTask(taskID); err == nil && t != nil {
 		claudePaneID = t.ClaudePaneID
@@ -1050,7 +1061,7 @@ func (e *Executor) getClaudePID(taskID int64) int {
 	windowName := TmuxWindowName(taskID)
 
 	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -1086,7 +1097,7 @@ func GetClaudePIDFromPane(paneID string) int {
 	defer cancel()
 
 	// Get the PID of the process in this pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "display-message", "-t", paneID, "-p", "#{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -3335,7 +3346,8 @@ func ensureTmuxDaemon() (string, error) {
 	daemonSession := getDaemonSessionName()
 
 	// Create it with a placeholder window that stays alive (empty windows exit immediately)
-	cmd := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null")
+	args := append([]string{"new-session", "-d", "-s", daemonSession}, tmuxctl.DefaultSizeArgs()...)
+	cmd := tmuxCmd(ctx, append(args, "-n", "_placeholder", "tail", "-f", "/dev/null")...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Check if it failed because session already exists (race condition with another process)
@@ -3349,6 +3361,8 @@ func ensureTmuxDaemon() (string, error) {
 	if tmuxCmd(ctx, "has-session", "-t", daemonSession).Run() != nil {
 		return "", fmt.Errorf("session %s not found after creation", daemonSession)
 	}
+	// New task windows start at this size while nobody is attached.
+	_ = tmuxCmd(ctx, "set-option", "-t", daemonSession, "default-size", tmuxctl.DefaultSize()).Run()
 
 	return daemonSession, nil
 }
@@ -4889,6 +4903,13 @@ func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID 
 		return
 	}
 	shellPaneID := strings.TrimSpace(string(shellPaneOut))
+
+	// Tag them too: this runs right after every window and shell is made, so
+	// every task pane says what it is (see tmuxctl.PaneRoleOption).
+	tagPane(ctx, claudePaneID, taskID, tmuxctl.RoleAgent)
+	if shellPaneID != claudePaneID {
+		tagPane(ctx, shellPaneID, taskID, tmuxctl.RoleShell)
+	}
 
 	// Save to database
 	if err := e.db.UpdateTaskPaneIDs(taskID, claudePaneID, shellPaneID); err != nil {
@@ -7211,7 +7232,7 @@ func (e *Executor) getPiPID(taskID int64) int {
 	windowName := TmuxWindowName(taskID)
 
 	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}

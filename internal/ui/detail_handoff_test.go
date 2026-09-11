@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,8 +14,7 @@ import (
 
 func TestDetailExitWaitsForPaneWorkerWithoutBlockingBoard(t *testing.T) {
 	app, _ := refreshTestModel(t)
-	released := make(chan struct{})
-	detail := &DetailModel{task: &db.Task{ID: 1}, executorLockRelease: func() { close(released) }}
+	detail := &DetailModel{task: &db.Task{ID: 1}, viewerPaneID: "%qa-viewer"}
 	app.detailView, app.currentView = detail, ViewDetail
 	gate := make(chan struct{})
 	worker := detail.paneCommand(func() tea.Msg { <-gate; return panesJoinedMsg{} })
@@ -28,9 +26,9 @@ func TestDetailExitWaitsForPaneWorkerWithoutBlockingBoard(t *testing.T) {
 	go func() { done <- cleanup() }()
 	// Cleanup must wait even when a registered worker has not started yet.
 	select {
-	case <-released:
+	case <-done:
 		t.Fatal("cleanup overtook registered pane work")
-	default:
+	case <-time.After(50 * time.Millisecond):
 	}
 	oldResult := make(chan tea.Msg, 1)
 	go func() { oldResult <- worker() }()
@@ -41,10 +39,8 @@ func TestDetailExitWaitsForPaneWorkerWithoutBlockingBoard(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cleanup did not finish")
 	}
-	select {
-	case <-released:
-	default:
-		t.Fatal("executor ownership not released")
+	if detail.viewerPaneID != "" {
+		t.Fatal("view not closed")
 	}
 	app.Update(<-oldResult)
 	if app.detailView != nil || app.currentView != ViewDashboard {
@@ -102,22 +98,9 @@ func TestPaneHealthRunsOutsideInputLoopAndRejectsStalePane(t *testing.T) {
 	}
 }
 
-func TestPaneReturnRecreatesVanishedDaemonSession(t *testing.T) {
-	root := t.TempDir()
-	state := filepath.Join(root, "created")
-	stub := "#!/bin/sh\ncase \"$1\" in\nnew-window) exit 1;;\nnew-session) touch '" + state + "';;\nlist-windows) if [ -f '" + state + "' ]; then echo '@qa:task-1'; else exit 1; fi;;\n*) exit 1;;\nesac\n"
-	if err := os.WriteFile(filepath.Join(root, "tmux"), []byte(stub), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-	detail := &DetailModel{task: &db.Task{ID: 1}}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if got := detail.findOrCreateTaskWindow(ctx, "task-daemon-qa", "task-1"); got != "@qa" {
-		t.Fatalf("destination not recovered: %q", got)
-	}
-}
-
+// Back must return to the board at once even when tmux is slow and failing,
+// and the cleanup cannot fail in a way that keeps the view: nothing was
+// borrowed, so there is nothing left to give back.
 func TestDetailExitWithSlowTmux(t *testing.T) {
 	app, _ := refreshTestModel(t)
 	root := t.TempDir()
@@ -131,18 +114,21 @@ func TestDetailExitWithSlowTmux(t *testing.T) {
 	if err := app.db.CreateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	detail := &DetailModel{task: task, database: app.db, claudePaneID: "%qa", tuiPaneID: "%qa-ui"}
+	detail := &DetailModel{task: task, database: app.db, claudePaneID: "%qa", viewerPaneID: "%qa-viewer", tuiPaneID: "%qa-ui"}
 	app.detailView, app.currentView = detail, ViewDetail
 	start := time.Now()
 	_, cmd := app.updateDetail(tea.KeyMsg{Type: tea.KeyEsc})
 	t.Logf("Back scheduling: %.3f ms", float64(time.Since(start).Microseconds())/1000)
+	if app.detailView != nil || app.currentView != ViewDashboard {
+		t.Fatal("Back did not return to the board")
+	}
 	start = time.Now()
 	app.Update(cmd())
 	t.Logf("Background cleanup: %.3f ms", float64(time.Since(start).Microseconds())/1000)
-	if app.detailView != detail || app.currentView != ViewDetail {
-		t.Fatal("failed handoff allowed another detail to replace the preserved pane")
+	if app.detailView != nil || app.currentView != ViewDashboard || app.detailCleanupInFlight {
+		t.Fatal("cleanup against a failing tmux did not finish on the board")
 	}
-	if detail.claudePaneID != "%qa" {
-		t.Fatal("failed destination destroyed executor pane state")
+	if detail.viewerPaneID != "" || detail.claudePaneID != "" {
+		t.Fatal("view state survived cleanup")
 	}
 }

@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -23,9 +22,9 @@ func (m *DetailModel) showRemoteShellPane(ctx context.Context, loc executor.Remo
 	if _, err := executor.InspectRemoteTerminal(ctx, m.task, loc.WorkDir, true); err != nil {
 		return err
 	}
-	out, err := exec.CommandContext(ctx, "tmux", "split-window", "-h", "-d",
+	out, err := uiTmux(ctx, "split-window", "-h", "-d",
 		"-l", m.getShellPaneWidth(), "-t", m.remotePaneID, "-P", "-F", "#{pane_id}",
-		executor.RemoteShellAttachScript(m.task, loc)).Output()
+		diesWithTUI(executor.RemoteShellAttachScript(m.task, loc))).Output()
 	if err != nil {
 		return fmt.Errorf("could not open remote shell view: %w", err)
 	}
@@ -33,7 +32,7 @@ func (m *DetailModel) showRemoteShellPane(ctx context.Context, loc executor.Remo
 	if m.remoteShellPaneID == "" {
 		return fmt.Errorf("remote shell view returned no pane ID")
 	}
-	_ = exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.remoteShellPaneID, "-T", "Shell — "+loc.Host).Run()
+	_ = uiTmux(ctx, "select-pane", "-t", m.remoteShellPaneID, "-T", "Shell — "+loc.Host).Run()
 	return nil
 }
 
@@ -53,7 +52,7 @@ func (m *DetailModel) toggleRemoteShellPane(loc executor.RemoteTaskLocation) err
 		}
 	} else {
 		// Detach the view without killing the shell process on the host.
-		if err := exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.remoteShellPaneID).Run(); err != nil {
+		if err := uiTmux(ctx, "kill-pane", "-t", m.remoteShellPaneID).Run(); err != nil {
 			return fmt.Errorf("could not hide remote shell: %w", err)
 		}
 		m.remoteShellPaneID = ""

@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // CursorExecutor implements TaskExecutor for the Cursor Agent CLI.
@@ -210,7 +211,7 @@ func (c *CursorExecutor) GetProcessID(taskID int64) int {
 
 	windowName := TmuxWindowName(taskID)
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}

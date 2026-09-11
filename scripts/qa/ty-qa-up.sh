@@ -11,7 +11,7 @@ PROJECT_PATH="$TY_QA_PROJECTS/$PROJECT"
 
 echo "==> Building ty -> $TY_BIN"
 mkdir -p "$TY_QA_ROOT"
-( cd "$TY_REPO_ROOT" && go build -o "$TY_BIN" ./cmd/task )
+( cd "$TY_REPO_ROOT" && go build -buildvcs=false -o "$TY_BIN" ./cmd/task )
 
 echo "==> Fresh isolated DB at $WORKTREE_DB_PATH"
 rm -f "$WORKTREE_DB_PATH"
