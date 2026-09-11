@@ -109,16 +109,31 @@ pane · `Esc` close.
 ## Task view — the agent never leaves the daemon
 
 ```
-scripts/qa/ty-qa-views.sh      # PASS/FAIL per check, exits non-zero on any failure
+scripts/qa/ty-qa-views.sh       # the everyday paths (~3 min)
+scripts/qa/ty-qa-view-keys.sh   # real key bytes through every tmux layer (~2 min)
+scripts/qa/ty-qa-view-edges.sh  # bursts, quits, crashes, windows closing (~4 min)
 ```
 
-Run this after touching the detail view's pane code (`internal/ui/detail_view.go`),
-`internal/tmuxctl`, or how the executor creates task windows. On its own isolated
-instance, with fake agents only, it opens a task and checks that the agent shows
-through the view and takes keystrokes. It then hides and shows the shell, switches
-tasks, reloads the TUI mid-view, opens the same task from a second TUI, and runs
-`ty` inside a separate tmux server standing in for your own. After every step it
-checks that no task pane has moved out of the daemon session.
+Each prints PASS/FAIL per check and exits non-zero on any failure. Run all three
+after touching the detail view's pane code (`internal/ui/detail_view.go`),
+`internal/tmuxctl`, or how the executor creates task windows. Each uses its own
+isolated instance with fake agents only.
+
+- **`ty-qa-views.sh`** opens a task and checks that the agent shows through the
+  view and takes keystrokes. It then hides and shows the shell, switches tasks,
+  reloads the TUI mid-view, opens the same task from a second TUI, and runs `ty`
+  inside a separate tmux server standing in for your own. After every step it
+  checks that no task pane has moved out of the daemon session.
+- **`ty-qa-view-keys.sh`** attaches a client to the TUI's session and types the
+  exact bytes a terminal sends. It covers the Shift+arrow cycle (with the shell
+  shown and hidden), typing, four Shift+Enter encodings (each must arrive exactly
+  as through a direct single-layer attach) and the mouse wheel.
+- **`ty-qa-view-edges.sh`** covers twelve task switches in a row, ctrl+c and
+  `kill -9` of the TUI mid-view, and `ty open` typed outside tmux. It also closes
+  a task's window while it is on screen. A finished task is then left alone. A
+  running one gets its agent back once the TUI's 60-second wait for the daemon
+  runs out. The `claude` on its PATH is a fake and its Claude config dir is a
+  throwaway, so that restart never starts a real session.
 
 ## Pipeline stress test — slow init + concurrency
 
