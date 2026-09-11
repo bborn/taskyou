@@ -1011,13 +1011,14 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 			return m.setupRemotePane(remoteLoc)
 		}
 
-		// Cleanup and resume can invoke tmux/process checks. Keep them with the
-		// asynchronous pane setup so the detail view can paint immediately.
+		// Cleanup can invoke tmux/process checks. Keep it with the asynchronous
+		// pane setup so the detail view can paint immediately.
+		//
+		// There is no SIGCONT step here any more: a suspended task's window is
+		// killed outright, so opening it falls through to startResumableSession,
+		// which relaunches the agent with --resume.
 		if m.executor != nil {
 			m.executor.CleanupDuplicateWindows(taskID)
-			if m.executor.IsSuspended(taskID) {
-				m.executor.ResumeTask(taskID)
-			}
 		}
 
 		// Resolve the actual UI session name (avoid prefix-matching the wrong

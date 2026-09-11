@@ -30,17 +30,15 @@ import (
 // TaskYou already creates an isolated git worktree per task, so we never pass
 // grok's own --worktree flag (that would nest a second worktree).
 type GrokExecutor struct {
-	executor       *Executor
-	logger         *log.Logger
-	suspendedTasks map[int64]time.Time
+	executor *Executor
+	logger   *log.Logger
 }
 
 // NewGrokExecutor creates a new Grok executor.
 func NewGrokExecutor(e *Executor) *GrokExecutor {
 	return &GrokExecutor{
-		executor:       e,
-		logger:         e.logger,
-		suspendedTasks: make(map[int64]time.Time),
+		executor: e,
+		logger:   e.logger,
 	}
 }
 
@@ -247,59 +245,6 @@ func (g *GrokExecutor) Kill(taskID int64) bool {
 		return false
 	}
 	g.logger.Info("Terminated Grok process", "task", taskID, "pid", pid)
-	delete(g.suspendedTasks, taskID)
-	return true
-}
-
-// Suspend pauses the Grok process for a task.
-func (g *GrokExecutor) Suspend(taskID int64) bool {
-	pid := g.GetProcessID(taskID)
-	if pid == 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		g.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-	if err := sendSIGTSTP(proc); err != nil {
-		g.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-	g.suspendedTasks[taskID] = time.Now()
-	g.logger.Info("Suspended Grok process", "task", taskID, "pid", pid)
-	g.executor.logLine(taskID, "system", "Grok suspended (idle timeout)")
-	return true
-}
-
-// IsSuspended reports whether the Grok process is suspended for a task.
-func (g *GrokExecutor) IsSuspended(taskID int64) bool {
-	_, suspended := g.suspendedTasks[taskID]
-	return suspended
-}
-
-// ResumeProcess resumes a previously suspended Grok process.
-func (g *GrokExecutor) ResumeProcess(taskID int64) bool {
-	if !g.IsSuspended(taskID) {
-		return false
-	}
-	pid := g.GetProcessID(taskID)
-	if pid == 0 {
-		delete(g.suspendedTasks, taskID)
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		delete(g.suspendedTasks, taskID)
-		return false
-	}
-	if err := sendSIGCONT(proc); err != nil {
-		g.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-	delete(g.suspendedTasks, taskID)
-	g.logger.Info("Resumed Grok process", "task", taskID, "pid", pid)
-	g.executor.logLine(taskID, "system", "Grok resumed")
 	return true
 }
 

@@ -18,17 +18,15 @@ import (
 
 // GeminiExecutor implements TaskExecutor for Google's Gemini CLI.
 type GeminiExecutor struct {
-	executor       *Executor
-	logger         *log.Logger
-	suspendedTasks map[int64]time.Time
+	executor *Executor
+	logger   *log.Logger
 }
 
 // NewGeminiExecutor creates a new Gemini executor.
 func NewGeminiExecutor(e *Executor) *GeminiExecutor {
 	return &GeminiExecutor{
-		executor:       e,
-		logger:         e.logger,
-		suspendedTasks: make(map[int64]time.Time),
+		executor: e,
+		logger:   e.logger,
 	}
 }
 
@@ -224,59 +222,6 @@ func (g *GeminiExecutor) Kill(taskID int64) bool {
 		return false
 	}
 	g.logger.Info("Terminated Gemini process", "task", taskID, "pid", pid)
-	delete(g.suspendedTasks, taskID)
-	return true
-}
-
-// Suspend pauses the Gemini process for a task.
-func (g *GeminiExecutor) Suspend(taskID int64) bool {
-	pid := g.GetProcessID(taskID)
-	if pid == 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		g.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-	if err := sendSIGTSTP(proc); err != nil {
-		g.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-	g.suspendedTasks[taskID] = time.Now()
-	g.logger.Info("Suspended Gemini process", "task", taskID, "pid", pid)
-	g.executor.logLine(taskID, "system", "Gemini suspended (idle timeout)")
-	return true
-}
-
-// IsSuspended reports whether the Gemini process is suspended for a task.
-func (g *GeminiExecutor) IsSuspended(taskID int64) bool {
-	_, suspended := g.suspendedTasks[taskID]
-	return suspended
-}
-
-// ResumeProcess resumes a previously suspended Gemini process.
-func (g *GeminiExecutor) ResumeProcess(taskID int64) bool {
-	if !g.IsSuspended(taskID) {
-		return false
-	}
-	pid := g.GetProcessID(taskID)
-	if pid == 0 {
-		delete(g.suspendedTasks, taskID)
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		delete(g.suspendedTasks, taskID)
-		return false
-	}
-	if err := sendSIGCONT(proc); err != nil {
-		g.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-	delete(g.suspendedTasks, taskID)
-	g.logger.Info("Resumed Gemini process", "task", taskID, "pid", pid)
-	g.executor.logLine(taskID, "system", "Gemini resumed")
 	return true
 }
 

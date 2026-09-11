@@ -6089,28 +6089,11 @@ func killSession(taskID int) error {
 
 // killSessionAcrossDaemons kills a task's tmux window across all task-daemon-* sessions.
 // Returns true if a window was found and killed.
+//
+// Thin wrapper over executor.KillTaskWindows so the CLI and the daemon's idle
+// sweep share one implementation of "tear down this task's window".
 func killSessionAcrossDaemons(taskID int) bool {
-	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
-	if err != nil {
-		return false
-	}
-
-	windowName := fmt.Sprintf("task-%d", taskID)
-	killed := false
-
-	for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
-		if !strings.HasPrefix(session, "task-daemon-") {
-			continue
-		}
-		windowTarget := fmt.Sprintf("%s:%s", session, windowName)
-		if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
-			continue // Window doesn't exist in this session
-		}
-		if err := osexec.Command("tmux", "kill-window", "-t", windowTarget).Run(); err == nil {
-			killed = true
-		}
-	}
-	return killed
+	return executor.KillTaskWindows(context.Background(), int64(taskID))
 }
 
 // suspendSessions kills agent processes for tasks while preserving their session IDs
@@ -6186,15 +6169,13 @@ func suspendSessions(taskIDs []int, all bool) {
 	totalFreedMB := 0
 	suspended := 0
 	for _, s := range toSuspend {
-		// Kill the tmux window (kills the agent process)
-		killed := killSessionAcrossDaemons(s.taskID)
-
-		// Clear tmux references in DB (window/pane IDs are now stale)
-		// but preserve claude_session_id for resume capability
-		database.ClearTaskTmuxIDs(int64(s.taskID))
-
-		// Also clear daemon_session since the window is gone
-		database.Exec(`UPDATE tasks SET daemon_session = '' WHERE id = ?`, int64(s.taskID))
+		// Kill the tmux window (kills the agent process), then clear the task's
+		// tmux placement while preserving claude_session_id for resume. Shared
+		// with the daemon's idle sweep so both mean the same thing by "suspended".
+		killed := executor.KillTaskWindows(context.Background(), int64(s.taskID))
+		if err := database.ClearTaskSessionPlacement(int64(s.taskID)); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("task-%d: %v", s.taskID, err)))
+		}
 
 		title := s.taskTitle
 		if len(title) > 40 {

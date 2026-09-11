@@ -18,17 +18,15 @@ import (
 
 // CodexExecutor implements TaskExecutor for OpenAI's Codex CLI.
 type CodexExecutor struct {
-	executor       *Executor
-	logger         *log.Logger
-	suspendedTasks map[int64]time.Time
+	executor *Executor
+	logger   *log.Logger
 }
 
 // NewCodexExecutor creates a new Codex executor.
 func NewCodexExecutor(e *Executor) *CodexExecutor {
 	return &CodexExecutor{
-		executor:       e,
-		logger:         e.logger,
-		suspendedTasks: make(map[int64]time.Time),
+		executor: e,
+		logger:   e.logger,
 	}
 }
 
@@ -284,70 +282,6 @@ func (c *CodexExecutor) Kill(taskID int64) bool {
 
 	c.logger.Info("Terminated Codex process", "task", taskID, "pid", pid)
 
-	// Clean up suspended task tracking
-	delete(c.suspendedTasks, taskID)
-
-	return true
-}
-
-// Suspend pauses the Codex process for a task.
-func (c *CodexExecutor) Suspend(taskID int64) bool {
-	pid := c.GetProcessID(taskID)
-	if pid == 0 {
-		return false
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		c.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-
-	if err := sendSIGTSTP(proc); err != nil {
-		c.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-
-	c.suspendedTasks[taskID] = time.Now()
-
-	c.logger.Info("Suspended Codex process", "task", taskID, "pid", pid)
-	c.executor.logLine(taskID, "system", "Codex suspended (idle timeout)")
-	return true
-}
-
-// IsSuspended checks if a task's Codex process is suspended.
-func (c *CodexExecutor) IsSuspended(taskID int64) bool {
-	_, suspended := c.suspendedTasks[taskID]
-	return suspended
-}
-
-// ResumeProcess resumes a suspended Codex process.
-func (c *CodexExecutor) ResumeProcess(taskID int64) bool {
-	if !c.IsSuspended(taskID) {
-		return false
-	}
-
-	pid := c.GetProcessID(taskID)
-	if pid == 0 {
-		delete(c.suspendedTasks, taskID)
-		return false
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		delete(c.suspendedTasks, taskID)
-		return false
-	}
-
-	if err := sendSIGCONT(proc); err != nil {
-		c.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-
-	delete(c.suspendedTasks, taskID)
-
-	c.logger.Info("Resumed Codex process", "task", taskID, "pid", pid)
-	c.executor.logLine(taskID, "system", "Codex resumed")
 	return true
 }
 

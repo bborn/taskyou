@@ -59,7 +59,6 @@ type Executor struct {
 	stopCh       chan struct{}
 
 	// Suspended task tracking
-	suspendedTasks map[int64]time.Time // taskID -> time when suspended
 
 	// Subscribers for real-time log updates (per-task)
 	subsMu sync.RWMutex
@@ -195,7 +194,6 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
 		cancelFuncs:     make(map[int64]context.CancelFunc),
-		suspendedTasks:  make(map[int64]time.Time),
 		silent:          true,
 		executorSlug:    slug,
 		executorName:    display,
@@ -227,7 +225,6 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
 		cancelFuncs:     make(map[int64]context.CancelFunc),
-		suspendedTasks:  make(map[int64]time.Time),
 		silent:          false,
 		executorSlug:    slug,
 		executorName:    display,
@@ -861,84 +858,32 @@ func (e *Executor) Interrupt(taskID int64) bool {
 	return true
 }
 
-// SuspendTask suspends a task's Claude process using SIGTSTP (same as Ctrl+Z) to save memory.
-// Returns true if successfully suspended.
-func (e *Executor) SuspendTask(taskID int64) bool {
-	pid := e.getClaudePID(taskID)
-	if pid == 0 {
-		return false
+// SuspendTaskSession suspends a task by tearing down its agent: the tmux window
+// is killed (taking the agent process with it) and the task's tmux placement is
+// cleared, while claude_session_id is preserved so `ty retry` — or simply
+// reopening the task — resumes the conversation with `--resume`.
+//
+// This is what actually reclaims memory. The previous implementation sent
+// SIGTSTP, which stops the process but leaves every page of it resident, so it
+// returned CPU and no RAM. A parked agent holding hundreds of megabytes is
+// exactly what the idle sweep exists to reclaim.
+//
+// Shared with `ty sessions suspend` so the manual and automatic paths cannot
+// drift on what "suspended" means. Returns true if a window was killed.
+func (e *Executor) SuspendTaskSession(taskID int64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	killed := KillTaskWindows(ctx, taskID)
+
+	if err := e.db.ClearTaskSessionPlacement(taskID); err != nil {
+		e.logger.Warn("failed to clear session placement", "task", taskID, "error", err)
 	}
 
-	// Send SIGTSTP to suspend the process (same as Ctrl+Z, allows Claude to handle gracefully)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		e.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
+	if killed {
+		e.logLine(taskID, "system", "Agent suspended (idle timeout); session preserved for resume")
 	}
-
-	if err := sendSIGTSTP(proc); err != nil {
-		e.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-
-	e.mu.Lock()
-	e.suspendedTasks[taskID] = time.Now()
-	e.mu.Unlock()
-
-	e.logger.Info("Suspended Claude process", "task", taskID, "pid", pid)
-	e.logLine(taskID, "system", "Claude suspended (idle timeout)")
-	return true
-}
-
-// ResumeTask resumes a suspended task's Claude process using SIGCONT.
-// Returns true if successfully resumed.
-func (e *Executor) ResumeTask(taskID int64) bool {
-	e.mu.RLock()
-	_, isSuspended := e.suspendedTasks[taskID]
-	e.mu.RUnlock()
-
-	if !isSuspended {
-		return false
-	}
-
-	pid := e.getClaudePID(taskID)
-	if pid == 0 {
-		// Process gone, clean up suspended state
-		e.mu.Lock()
-		delete(e.suspendedTasks, taskID)
-		e.mu.Unlock()
-		return false
-	}
-
-	// Send SIGCONT to resume the process
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		e.mu.Lock()
-		delete(e.suspendedTasks, taskID)
-		e.mu.Unlock()
-		return false
-	}
-
-	if err := sendSIGCONT(proc); err != nil {
-		e.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
-
-	e.logger.Info("Resumed Claude process", "task", taskID, "pid", pid)
-	e.logLine(taskID, "system", "Claude resumed")
-	return true
-}
-
-// IsSuspended checks if a task is currently suspended.
-func (e *Executor) IsSuspended(taskID int64) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	_, suspended := e.suspendedTasks[taskID]
-	return suspended
+	return killed
 }
 
 // agentSendTargetForPane returns the tmux send-keys target for a task's agent
@@ -962,6 +907,97 @@ func (e *Executor) agentSendTarget(taskID int64, windowTarget string) string {
 		claudePaneID = t.ClaudePaneID
 	}
 	return agentSendTargetForPane(claudePaneID, windowTarget)
+}
+
+// taskWindowTargets parses `tmux list-sessions -F '#{session_name}'` output and
+// returns the "<session>:<window>" targets a task's window could occupy.
+//
+// Every daemon generation is searched, not just the current one: a restarted
+// daemon leaves its old task-daemon-<pid> session holding the live task windows,
+// so assuming the running daemon's own session name silently misses them. Only
+// task-daemon-* sessions are considered, so the sweep can never reach into the
+// user's own tmux sessions.
+func taskWindowTargets(sessionList string, taskID int64) []string {
+	windowName := TmuxWindowName(taskID)
+	var targets []string
+	for _, session := range strings.Split(strings.TrimSpace(sessionList), "\n") {
+		session = strings.TrimSpace(session)
+		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+		targets = append(targets, session+":"+windowName)
+	}
+	return targets
+}
+
+// blockedIdleDuration reports how long a blocked task has been parked, and
+// whether that is measurable at all.
+//
+// It reads completed_at, not updated_at. updated_at is bumped by *any* write to
+// the row — PR info refreshes, log appends, pane-ID updates — several of which
+// the daemon performs on its own schedule, so a task parked for days reads as
+// freshly active and never crosses the idle threshold. completed_at is stamped
+// only when a task that genuinely started transitions to blocked.
+//
+// A nil completed_at means the task never ran: 'blocked' also covers a pipeline
+// step staged behind its dependencies. Those have no agent process to reclaim,
+// so they are not suspendable and report ok=false.
+func blockedIdleDuration(task *db.Task, now time.Time) (time.Duration, bool) {
+	if task == nil || task.CompletedAt == nil || task.CompletedAt.Time.IsZero() {
+		return 0, false
+	}
+	return now.Sub(task.CompletedAt.Time), true
+}
+
+// KillTaskWindows kills a task's tmux window in every daemon session that holds
+// one, taking the agent process with it. Returns true if any window was killed.
+//
+// Package-level so `ty sessions suspend` can reuse it without constructing an
+// Executor: the CLI and the daemon sweep must tear a session down the same way.
+func KillTaskWindows(ctx context.Context, taskID int64) bool {
+	out, err := tmuxCmd(ctx, "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return false
+	}
+
+	killed := false
+	for _, target := range taskWindowTargets(string(out), taskID) {
+		// Skip targets whose window does not exist in that session, so an absent
+		// window is not mistaken for a failed kill.
+		if err := tmuxCmd(ctx, "list-panes", "-t", target).Run(); err != nil {
+			continue
+		}
+		if err := tmuxCmd(ctx, "kill-window", "-t", target).Run(); err == nil {
+			killed = true
+		}
+	}
+	return killed
+}
+
+// idleSuspendListOptions selects the blocked tasks the idle sweep examines.
+//
+// The limit is explicitly unlimited. ListTasks caps an unset limit at 100 and
+// orders blocked tasks most-recently-parked first, so on a board with more than
+// 100 blocked tasks the longest-parked ones — precisely the ones holding agents
+// the sweep exists to reclaim — would fall off the end of the page and never be
+// seen. The rows are cheap; the filtering happens in eligibleForIdleSuspend.
+func idleSuspendListOptions() db.ListTasksOptions {
+	return db.ListTasksOptions{Status: db.StatusBlocked, Limit: -1}
+}
+
+// eligibleForIdleSuspend filters blocked tasks down to those parked longer than
+// timeout. Separated from the sweep so the selection rule is testable without a
+// live daemon, tmux server, or agent process.
+func eligibleForIdleSuspend(tasks []*db.Task, now time.Time, timeout time.Duration) []*db.Task {
+	var eligible []*db.Task
+	for _, task := range tasks {
+		idle, ok := blockedIdleDuration(task, now)
+		if !ok || idle < timeout {
+			continue
+		}
+		eligible = append(eligible, task)
+	}
+	return eligible
 }
 
 // findPanesForWindow parses tmux list-panes output and returns PIDs for panes
@@ -1245,11 +1281,6 @@ func (e *Executor) KillClaudeProcess(taskID int64) bool {
 	}
 
 	e.logger.Info("Terminated Claude process", "task", taskID, "pid", pid)
-
-	// Clean up suspended task tracking if present
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
 
 	return true
 }
@@ -1658,35 +1689,25 @@ func (e *Executor) refreshActivePRInfo() {
 
 // suspendIdleBlockedTasks finds blocked tasks that have been idle and suspends their Claude processes.
 func (e *Executor) suspendIdleBlockedTasks() {
-	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 100})
+	tasks, err := e.db.ListTasks(idleSuspendListOptions())
 	if err != nil {
 		return
 	}
 
-	for _, task := range tasks {
-		// Skip if already suspended
-		e.mu.RLock()
-		_, alreadySuspended := e.suspendedTasks[task.ID]
-		e.mu.RUnlock()
-		if alreadySuspended {
+	now := time.Now()
+	timeout := e.getSuspendIdleTimeout()
+
+	for _, task := range eligibleForIdleSuspend(tasks, now, timeout) {
+		// Only tasks that still hold a live agent process cost anything to leave
+		// parked. This also skips anything already suspended: its window is gone,
+		// so there is no PID to find.
+		if pid := e.getClaudePID(task.ID); pid == 0 {
 			continue
 		}
 
-		// Check if task has been blocked for long enough
-		// Use UpdatedAt as proxy for when it became blocked
-		if task.UpdatedAt.Time.IsZero() {
-			continue
-		}
-
-		idleDuration := time.Since(task.UpdatedAt.Time)
-		if idleDuration >= e.getSuspendIdleTimeout() {
-			// Check if there's actually a Claude process to suspend
-			pid := e.getClaudePID(task.ID)
-			if pid > 0 {
-				e.logger.Info("Suspending idle blocked task", "task", task.ID, "idle", idleDuration.Round(time.Second))
-				e.SuspendTask(task.ID)
-			}
-		}
+		idle, _ := blockedIdleDuration(task, now)
+		e.logger.Info("Suspending idle blocked task", "task", task.ID, "idle", idle.Round(time.Second))
+		e.SuspendTaskSession(task.ID)
 	}
 }
 
@@ -7235,11 +7256,6 @@ func (e *Executor) KillPiProcess(taskID int64) bool {
 	}
 
 	e.logger.Info("Terminated Pi process", "task", taskID, "pid", pid)
-
-	// Clean up suspended task tracking if present
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
 
 	return true
 }

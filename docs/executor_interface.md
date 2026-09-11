@@ -11,8 +11,18 @@ Task executors live in `internal/executor` and implement the `TaskExecutor` inte
 | `Execute(ctx, task, workDir, prompt)` | Start a brand-new session for the task. This must create/target the tmux daemon (`task-daemon-*`), spawn the CLI, attach the worktree environment variables (`WORKTREE_TASK_ID`, `WORKTREE_PORT`, `WORKTREE_PATH`, `WORKTREE_SESSION_ID`), ensure `ensureShellPane` and `configureTmuxWindow` are called, and then delegate polling to `Executor.pollTmuxSession`. All user-facing errors must be logged via `Executor.logLine`. |
 | `Resume(ctx, task, workDir, prompt, feedback)` | Resume a previous session if the CLI supports it, otherwise rerun using the full prompt + formatted feedback (Codex/Gemini do this). Should follow the same tmux setup as `Execute`. |
 | `BuildCommand(task, sessionID, prompt)` | Produce the exact shell command that the UI runs when a user manually opens the executor pane. This needs to mirror the environment + dangerous-mode behavior of `Execute` so the UI experience matches background execution. Remember to clean up temporary prompt files. |
-| `IsAvailable`/`GetProcessID`/`Kill` | `GetProcessID` must introspect tmux panes and operating-system processes to find the PID tied to the executor pane. `Kill` sends a SIGTERM (or CLI-specific shutdown) and clears any suspension bookkeeping so Task You can reclaim memory. |
-| `Suspend`/`IsSuspended`/`ResumeProcess` | Used by the idle-suspension logic. Implementations typically send SIGTSTP/SIGCONT and track timestamps in a `suspendedTasks` map so the executor knows whether it needs to resume. |
+| `IsAvailable`/`GetProcessID`/`Kill` | `GetProcessID` must introspect tmux panes and operating-system processes to find the PID tied to the executor pane. `Kill` sends a SIGTERM (or CLI-specific shutdown) so Task You can reclaim memory. |
+
+## Suspension
+
+Executors implement no suspend method. Idle suspension is handled centrally by
+`Executor.SuspendTaskSession`, which kills the task's tmux window (taking the CLI
+process with it) and clears the task's tmux placement while preserving
+`claude_session_id`. Reopening the task relaunches the CLI with `--resume`.
+
+Executors previously exposed `Suspend`/`IsSuspended`/`ResumeProcess` backed by
+SIGTSTP/SIGCONT. That only stopped the process and left its memory resident, so
+it was removed. Nothing about a new executor needs to opt into suspension.
 
 ## Common Expectations
 
