@@ -59,7 +59,6 @@ type Executor struct {
 	stopCh       chan struct{}
 
 	// Suspended task tracking
-	suspendedTasks map[int64]time.Time // taskID -> time when suspended
 
 	// Subscribers for real-time log updates (per-task)
 	subsMu sync.RWMutex
@@ -195,7 +194,6 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
 		cancelFuncs:     make(map[int64]context.CancelFunc),
-		suspendedTasks:  make(map[int64]time.Time),
 		silent:          true,
 		executorSlug:    slug,
 		executorName:    display,
@@ -227,7 +225,6 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
 		cancelFuncs:     make(map[int64]context.CancelFunc),
-		suspendedTasks:  make(map[int64]time.Time),
 		silent:          false,
 		executorSlug:    slug,
 		executorName:    display,
@@ -861,44 +858,15 @@ func (e *Executor) Interrupt(taskID int64) bool {
 	return true
 }
 
-// SuspendTask suspends a task's Claude process using SIGTSTP (same as Ctrl+Z) to save memory.
-// Returns true if successfully suspended.
-func (e *Executor) SuspendTask(taskID int64) bool {
-	pid := e.getClaudePID(taskID)
-	if pid == 0 {
-		return false
-	}
-
-	// Send SIGTSTP to suspend the process (same as Ctrl+Z, allows Claude to handle gracefully)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		e.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-
-	if err := sendSIGTSTP(proc); err != nil {
-		e.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-
-	e.mu.Lock()
-	e.suspendedTasks[taskID] = time.Now()
-	e.mu.Unlock()
-
-	e.logger.Info("Suspended Claude process", "task", taskID, "pid", pid)
-	e.logLine(taskID, "system", "Claude suspended (idle timeout)")
-	return true
-}
-
 // SuspendTaskSession suspends a task by tearing down its agent: the tmux window
 // is killed (taking the agent process with it) and the task's tmux placement is
 // cleared, while claude_session_id is preserved so `ty retry` — or simply
 // reopening the task — resumes the conversation with `--resume`.
 //
-// This is what actually reclaims memory. SuspendTask sends SIGTSTP, which stops
-// the process but leaves every page of it resident, so it returns CPU and no
-// RAM. A parked agent holding hundreds of megabytes is exactly what the idle
-// sweep exists to reclaim.
+// This is what actually reclaims memory. The previous implementation sent
+// SIGTSTP, which stops the process but leaves every page of it resident, so it
+// returned CPU and no RAM. A parked agent holding hundreds of megabytes is
+// exactly what the idle sweep exists to reclaim.
 //
 // Shared with `ty sessions suspend` so the manual and automatic paths cannot
 // drift on what "suspended" means. Returns true if a window was killed.
@@ -912,67 +880,10 @@ func (e *Executor) SuspendTaskSession(taskID int64) bool {
 		e.logger.Warn("failed to clear session placement", "task", taskID, "error", err)
 	}
 
-	// The SIGTSTP bookkeeping no longer describes this task: the process is gone,
-	// not stopped. Leaving a stale entry would make IsSuspended lie to the TUI.
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
-
 	if killed {
 		e.logLine(taskID, "system", "Agent suspended (idle timeout); session preserved for resume")
 	}
 	return killed
-}
-
-// ResumeTask resumes a suspended task's Claude process using SIGCONT.
-// Returns true if successfully resumed.
-func (e *Executor) ResumeTask(taskID int64) bool {
-	e.mu.RLock()
-	_, isSuspended := e.suspendedTasks[taskID]
-	e.mu.RUnlock()
-
-	if !isSuspended {
-		return false
-	}
-
-	pid := e.getClaudePID(taskID)
-	if pid == 0 {
-		// Process gone, clean up suspended state
-		e.mu.Lock()
-		delete(e.suspendedTasks, taskID)
-		e.mu.Unlock()
-		return false
-	}
-
-	// Send SIGCONT to resume the process
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		e.mu.Lock()
-		delete(e.suspendedTasks, taskID)
-		e.mu.Unlock()
-		return false
-	}
-
-	if err := sendSIGCONT(proc); err != nil {
-		e.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
-
-	e.logger.Info("Resumed Claude process", "task", taskID, "pid", pid)
-	e.logLine(taskID, "system", "Claude resumed")
-	return true
-}
-
-// IsSuspended checks if a task is currently suspended.
-func (e *Executor) IsSuspended(taskID int64) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	_, suspended := e.suspendedTasks[taskID]
-	return suspended
 }
 
 // agentSendTargetForPane returns the tmux send-keys target for a task's agent
@@ -1370,11 +1281,6 @@ func (e *Executor) KillClaudeProcess(taskID int64) bool {
 	}
 
 	e.logger.Info("Terminated Claude process", "task", taskID, "pid", pid)
-
-	// Clean up suspended task tracking if present
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
 
 	return true
 }
@@ -7350,11 +7256,6 @@ func (e *Executor) KillPiProcess(taskID int64) bool {
 	}
 
 	e.logger.Info("Terminated Pi process", "task", taskID, "pid", pid)
-
-	// Clean up suspended task tracking if present
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
 
 	return true
 }

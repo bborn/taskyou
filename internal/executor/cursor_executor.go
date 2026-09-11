@@ -33,17 +33,15 @@ import (
 // TaskYou already creates an isolated git worktree per task, so we never pass
 // Cursor's own --worktree flag (that would nest a second worktree).
 type CursorExecutor struct {
-	executor       *Executor
-	logger         *log.Logger
-	suspendedTasks map[int64]time.Time
+	executor *Executor
+	logger   *log.Logger
 }
 
 // NewCursorExecutor creates a new Cursor executor.
 func NewCursorExecutor(e *Executor) *CursorExecutor {
 	return &CursorExecutor{
-		executor:       e,
-		logger:         e.logger,
-		suspendedTasks: make(map[int64]time.Time),
+		executor: e,
+		logger:   e.logger,
 	}
 }
 
@@ -268,59 +266,6 @@ func (c *CursorExecutor) Kill(taskID int64) bool {
 		return false
 	}
 	c.logger.Info("Terminated Cursor process", "task", taskID, "pid", pid)
-	delete(c.suspendedTasks, taskID)
-	return true
-}
-
-// Suspend pauses the Cursor process for a task.
-func (c *CursorExecutor) Suspend(taskID int64) bool {
-	pid := c.GetProcessID(taskID)
-	if pid == 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		c.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-	if err := sendSIGTSTP(proc); err != nil {
-		c.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-	c.suspendedTasks[taskID] = time.Now()
-	c.logger.Info("Suspended Cursor process", "task", taskID, "pid", pid)
-	c.executor.logLine(taskID, "system", "Cursor suspended (idle timeout)")
-	return true
-}
-
-// IsSuspended reports whether the Cursor process is suspended for a task.
-func (c *CursorExecutor) IsSuspended(taskID int64) bool {
-	_, suspended := c.suspendedTasks[taskID]
-	return suspended
-}
-
-// ResumeProcess resumes a previously suspended Cursor process.
-func (c *CursorExecutor) ResumeProcess(taskID int64) bool {
-	if !c.IsSuspended(taskID) {
-		return false
-	}
-	pid := c.GetProcessID(taskID)
-	if pid == 0 {
-		delete(c.suspendedTasks, taskID)
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		delete(c.suspendedTasks, taskID)
-		return false
-	}
-	if err := sendSIGCONT(proc); err != nil {
-		c.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-	delete(c.suspendedTasks, taskID)
-	c.logger.Info("Resumed Cursor process", "task", taskID, "pid", pid)
-	c.executor.logLine(taskID, "system", "Cursor resumed")
 	return true
 }
 

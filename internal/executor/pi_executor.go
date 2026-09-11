@@ -61,16 +61,6 @@ func (p *PiExecutor) Kill(taskID int64) bool {
 	return p.executor.KillPiProcess(taskID)
 }
 
-// Suspend pauses the Pi process for a task.
-func (p *PiExecutor) Suspend(taskID int64) bool {
-	return p.executor.SuspendTask(taskID)
-}
-
-// IsSuspended checks if a task's Pi process is suspended.
-func (p *PiExecutor) IsSuspended(taskID int64) bool {
-	return p.executor.IsSuspended(taskID)
-}
-
 // BuildCommand returns the shell command to start an interactive Pi session.
 func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
 	// Get session ID for environment
