@@ -26,17 +26,15 @@ import (
 //   - openclaw tui --message "prompt" - Send initial message after connecting
 //   - openclaw tui --thinking <level> - Set reasoning depth (off/minimal/low/medium/high)
 type OpenClawExecutor struct {
-	executor       *Executor
-	logger         *log.Logger
-	suspendedTasks map[int64]time.Time
+	executor *Executor
+	logger   *log.Logger
 }
 
 // NewOpenClawExecutor creates a new OpenClaw executor.
 func NewOpenClawExecutor(e *Executor) *OpenClawExecutor {
 	return &OpenClawExecutor{
-		executor:       e,
-		logger:         e.logger,
-		suspendedTasks: make(map[int64]time.Time),
+		executor: e,
+		logger:   e.logger,
 	}
 }
 
@@ -239,59 +237,6 @@ func (o *OpenClawExecutor) Kill(taskID int64) bool {
 		return false
 	}
 	o.logger.Info("Terminated OpenClaw process", "task", taskID, "pid", pid)
-	delete(o.suspendedTasks, taskID)
-	return true
-}
-
-// Suspend pauses the OpenClaw process for a task.
-func (o *OpenClawExecutor) Suspend(taskID int64) bool {
-	pid := o.GetProcessID(taskID)
-	if pid == 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		o.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-	if err := sendSIGTSTP(proc); err != nil {
-		o.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-	o.suspendedTasks[taskID] = time.Now()
-	o.logger.Info("Suspended OpenClaw process", "task", taskID, "pid", pid)
-	o.executor.logLine(taskID, "system", "OpenClaw suspended (idle timeout)")
-	return true
-}
-
-// IsSuspended reports whether the OpenClaw process is suspended for a task.
-func (o *OpenClawExecutor) IsSuspended(taskID int64) bool {
-	_, suspended := o.suspendedTasks[taskID]
-	return suspended
-}
-
-// ResumeProcess resumes a previously suspended OpenClaw process.
-func (o *OpenClawExecutor) ResumeProcess(taskID int64) bool {
-	if !o.IsSuspended(taskID) {
-		return false
-	}
-	pid := o.GetProcessID(taskID)
-	if pid == 0 {
-		delete(o.suspendedTasks, taskID)
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		delete(o.suspendedTasks, taskID)
-		return false
-	}
-	if err := sendSIGCONT(proc); err != nil {
-		o.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-	delete(o.suspendedTasks, taskID)
-	o.logger.Info("Resumed OpenClaw process", "task", taskID, "pid", pid)
-	o.executor.logLine(taskID, "system", "OpenClaw resumed")
 	return true
 }
 

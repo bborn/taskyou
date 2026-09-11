@@ -29,17 +29,15 @@ import (
 //   - /undo, /redo - Revert or restore changes
 //   - /share - Generate shareable conversation links
 type OpenCodeExecutor struct {
-	executor       *Executor
-	logger         *log.Logger
-	suspendedTasks map[int64]time.Time
+	executor *Executor
+	logger   *log.Logger
 }
 
 // NewOpenCodeExecutor creates a new OpenCode executor.
 func NewOpenCodeExecutor(e *Executor) *OpenCodeExecutor {
 	return &OpenCodeExecutor{
-		executor:       e,
-		logger:         e.logger,
-		suspendedTasks: make(map[int64]time.Time),
+		executor: e,
+		logger:   e.logger,
 	}
 }
 
@@ -248,59 +246,6 @@ func (o *OpenCodeExecutor) Kill(taskID int64) bool {
 		return false
 	}
 	o.logger.Info("Terminated OpenCode process", "task", taskID, "pid", pid)
-	delete(o.suspendedTasks, taskID)
-	return true
-}
-
-// Suspend pauses the OpenCode process for a task.
-func (o *OpenCodeExecutor) Suspend(taskID int64) bool {
-	pid := o.GetProcessID(taskID)
-	if pid == 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		o.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
-	}
-	if err := sendSIGTSTP(proc); err != nil {
-		o.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-	o.suspendedTasks[taskID] = time.Now()
-	o.logger.Info("Suspended OpenCode process", "task", taskID, "pid", pid)
-	o.executor.logLine(taskID, "system", "OpenCode suspended (idle timeout)")
-	return true
-}
-
-// IsSuspended reports whether the OpenCode process is suspended for a task.
-func (o *OpenCodeExecutor) IsSuspended(taskID int64) bool {
-	_, suspended := o.suspendedTasks[taskID]
-	return suspended
-}
-
-// ResumeProcess resumes a previously suspended OpenCode process.
-func (o *OpenCodeExecutor) ResumeProcess(taskID int64) bool {
-	if !o.IsSuspended(taskID) {
-		return false
-	}
-	pid := o.GetProcessID(taskID)
-	if pid == 0 {
-		delete(o.suspendedTasks, taskID)
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		delete(o.suspendedTasks, taskID)
-		return false
-	}
-	if err := sendSIGCONT(proc); err != nil {
-		o.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-	delete(o.suspendedTasks, taskID)
-	o.logger.Info("Resumed OpenCode process", "task", taskID, "pid", pid)
-	o.executor.logLine(taskID, "system", "OpenCode resumed")
 	return true
 }
 
