@@ -1109,6 +1109,25 @@ func (db *DB) ClearTaskTmuxIDs(taskID int64) error {
 	return nil
 }
 
+// ClearTaskSessionPlacement tears down a task's tmux placement in one statement:
+// the window ID, both pane IDs, and the daemon session that owned the window.
+// It deliberately leaves claude_session_id alone — that is what `--resume` needs
+// to bring the conversation back, and dropping it turns a suspend into a
+// discard. Used by both the idle-suspend sweep and `ty sessions suspend`, which
+// must agree on what "suspended" means.
+func (db *DB) ClearTaskSessionPlacement(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks
+		SET tmux_window_id = '', claude_pane_id = '', shell_pane_id = '',
+		    daemon_session = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task session placement: %w", err)
+	}
+	return nil
+}
+
 // ClearTaskPaneIDs clears only the tmux pane IDs for a task, leaving the window
 // ID intact. Called when a task reaches a terminal state: its executor pane is
 // torn down, which frees the pane ID for tmux to recycle onto a *different*
