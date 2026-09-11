@@ -2907,7 +2907,9 @@ Examples:
 	upgradeCmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade task to the latest version",
-		Long:  "Downloads and installs the latest version of the task CLI from GitHub releases.",
+		Long: `Downloads and installs the latest version of the task CLI from GitHub releases.
+If a ty daemon is running, the installer then runs 'ty restart', so the daemon
+and open TUIs switch to the new version with agent sessions left running.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(dimStyle.Render("Checking for updates..."))
 

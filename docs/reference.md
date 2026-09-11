@@ -318,6 +318,14 @@ You can also specify a custom install directory:
 curl -fsSL https://taskyou.dev/install.sh | INSTALL_DIR=~/.local/bin bash
 ```
 
+### Upgrading
+
+`ty upgrade` runs the same install script. If a ty daemon is running, the script then runs `ty restart`. The daemon restarts and open TUIs reload the new binary in place, with agents left running. To install without restarting:
+
+```bash
+curl -fsSL https://taskyou.dev/install.sh | bash -s -- --no-restart
+```
+
 ### Build from source
 
 ```bash
@@ -362,6 +370,9 @@ reopen those once with the updated build to enable future automatic reloads.
 `POST /api/tui/reload` requests the same cooperative TUI reload through the HTTP API.
 `ty daemon restart` only restarts the daemon. `ty restart --hard` remains an explicit
 destructive reset that kills TaskYou tmux sessions.
+
+Upgrading does this for you: when a ty daemon is running, `ty upgrade` (and the
+install script it runs) finishes with `ty restart`.
 
 ### Maintenance commands
 
@@ -569,7 +580,17 @@ New installs run their agents on a private tmux server, `tmux -L taskyou`, so ty
 |---|---|
 | Attach to the agents by hand | `tmux -L taskyou attach -t task-daemon-<id>` (on the default server, plain `tmux attach`) |
 | Override the choice | Set `TASKYOU_TMUX_SOCKET=taskyou` (or `default`) for every ty process |
-| Move an existing install to the private server | Stop its agents with `ty restart --hard`, then `echo taskyou > ~/.local/share/task/tmux-socket` |
+| Move an existing install to the private server | See below |
+
+To move an existing install to the private server, first stop ty's agents on the default server; otherwise they keep running there, out of ty's sight. Then record the choice while nothing of ty's is running:
+
+1. Quit every open `ty`.
+2. `ty daemon stop`
+3. `tmux ls -F '#{session_name}' | grep -E '^task-(daemon|ui)-' | xargs -n1 tmux kill-session -t`. This stops ty's sessions on the default server and leaves your own alone.
+4. `echo taskyou > ~/.local/share/task/tmux-socket`
+5. `ty`
+
+Opening a task afterwards resumes its Claude session. `ty restart --hard` cannot stand in for steps 1–3: it relaunches `ty` at once, and that reads the old choice before step 4 can change it.
 
 `ty` still works inside your own tmux: the TUI stays in your session, and the task view attaches across to the agent server.
 
