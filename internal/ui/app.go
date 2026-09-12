@@ -1863,51 +1863,77 @@ func (m *AppModel) viewNewTaskConfirm() string {
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, formView))
 }
 
+// Banner colours for the dashboard header. Every banner is the same shape — a
+// full-width bar with a coloured background — so only the palette differs.
+const (
+	bannerWarnBg    = "#FFCC00" // yellow: missing executor / notifications
+	bannerWarnFg    = "#000000"
+	bannerDangerBg  = "#E06C75" // red: global dangerous mode
+	bannerDangerFg  = "#FFFFFF"
+	bannerUpgradeBg = "#61AFEF" // blue: a newer release is available
+	bannerUpgradeFg = "#FFFFFF"
+
+	// bannerPadding is the horizontal padding inside a banner, per side.
+	bannerPadding = 2
+)
+
+// renderBanner renders one dashboard banner: a single full-width row of text on
+// a coloured background.
+//
+// Staying on one row matters. Banners sit above the kanban board, so text that
+// wraps steals rows from the board, and text wider than the terminal makes the
+// whole dashboard wider than the terminal — which the terminal then re-wraps,
+// scrambling every column of the board. Notification text is user data (task
+// titles, git and gh error output), so it is neither short nor reliably single
+// line: newlines are folded to spaces and the result is truncated to fit.
+func renderBanner(text string, bg, fg lipgloss.Color, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	text = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ", "\t", " ").Replace(text)
+
+	if inner := width - 2*bannerPadding; inner > 0 {
+		text = ansi.Truncate(text, inner, "…")
+	}
+
+	return lipgloss.NewStyle().
+		Background(bg).
+		Foreground(fg).
+		Bold(true).
+		Padding(0, bannerPadding).
+		Width(width).
+		MaxHeight(1).
+		Render(text)
+}
+
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
 	// Show warning banner if no executors are available
 	if len(m.availableExecutors) == 0 {
-		warnStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#FFCC00")). // Yellow background
-			Foreground(lipgloss.Color("#000000")).
-			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		headerParts = append(headerParts, warnStyle.Render(IconBlocked()+" No AI executor installed. See: https://code.claude.com/docs/en/overview"))
+		headerParts = append(headerParts, renderBanner(
+			IconBlocked()+" No AI executor installed. See: https://code.claude.com/docs/en/overview",
+			bannerWarnBg, bannerWarnFg, m.width))
 	}
 
 	// Show global dangerous mode banner if the entire system is in dangerous mode
 	if IsGlobalDangerousMode() {
-		dangerStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#E06C75")). // Red background
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		headerParts = append(headerParts, dangerStyle.Render(IconBlocked()+" DANGEROUS MODE ENABLED"))
+		headerParts = append(headerParts, renderBanner(
+			IconBlocked()+" DANGEROUS MODE ENABLED",
+			bannerDangerBg, bannerDangerFg, m.width))
 	}
 
 	// Show version upgrade notification
 	if m.latestRelease != nil {
-		upgradeStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#61AFEF")). // Blue background
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		headerParts = append(headerParts, upgradeStyle.Render(
-			fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", m.currentVersion, m.latestRelease.Version)))
+		headerParts = append(headerParts, renderBanner(
+			fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", m.currentVersion, m.latestRelease.Version),
+			bannerUpgradeBg, bannerUpgradeFg, m.width))
 	}
 
 	// Show notification banner if active
 	if m.notification != "" && time.Now().Before(m.notifyUntil) {
-		notifyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#FFCC00")).
-			Foreground(lipgloss.Color("#000000")).
-			Bold(true).
-			Padding(0, 2)
-		headerParts = append(headerParts, notifyStyle.Render(m.notification))
+		headerParts = append(headerParts, renderBanner(m.notification, bannerWarnBg, bannerWarnFg, m.width))
 	} else {
 		m.notification = "" // Clear expired notification
 		m.notifyTaskID = 0
