@@ -16,7 +16,7 @@ lumen_preflight
 if ! lumen_diff_target; then
   # git diff never sees untracked files, and a task whose whole output is new
   # files is common — say so rather than the misleading bare "no changes".
-  untracked=$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')
+  untracked=$(git ls-files --others --exclude-standard | lumen_count)
   if [[ "$untracked" != "0" ]]; then
     echo "no changes ($untracked untracked file(s) — git add to include them)"
   else

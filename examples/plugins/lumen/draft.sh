@@ -18,7 +18,7 @@ if git diff --cached --quiet 2>/dev/null; then
   exit 0
 fi
 
-files=$(git diff --cached --name-only | wc -l | tr -d ' ')
+files=$(git diff --cached --name-only | lumen_count)
 
 lumen_banner "drafted commit message for $files staged file(s)"
 echo

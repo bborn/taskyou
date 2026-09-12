@@ -69,7 +69,7 @@ is local, free, and sends nothing anywhere.
 ## lumen's observed contract
 
 Measured against lumen 2.31.0 on 2026-07-20. `lib.sh` is built around this
-table and cites it inline.
+table and points back at it.
 
 | Command | Condition | Exit | Payload |
 |---|---|---|---|

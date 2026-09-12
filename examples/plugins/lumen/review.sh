@@ -15,20 +15,20 @@ source "${TASK_PLUGIN_DIR:-$(dirname "$0")}/lib.sh"
 
 lumen_preflight
 
-if ! base=$(git merge-base origin/HEAD HEAD 2>/dev/null); then
+if ! base=$(lumen_base); then
   echo "cannot resolve base branch (no origin/HEAD)"
   exit 0
 fi
 
 short=$(git rev-parse --short "$base")
+commits=$(lumen_commits_since "$base")
 
-if [[ "$(git rev-list --count "$base..HEAD" 2>/dev/null || echo 0)" == "0" ]]; then
+if [[ "$commits" == "0" ]]; then
   echo "no commits vs $short"
   exit 0
 fi
 
-commits=$(git rev-list --count "$base..HEAD")
-files=$(git diff --name-only "$base..HEAD" | wc -l | tr -d ' ')
+files=$(git diff --name-only "$base..HEAD" | lumen_count)
 
 lumen_banner "reviewed $commits commit(s), $files file(s) vs $short"
 echo

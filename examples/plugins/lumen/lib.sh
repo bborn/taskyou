@@ -3,36 +3,9 @@
 # Shared helpers for the lumen plugin. Sourced by the action scripts; this file
 # is never executed directly and must have no top-level side effects.
 #
-# ---------------------------------------------------------------------------
-# lumen's observed contract (verified against lumen 2.31.0, 2026-07-20)
-# ---------------------------------------------------------------------------
-#
-#   command                     | condition           | exit | payload stream
-#   ----------------------------+---------------------+------+----------------
-#   lumen explain               | success             |  0   | stdout
-#   lumen explain --staged      | success             |  0   | stdout
-#   lumen explain <ref|range>   | success             |  0   | stdout
-#   lumen draft [-c CTX]        | success             |  0   | stdout (clean)
-#   lumen explain               | nothing to diff     |  1   | stderr "diff is empty"
-#   lumen explain --staged      | nothing staged      |  1   | stderr "diff (staged) is empty"
-#   lumen draft                 | nothing staged      |  1   | stderr "diff (staged) is empty"
-#   any                         | outside a git repo  |  1   | stderr "not a repository"
-#   lumen explain <bad ref>     | invalid reference   |  1   | stderr "invalid reference: X"
-#   any                         | no provider/API key |  1   | stderr "AI request failed: ..."
-#
-# Every failure is exit 1 with an ANSI-coloured `error: <msg>` on stderr and an
-# empty stdout. Because the codes carry no information, lumen_run surfaces
-# lumen's own message verbatim rather than trying to interpret the code.
-#
-# Two properties of that table drive the helpers below:
-#
-#  1. `explain` writes a `# Entity:` / `# Provider:` header and an in-band
-#     progress spinner to *stdout*, ahead of the prose. ty shows line 1 of an
-#     action's output as the TUI banner, so that preamble has to go —
-#     see lumen_strip_preamble. (`draft` output is already clean.)
-#  2. ty's RunAction uses exec.Cmd.CombinedOutput(), which merges stderr into
-#     what the user sees. Every lumen call therefore captures stderr into a
-#     temp file so it only ever surfaces on failure — see lumen_run.
+# The lumen behaviour these helpers are built around — exit codes, which stream
+# each payload lands on, the `explain` preamble — is tabulated in README.md
+# under "lumen's observed contract"; the helpers below cite it where it bites.
 #
 # Provider credentials come from LUMEN_API_KEY / LUMEN_AI_PROVIDER /
 # LUMEN_AI_MODEL, from ./lumen.config.json or ~/.config/lumen/lumen.config.json,
@@ -72,33 +45,38 @@ lumen_preflight() {
 # (good) error message surfaces, while a false negative would refuse to run on
 # a working setup.
 lumen_have_provider() {
-  if [[ -n "${LUMEN_API_KEY:-}" ]]; then
-    return 0
-  fi
   # Ollama runs locally and needs no key.
-  if [[ "${LUMEN_AI_PROVIDER:-}" == "ollama" ]]; then
-    return 0
-  fi
-  if [[ -f ./lumen.config.json || -f "${XDG_CONFIG_HOME:-$HOME/.config}/lumen/lumen.config.json" ]]; then
-    return 0
-  fi
+  [[ -n "${LUMEN_API_KEY:-}" || "${LUMEN_AI_PROVIDER:-}" == "ollama" ]] && return 0
+  [[ -f ./lumen.config.json ]] && return 0
+  [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/lumen/lumen.config.json" ]] && return 0
+
   local var
   for var in OPENAI_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY \
     DEEPSEEK_API_KEY OPENROUTER_API_KEY XAI_API_KEY; do
-    if [[ -n "${!var:-}" ]]; then
-      return 0
-    fi
+    [[ -n "${!var:-}" ]] && return 0
   done
   return 1
 }
+
+# lumen_count: count lines on stdin, without wc's leading padding.
+lumen_count() { wc -l | tr -d ' '; }
+
+# lumen_base: echo the merge-base of this branch and its base branch, or return
+# 1. origin/HEAD is routinely unresolvable in a ty worktree (branch never
+# pushed, detached HEAD, no remote), so every caller must handle the failure.
+lumen_base() { git merge-base origin/HEAD HEAD 2>/dev/null; }
+
+# lumen_commits_since: how many commits HEAD is ahead of $1 (0 if unknowable).
+lumen_commits_since() { git rev-list --count "$1..HEAD" 2>/dev/null || echo 0; }
 
 # lumen_diff_target: pick what to summarise, first non-empty wins.
 #
 #   1. staged changes    2. working tree    3. this branch vs its base
 #
-# Sets LUMEN_MODE (staged|worktree|range), LUMEN_RANGE (range mode only) and
-# LUMEN_TARGET_LABEL, and returns 0. Returns 1 when there is nothing to diff at
-# all; the caller is expected to print one line and exit 0.
+# A mode is nothing more than the one argument `git diff` and `lumen explain`
+# each need for it — which differ (--cached vs --staged) — so each mode is
+# declared once, here, and the two consumers below just splat it. Returns 1
+# when there is nothing to diff at all; the caller prints one line and exits 0.
 #
 # Sharp edge, deliberately surfaced rather than hidden: on a pipeline step the
 # shared branch already carries sibling steps' commits, so mode 3's range spans
@@ -106,63 +84,55 @@ lumen_have_provider() {
 # summarised in its banner — the output is never ambiguous about its scope.
 # shellcheck disable=SC2034  # LUMEN_* globals are read by the action scripts.
 lumen_diff_target() {
-  LUMEN_MODE=""
-  LUMEN_RANGE=""
+  LUMEN_DIFF_ARG=""
+  LUMEN_EXPLAIN_ARG=""
   LUMEN_TARGET_LABEL=""
 
   if ! git diff --cached --quiet 2>/dev/null; then
-    LUMEN_MODE="staged"
+    LUMEN_DIFF_ARG="--cached"
+    LUMEN_EXPLAIN_ARG="--staged"
     LUMEN_TARGET_LABEL="staged changes"
     return 0
   fi
 
   if ! git diff --quiet 2>/dev/null; then
-    LUMEN_MODE="worktree"
     LUMEN_TARGET_LABEL="working tree"
     return 0
   fi
 
-  # origin/HEAD is routinely unresolvable in a ty worktree (branch never
-  # pushed, detached HEAD, no remote) — fall through rather than erroring.
   local base
-  if base=$(git merge-base origin/HEAD HEAD 2>/dev/null); then
-    if [[ "$(git rev-list --count "$base..HEAD" 2>/dev/null || echo 0)" != "0" ]]; then
-      LUMEN_MODE="range"
-      LUMEN_RANGE="$base..HEAD"
-      LUMEN_TARGET_LABEL="origin/HEAD..HEAD"
-      return 0
-    fi
+  if base=$(lumen_base) && [[ "$(lumen_commits_since "$base")" != "0" ]]; then
+    LUMEN_DIFF_ARG="$base..HEAD"
+    LUMEN_EXPLAIN_ARG="$base..HEAD"
+    LUMEN_TARGET_LABEL="origin/HEAD..HEAD"
+    return 0
   fi
 
   return 1
 }
 
 # lumen_changed_files: how many files the selected target touches.
+#
+# ${x:+"$x"} passes the argument when there is one and nothing at all when
+# there isn't: working-tree mode takes no argument, and a quoted "" would be an
+# empty pathspec rather than no pathspec. Same splat in lumen_explain_target.
 lumen_changed_files() {
-  case "$LUMEN_MODE" in
-  staged) git diff --cached --name-only ;;
-  worktree) git diff --name-only ;;
-  range) git diff --name-only "$LUMEN_RANGE" ;;
-  esac | wc -l | tr -d ' '
+  git diff --name-only ${LUMEN_DIFF_ARG:+"$LUMEN_DIFF_ARG"} | lumen_count
 }
 
-# lumen_explain_target: run `lumen explain` against the selected target. The
-# three modes need three different argument shapes, so this dispatches rather
-# than splatting a string.
+# lumen_explain_target: run `lumen explain` against the selected target.
 lumen_explain_target() {
-  case "$LUMEN_MODE" in
-  staged) lumen_run explain --staged ;;
-  worktree) lumen_run explain ;;
-  range) lumen_run explain "$LUMEN_RANGE" ;;
-  esac
+  lumen_run explain ${LUMEN_EXPLAIN_ARG:+"$LUMEN_EXPLAIN_ARG"}
 }
 
 # lumen_run: the single place lumen is invoked.
 #
 # stdout is captured, stderr goes to a temp file, and stdin is /dev/null so a
 # subcommand that wants a TTY fails fast instead of hanging until the 60s
-# action timeout. On success the preamble is stripped; on failure lumen's own
-# first stderr line is surfaced and the temp file is removed either way.
+# action timeout. The stderr capture is not optional: ty's RunAction uses
+# CombinedOutput(), so an unredirected provider warning would land in the TUI
+# banner. Every lumen failure is exit 1 with no further distinction, so on
+# failure we surface lumen's own first stderr line rather than read the code.
 lumen_run() {
   local errf rc out msg
   errf=$(mktemp -t lumen-err) || {
