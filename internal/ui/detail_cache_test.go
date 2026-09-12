@@ -135,7 +135,7 @@ func TestPendingPaneAction(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := pendingPaneAction(tc.task); got != tc.expected {
+			if got := pendingPaneAction(tc.task, false); got != tc.expected {
 				t.Errorf("pendingPaneAction(%s) = %v, want %v", tc.task.Status, got, tc.expected)
 			}
 		})

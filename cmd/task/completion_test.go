@@ -38,22 +38,27 @@ func TestCompletionCmdOutput(t *testing.T) {
 
 			// Capture output
 			old := os.Stdout
-			r, w, _ := os.Pipe()
+			w, err := os.CreateTemp(t.TempDir(), "completion-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
 			os.Stdout = w
 
 			rootCmd.SetArgs([]string{"completion", shell})
-			err := rootCmd.Execute()
+			err = rootCmd.Execute()
 
-			w.Close()
 			os.Stdout = old
 
 			if err != nil {
 				t.Fatalf("completion %s failed: %v", shell, err)
 			}
 
-			buf := make([]byte, 1024)
-			n, _ := r.Read(buf)
-			if n == 0 {
+			info, err := w.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() == 0 {
 				t.Errorf("completion %s produced no output", shell)
 			}
 		})

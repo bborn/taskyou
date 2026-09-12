@@ -481,7 +481,7 @@ type ListTasksOptions struct {
 	Type           string
 	Project        string
 	Tag            string // Filter to tasks carrying this exact tag (delimiter-safe; "gm:cortex" does not match "gm:cortex-2")
-	Limit          int
+	Limit          int    // Zero defaults to 100; negative means no limit.
 	Offset         int
 	IncludeClosed  bool // Include closed tasks even when Status is empty
 	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
@@ -569,8 +569,10 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
-	} else {
+	} else if opts.Limit == 0 {
 		query += " LIMIT 100"
+	} else {
+		query += " LIMIT -1"
 	}
 	if opts.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
@@ -669,7 +671,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
 		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
-		WHERE (
+		WHERE deleted_at IS NULL
+		AND (
 			title LIKE ? COLLATE NOCASE
 			OR project LIKE ? COLLATE NOCASE
 			OR CAST(id AS TEXT) LIKE ?
@@ -1056,6 +1059,25 @@ func (db *DB) ClearTaskTmuxIDs(taskID int64) error {
 	`, taskID)
 	if err != nil {
 		return fmt.Errorf("clear task tmux ids: %w", err)
+	}
+	return nil
+}
+
+// ClearTaskSessionPlacement tears down a task's tmux placement in one statement:
+// the window ID, both pane IDs, and the daemon session that owned the window.
+// It deliberately leaves claude_session_id alone — that is what `--resume` needs
+// to bring the conversation back, and dropping it turns a suspend into a
+// discard. Used by both the idle-suspend sweep and `ty sessions suspend`, which
+// must agree on what "suspended" means.
+func (db *DB) ClearTaskSessionPlacement(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks
+		SET tmux_window_id = '', claude_pane_id = '', shell_pane_id = '',
+		    daemon_session = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task session placement: %w", err)
 	}
 	return nil
 }
@@ -1544,17 +1566,23 @@ func (db *DB) HasSessionStarted(taskID int64) (bool, error) {
 
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
+	return db.GetTaskLogsBefore(taskID, 0, limit)
+}
+
+// GetTaskLogsBefore returns a bounded history page, newest first. A zero beforeID selects the latest page.
+func (db *DB) GetTaskLogsBefore(taskID, beforeID int64, limit int) ([]*TaskLog, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-
-	rows, err := db.Query(`
-		SELECT id, task_id, line_type, content, created_at
-		FROM task_logs
-		WHERE task_id = ?
-		ORDER BY id DESC
-		LIMIT ?
-	`, taskID, limit)
+	query := `SELECT id, task_id, line_type, content, created_at FROM task_logs WHERE task_id = ?`
+	args := []any{taskID}
+	if beforeID > 0 {
+		query += " AND id < ?"
+		args = append(args, beforeID)
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query task logs: %w", err)
 	}
@@ -1574,7 +1602,8 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 }
 
 // GetLatestLogPerTask returns the most recent log entry for each of the given task IDs.
-// Returns a map of taskID -> latest TaskLog. Uses a single efficient query.
+// Returns a map of taskID -> latest TaskLog. Seek to the last indexed row per
+// task instead of scanning its entire history with GROUP BY / MAX(id).
 func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
 	if len(taskIDs) == 0 {
 		return nil, nil
@@ -1590,13 +1619,11 @@ func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
 
 	query := fmt.Sprintf(`
 		SELECT tl.id, tl.task_id, tl.line_type, tl.content, tl.created_at
-		FROM task_logs tl
-		INNER JOIN (
-			SELECT task_id, MAX(id) as max_id
-			FROM task_logs
-			WHERE task_id IN (%s)
-			GROUP BY task_id
-		) latest ON tl.id = latest.max_id
+		FROM tasks t
+		JOIN task_logs tl ON tl.id = (
+			SELECT id FROM task_logs WHERE task_id = t.id ORDER BY id DESC LIMIT 1
+		)
+		WHERE t.id IN (%s)
 	`, strings.Join(placeholders, ","))
 
 	rows, err := db.Query(query, args...)
@@ -1679,12 +1706,20 @@ func (db *DB) GetTaskLogCount(taskID int64) (int, error) {
 
 // GetTaskLogsSince retrieves logs after a given ID.
 func (db *DB) GetTaskLogsSince(taskID int64, sinceID int64) ([]*TaskLog, error) {
-	rows, err := db.Query(`
-		SELECT id, task_id, line_type, content, created_at
-		FROM task_logs
-		WHERE task_id = ? AND id > ?
-		ORDER BY id ASC
-	`, taskID, sinceID)
+	return db.GetTaskLogsSinceLimit(taskID, sinceID, 0)
+}
+
+// GetTaskLogsSinceLimit bounds streaming catch-up without discarding older rows.
+// A zero limit preserves the unbounded internal API for existing callers.
+func (db *DB) GetTaskLogsSinceLimit(taskID, sinceID int64, limit int) ([]*TaskLog, error) {
+	query := `SELECT id, task_id, line_type, content, created_at FROM task_logs
+		WHERE task_id = ? AND id > ? ORDER BY id ASC`
+	args := []any{taskID, sinceID}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query task logs: %w", err)
 	}
@@ -2458,10 +2493,134 @@ func (t *Task) HasArchiveState() bool {
 	return t.ArchiveRef != "" && t.ArchiveCommit != ""
 }
 
+// ClearTaskWorktreeRefs drops every reference a task holds to a directory on
+// disk: the live worktree_path and the archive_worktree_path recorded when it was
+// archived. Used when the recorded path turns out not to be a worktree at all
+// (most commonly the project's own main checkout), where there is nothing to
+// remove and nothing to restore.
+//
+// Deliberately does NOT touch updated_at: the row is being corrected by a
+// background sweep, not modified by the user, and bumping the timestamp makes a
+// months-old task resurface at the top of every recently-touched view — which is
+// exactly what the hourly re-archive of task 1201 did for five months.
+func (db *DB) ClearTaskWorktreeRefs(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_path = '', archive_worktree_path = ''
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task worktree refs: %w", err)
+	}
+	return nil
+}
+
+// MarkWorktreeSweepFailed records that the stale-worktree sweeper could not
+// archive this task's worktree, excluding the row from future automatic sweeps.
+// Like ClearTaskWorktreeRefs it leaves updated_at alone.
+func (db *DB) MarkWorktreeSweepFailed(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_sweep_failed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("mark worktree sweep failed: %w", err)
+	}
+	return nil
+}
+
+// ClearWorktreeSweepFailure removes the un-sweepable marker. Called whenever a
+// task gets a worktree set up again: the new worktree has never failed to
+// archive, so the old verdict no longer applies.
+func (db *DB) ClearWorktreeSweepFailure(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_sweep_failed_at = NULL
+		WHERE id = ? AND worktree_sweep_failed_at IS NOT NULL
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear worktree sweep failure: %w", err)
+	}
+	return nil
+}
+
+// WorktreeSweepFailedAt returns when the sweeper marked this task un-sweepable,
+// or nil if it never did.
+func (db *DB) WorktreeSweepFailedAt(taskID int64) (*time.Time, error) {
+	var at sql.NullTime
+	err := db.QueryRow(`SELECT worktree_sweep_failed_at FROM tasks WHERE id = ?`, taskID).Scan(&at)
+	if err != nil {
+		return nil, fmt.Errorf("read worktree sweep failure: %w", err)
+	}
+	if !at.Valid {
+		return nil, nil
+	}
+	t := at.Time
+	return &t, nil
+}
+
+// WorktreeRef is one task row's claim on a directory: the live worktree and the
+// path an archive would be restored to. Used by the worktree audit, which needs
+// every row that names a directory regardless of status.
+type WorktreeRef struct {
+	TaskID       int64
+	Title        string
+	Project      string
+	Status       string
+	WorktreePath string
+	ArchivePath  string
+}
+
+// ListWorktreeRefs returns every non-deleted task that names a directory on disk
+// through worktree_path or archive_worktree_path.
+func (db *DB) ListWorktreeRefs() ([]WorktreeRef, error) {
+	rows, err := db.Query(`
+		SELECT id, title, project, status,
+		       COALESCE(worktree_path, ''), COALESCE(archive_worktree_path, '')
+		FROM tasks
+		WHERE deleted_at IS NULL
+		  AND (COALESCE(worktree_path, '') != '' OR COALESCE(archive_worktree_path, '') != '')
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query worktree refs: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []WorktreeRef
+	for rows.Next() {
+		var r WorktreeRef
+		if err := rows.Scan(&r.TaskID, &r.Title, &r.Project, &r.Status, &r.WorktreePath, &r.ArchivePath); err != nil {
+			return nil, fmt.Errorf("scan worktree ref: %w", err)
+		}
+		refs = append(refs, r)
+	}
+	return refs, rows.Err()
+}
+
 // GetStaleWorktreeTasks returns done/archived tasks that have worktree paths set
 // and were completed more than maxAge ago. These are candidates for cleanup.
+//
+// Rows already marked un-sweepable (worktree_sweep_failed_at set, see
+// MarkWorktreeSweepFailed) are excluded: their archive has already failed once
+// and nothing about a retry would go differently, so the automatic sweep must
+// not keep attempting them.
 func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
+	return db.staleWorktreeTasks(maxAge, false)
+}
+
+// GetStaleWorktreeTasksIncludingFailed is GetStaleWorktreeTasks plus the rows a
+// prior sweep marked un-sweepable. Used by the on-demand `task worktrees cleanup`
+// command: a human asking for a cleanup is entitled to a retry (and to see the
+// error again), which is exactly what the unattended hourly sweep must not do.
+func (db *DB) GetStaleWorktreeTasksIncludingFailed(maxAge time.Duration) ([]*Task, error) {
+	return db.staleWorktreeTasks(maxAge, true)
+}
+
+func (db *DB) staleWorktreeTasks(maxAge time.Duration, includeFailed bool) ([]*Task, error) {
 	cutoff := time.Now().Add(-maxAge).UTC()
+	failedFilter := "AND worktree_sweep_failed_at IS NULL"
+	if includeFailed {
+		failedFilter = ""
+	}
 	query := `
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
@@ -2481,6 +2640,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		  AND deleted_at IS NULL
 		  AND completed_at IS NOT NULL
 		  AND completed_at < ?
+		  ` + failedFilter + `
 		ORDER BY completed_at ASC
 	`
 	rows, err := db.Query(query, cutoff)

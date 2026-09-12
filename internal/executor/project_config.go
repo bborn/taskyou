@@ -10,7 +10,8 @@ import (
 
 // ProjectConfig represents the .taskyou.yml configuration file in a project root.
 type ProjectConfig struct {
-	Worktree WorktreeConfig `yaml:"worktree"`
+	Worktree  WorktreeConfig  `yaml:"worktree"`
+	Placement PlacementConfig `yaml:"placement"`
 }
 
 // WorktreeConfig contains worktree-specific configuration.
@@ -149,4 +150,9 @@ func GetWorktreeTeardownScript(projectDir string) string {
 	}
 
 	return ""
+}
+
+// PlacementConfig controls whether a project may fall back to this machine.
+type PlacementConfig struct {
+	RemoteRequired bool `yaml:"remote_required"`
 }

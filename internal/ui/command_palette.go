@@ -2,37 +2,37 @@ package ui
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
-)
-
-// Patterns for extracting task IDs and PR numbers from pasted input
-var (
-	// Matches branch names like "task/1068-description" or "task/1068"
-	branchTaskIDPattern = regexp.MustCompile(`(?:^|/)(\d+)(?:-|$)`)
-	// Matches GitHub PR URLs like "https://github.com/org/repo/pull/123"
-	githubPRURLPattern = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/(\d+)`)
+	"github.com/bborn/workflow/internal/taskref"
 )
 
 // CommandPaletteModel represents the Command+P task switcher and AI command input.
 type CommandPaletteModel struct {
-	db            *db.DB
-	allTasks      []*db.Task
-	filteredTasks []*db.Task
-	projects      []*db.Project
-	searchInput   textinput.Model
-	selectedIndex int
-	width         int
-	height        int
-	maxVisible    int
+	db             *db.DB
+	allTasks       []*db.Task
+	filteredTasks  []*db.Task
+	projects       []*db.Project
+	searchInput    textinput.Model
+	selectedIndex  int
+	width          int
+	height         int
+	maxVisible     int
+	searchInFlight bool
+	searchPending  bool
+	enterPending   bool
+	// resultsQuery is the query filteredTasks was computed from. While it
+	// differs from what is typed, the list on screen belongs to an older query
+	// and says nothing about the current one, so it must not be presented (or
+	// selected from) as if it were a result set.
+	resultsQuery string
 
 	// Action mode: entered by typing a leading ">". Filters plugin actions
 	// instead of tasks. Task-switching behavior is unchanged when not in it.
@@ -115,9 +115,39 @@ func (m *CommandPaletteModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+// SetQuery types query into the search box, as if the user had.
+func (m *CommandPaletteModel) SetQuery(query string) {
+	m.searchInput.SetValue(query)
+	m.searchInput.CursorEnd()
+	m.filter()
+}
+
 // Update handles messages.
 func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case paletteSearchMsg:
+		if msg.owner != m {
+			return m, nil
+		}
+		m.searchInFlight = false
+		if msg.query != m.searchInput.Value() {
+			return m, m.searchAsync()
+		}
+		m.searchPending = false
+		staleList := m.resultsQuery != msg.query
+		m.filteredTasks = msg.tasks
+		m.resultsQuery = msg.query
+		if staleList {
+			// These rows replace an unrelated list; an index picked against
+			// those rows points at an arbitrary task here.
+			m.selectedIndex = 0
+		}
+		m.selectedIndex = min(m.selectedIndex, max(0, len(msg.tasks)-1))
+		if m.enterPending {
+			m.enterPending = false
+			return m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -129,6 +159,10 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 					sel := m.filteredActions[m.selectedIndex]
 					m.selectedAction = &sel
 				}
+				return m, nil
+			}
+			if m.searchPending {
+				m.enterPending = true
 				return m, nil
 			}
 			query := strings.TrimSpace(m.searchInput.Value())
@@ -176,12 +210,68 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 
 		// Update search input
 		var cmd tea.Cmd
+		oldQuery := m.searchInput.Value()
 		m.searchInput, cmd = m.searchInput.Update(msg)
-		m.filter()
+		if oldQuery != m.searchInput.Value() {
+			m.enterPending = false
+			cmd = tea.Batch(cmd, m.searchAsync())
+		}
 		return m, cmd
 	}
 
 	return m, nil
+}
+
+// resultsStale reports whether filteredTasks was computed from a different
+// query than the one currently typed. A stale list is rendered as the searching
+// state rather than as rows: drawn normally it is indistinguishable from real
+// results — same rows, same selection highlight — so a user acts on a task the
+// query never matched, which is how a paste of "task/5174-..." could open an
+// unrelated task sitting at the top of the previous list.
+func (m *CommandPaletteModel) resultsStale() bool {
+	return m.resultsQuery != m.searchInput.Value()
+}
+
+// Search uses a private snapshot and one worker. Closing/reopening the palette
+// cannot apply an old worker's results to a different palette instance.
+type paletteSearchMsg struct {
+	owner *CommandPaletteModel
+	query string
+	tasks []*db.Task
+}
+
+func (m *CommandPaletteModel) searchAsync() tea.Cmd {
+	query := m.searchInput.Value()
+	if strings.TrimSpace(query) == "" || strings.HasPrefix(strings.TrimSpace(query), ">") {
+		m.searchPending = false
+		m.filter()
+		m.resultsQuery = query
+		return nil
+	}
+	m.actionMode = false
+	m.searchPending = true
+	if m.searchInFlight {
+		return nil
+	}
+	m.searchInFlight = true
+	worker := &CommandPaletteModel{db: m.db, projects: m.projects, allTasks: snapshotSearchTasks(m.allTasks), searchInput: textinput.New()}
+	worker.searchInput.SetValue(query)
+	return func() tea.Msg {
+		worker.filterTasks()
+		return paletteSearchMsg{owner: m, query: query, tasks: worker.filteredTasks}
+	}
+}
+
+// Keep task values stable while search workers read them. One backing array
+// avoids an allocation per task when a large board starts a search.
+func snapshotSearchTasks(tasks []*db.Task) []*db.Task {
+	values := make([]db.Task, len(tasks))
+	out := make([]*db.Task, len(tasks))
+	for i, task := range tasks {
+		values[i] = *task
+		out[i] = &values[i]
+	}
+	return out
 }
 
 // scoredTask holds a task with its fuzzy match score for sorting
@@ -293,6 +383,8 @@ func (m *CommandPaletteModel) filterTasks() {
 		}
 	}
 
+	m.resultsQuery = query
+
 	// Clamp selected index
 	if m.selectedIndex >= len(m.filteredTasks) {
 		m.selectedIndex = max(0, len(m.filteredTasks)-1)
@@ -389,28 +481,15 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 
 // extractTaskID tries to extract a task ID from a branch name pattern.
 // Supports patterns like "task/1068-description", "feature/1068-foo", "1068-description".
+// Shared with `ty open` through taskref, so both accept the same references.
 func extractTaskID(input string) int64 {
-	matches := branchTaskIDPattern.FindStringSubmatch(input)
-	if len(matches) >= 2 {
-		id, err := strconv.ParseInt(matches[1], 10, 64)
-		if err == nil {
-			return id
-		}
-	}
-	return 0
+	return taskref.TaskIDFromBranch(input)
 }
 
 // extractPRNumber extracts a PR number from a GitHub PR URL.
 // Supports URLs like "https://github.com/org/repo/pull/123".
 func extractPRNumber(input string) int {
-	matches := githubPRURLPattern.FindStringSubmatch(input)
-	if len(matches) >= 2 {
-		num, err := strconv.Atoi(matches[1])
-		if err == nil {
-			return num
-		}
-	}
-	return 0
+	return taskref.PRNumberFromURL(input)
 }
 
 // matchesQuery checks if a task matches the search query.
@@ -651,6 +730,8 @@ func (m *CommandPaletteModel) View() string {
 	headerText := "Go to Task"
 	if m.actionMode {
 		headerText = "Run Plugin Action"
+	} else if m.searchPending {
+		headerText = "Searching…"
 	} else if len(m.filteredTasks) == 0 && query != "" {
 		headerText = "AI Command"
 	}
@@ -672,12 +753,14 @@ func (m *CommandPaletteModel) View() string {
 	var taskList strings.Builder
 	if m.actionMode {
 		m.renderActionList(&taskList, modalWidth-6)
-	} else if len(m.filteredTasks) == 0 {
+	} else if len(m.filteredTasks) == 0 || m.resultsStale() {
 		emptyStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Italic(true).
 			Padding(1, 0)
-		if query != "" {
+		if m.searchPending || m.resultsStale() {
+			taskList.WriteString(emptyStyle.Render("Searching tasks…"))
+		} else if query != "" {
 			// Show AI command hint when there's input but no matching tasks
 			taskList.WriteString(emptyStyle.Render("Press Enter to run as AI command"))
 		} else {
@@ -858,7 +941,7 @@ func (m *CommandPaletteModel) renderTaskItem(task *db.Task, isSelected bool, wid
 		maxTitleLen = 10
 	}
 	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "..."
+		title = ansi.Truncate(title, maxTitleLen, "...")
 	}
 
 	titleStyle := lipgloss.NewStyle()

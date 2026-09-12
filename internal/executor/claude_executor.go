@@ -152,21 +152,6 @@ func (c *ClaudeExecutor) Kill(taskID int64) bool {
 	return c.executor.KillClaudeProcess(taskID)
 }
 
-// Suspend pauses the Claude process for a task.
-func (c *ClaudeExecutor) Suspend(taskID int64) bool {
-	return c.executor.SuspendTask(taskID)
-}
-
-// IsSuspended checks if a task's Claude process is suspended.
-func (c *ClaudeExecutor) IsSuspended(taskID int64) bool {
-	return c.executor.IsSuspended(taskID)
-}
-
-// ResumeProcess resumes a suspended Claude process.
-func (c *ClaudeExecutor) ResumeProcess(taskID int64) bool {
-	return c.executor.ResumeTask(taskID)
-}
-
 // BuildCommand returns the shell command to start an interactive Claude session.
 // dbPathEnvPrefix returns "WORKTREE_DB_PATH=<path> " when the daemon runs against a
 // non-default DB (an isolated instance), so the agent and its mcp-server inherit it;

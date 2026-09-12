@@ -22,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
@@ -30,6 +31,7 @@ import (
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/tasksummary"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // TaskEvent represents a change to a task.
@@ -58,7 +60,6 @@ type Executor struct {
 	stopCh       chan struct{}
 
 	// Suspended task tracking
-	suspendedTasks map[int64]time.Time // taskID -> time when suspended
 
 	// Subscribers for real-time log updates (per-task)
 	subsMu sync.RWMutex
@@ -194,7 +195,6 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
 		cancelFuncs:     make(map[int64]context.CancelFunc),
-		suspendedTasks:  make(map[int64]time.Time),
 		silent:          true,
 		executorSlug:    slug,
 		executorName:    display,
@@ -226,7 +226,6 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
 		cancelFuncs:     make(map[int64]context.CancelFunc),
-		suspendedTasks:  make(map[int64]time.Time),
 		silent:          false,
 		executorSlug:    slug,
 		executorName:    display,
@@ -410,8 +409,46 @@ func (e *Executor) applyHostSignal(taskID int64, ev hostEvent) execResult {
 		return execResult{Message: detail}
 	default:
 		e.logLine(taskID, "system", "The agent reported it finished: "+detail)
+		return e.completeFromSignal(taskID, detail)
+	}
+}
+
+// completeFromSignal finishes a remotely placed task the same way taskyou_complete
+// finishes a local one.
+//
+// A placed agent has no MCP, so this signal is the only thing it can send. Left as
+// a bare success it fell through to the executor's generic "agent finished" branch,
+// which writes backlog — skipping the evidence gate, the human gate, and the
+// PR-review park. A task that had just opened a PR went to backlog instead of
+// blocked, so the one state that means "your turn" never got set and the work was
+// invisible on the board.
+//
+// Complete writes the status itself; the finalizer re-reads it and respects done
+// and blocked ahead of result.Success, which is the same contract the MCP path
+// relies on.
+func (e *Executor) completeFromSignal(taskID int64, detail string) execResult {
+	outcome, err := completion.Complete(e.db, taskID, detail, completion.Options{AsyncSummary: true})
+	if err != nil {
+		// Fall back to the old behaviour rather than dropping the signal: a task
+		// parked in backlog is wrong, but losing the agent's report is worse.
+		e.logLine(taskID, "error", "Could not run the completion checks: "+err.Error())
 		return execResult{Success: true, Message: detail}
 	}
+
+	// A rejected completion cannot "keep running" here the way it does locally —
+	// the remote agent has already stopped. Park it visibly with the reason.
+	if outcome.Kind == completion.KindVerifyFailed {
+		msg := fmt.Sprintf("Verification failed, so this is not complete: %s\n%s",
+			outcome.VerifyCommand, outcome.VerifyOutput)
+		e.logLine(taskID, "error", msg)
+		return execResult{NeedsInput: true, Message: msg}
+	}
+
+	if outcome.Kind == completion.KindPRReview {
+		e.logLine(taskID, "system", fmt.Sprintf(
+			"PR #%d is open — parked for your review.", outcome.PRNumber))
+	}
+	return execResult{Success: true, Message: detail}
 }
 
 // channelProbe answers the poll's two questions — is the window there, and what
@@ -478,6 +515,21 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 		// gone no matter how recently the task started.
 		if !startup && task.StartedAt != nil && time.Since(task.StartedAt.Time) < orphanSpawnGrace {
 			continue
+		}
+
+		// Reconcile the durable inbox even when the remote process survived a
+		// coordinator restart and no per-task poller has been reattached yet.
+		if task.PlacementTarget != "" {
+			if ev, ok := e.taskSignal(task.PlacementTarget, task.ID); ok {
+				e.applyHostSignal(task.ID, ev)
+				current, err := e.db.GetTask(task.ID)
+				if err == nil && current != nil && current.Status == db.StatusProcessing {
+					_ = e.updateStatus(task.ID, db.StatusBlocked, db.ActorSweep,
+						"the placed task's host signalled, but the task is still marked processing",
+						db.Observedf("host %q reported %q for task #%d", task.PlacementTarget, ev.Kind, task.ID))
+				}
+				continue
+			}
 		}
 
 		// A processing task with a live executor window is genuinely still
@@ -828,84 +880,32 @@ func (e *Executor) Interrupt(taskID int64) bool {
 	return true
 }
 
-// SuspendTask suspends a task's Claude process using SIGTSTP (same as Ctrl+Z) to save memory.
-// Returns true if successfully suspended.
-func (e *Executor) SuspendTask(taskID int64) bool {
-	pid := e.getClaudePID(taskID)
-	if pid == 0 {
-		return false
+// SuspendTaskSession suspends a task by tearing down its agent: the tmux window
+// is killed (taking the agent process with it) and the task's tmux placement is
+// cleared, while claude_session_id is preserved so `ty retry` — or simply
+// reopening the task — resumes the conversation with `--resume`.
+//
+// This is what actually reclaims memory. The previous implementation sent
+// SIGTSTP, which stops the process but leaves every page of it resident, so it
+// returned CPU and no RAM. A parked agent holding hundreds of megabytes is
+// exactly what the idle sweep exists to reclaim.
+//
+// Shared with `ty sessions suspend` so the manual and automatic paths cannot
+// drift on what "suspended" means. Returns true if a window was killed.
+func (e *Executor) SuspendTaskSession(taskID int64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	killed := KillTaskWindows(ctx, taskID)
+
+	if err := e.db.ClearTaskSessionPlacement(taskID); err != nil {
+		e.logger.Warn("failed to clear session placement", "task", taskID, "error", err)
 	}
 
-	// Send SIGTSTP to suspend the process (same as Ctrl+Z, allows Claude to handle gracefully)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		e.logger.Debug("Failed to find process", "pid", pid, "error", err)
-		return false
+	if killed {
+		e.logLine(taskID, "system", "Agent suspended (idle timeout); session preserved for resume")
 	}
-
-	if err := sendSIGTSTP(proc); err != nil {
-		e.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
-		return false
-	}
-
-	e.mu.Lock()
-	e.suspendedTasks[taskID] = time.Now()
-	e.mu.Unlock()
-
-	e.logger.Info("Suspended Claude process", "task", taskID, "pid", pid)
-	e.logLine(taskID, "system", "Claude suspended (idle timeout)")
-	return true
-}
-
-// ResumeTask resumes a suspended task's Claude process using SIGCONT.
-// Returns true if successfully resumed.
-func (e *Executor) ResumeTask(taskID int64) bool {
-	e.mu.RLock()
-	_, isSuspended := e.suspendedTasks[taskID]
-	e.mu.RUnlock()
-
-	if !isSuspended {
-		return false
-	}
-
-	pid := e.getClaudePID(taskID)
-	if pid == 0 {
-		// Process gone, clean up suspended state
-		e.mu.Lock()
-		delete(e.suspendedTasks, taskID)
-		e.mu.Unlock()
-		return false
-	}
-
-	// Send SIGCONT to resume the process
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		e.mu.Lock()
-		delete(e.suspendedTasks, taskID)
-		e.mu.Unlock()
-		return false
-	}
-
-	if err := sendSIGCONT(proc); err != nil {
-		e.logger.Debug("Failed to resume process", "pid", pid, "error", err)
-		return false
-	}
-
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
-
-	e.logger.Info("Resumed Claude process", "task", taskID, "pid", pid)
-	e.logLine(taskID, "system", "Claude resumed")
-	return true
-}
-
-// IsSuspended checks if a task is currently suspended.
-func (e *Executor) IsSuspended(taskID int64) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	_, suspended := e.suspendedTasks[taskID]
-	return suspended
+	return killed
 }
 
 // agentSendTargetForPane returns the tmux send-keys target for a task's agent
@@ -924,11 +924,112 @@ func agentSendTargetForPane(claudePaneID, windowTarget string) string {
 // agentSendTarget resolves the send-keys target for a task's agent pane,
 // reading the persisted pane id from the database. See agentSendTargetForPane.
 func (e *Executor) agentSendTarget(taskID int64, windowTarget string) string {
+	// A tagged pane says what it is; prefer that to a stored ID, which tmux may
+	// since have given to a different pane.
+	if windowTarget != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		pane := taggedPane(ctx, windowTarget, tmuxctl.RoleAgent)
+		cancel()
+		if pane != "" {
+			return pane
+		}
+	}
 	claudePaneID := ""
 	if t, err := e.db.GetTask(taskID); err == nil && t != nil {
 		claudePaneID = t.ClaudePaneID
 	}
 	return agentSendTargetForPane(claudePaneID, windowTarget)
+}
+
+// taskWindowTargets parses `tmux list-sessions -F '#{session_name}'` output and
+// returns the "<session>:<window>" targets a task's window could occupy.
+//
+// Every daemon generation is searched, not just the current one: a restarted
+// daemon leaves its old task-daemon-<pid> session holding the live task windows,
+// so assuming the running daemon's own session name silently misses them. Only
+// task-daemon-* sessions are considered, so the sweep can never reach into the
+// user's own tmux sessions.
+func taskWindowTargets(sessionList string, taskID int64) []string {
+	windowName := TmuxWindowName(taskID)
+	var targets []string
+	for _, session := range strings.Split(strings.TrimSpace(sessionList), "\n") {
+		session = strings.TrimSpace(session)
+		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+		targets = append(targets, session+":"+windowName)
+	}
+	return targets
+}
+
+// blockedIdleDuration reports how long a blocked task has been parked, and
+// whether that is measurable at all.
+//
+// It reads completed_at, not updated_at. updated_at is bumped by *any* write to
+// the row — PR info refreshes, log appends, pane-ID updates — several of which
+// the daemon performs on its own schedule, so a task parked for days reads as
+// freshly active and never crosses the idle threshold. completed_at is stamped
+// only when a task that genuinely started transitions to blocked.
+//
+// A nil completed_at means the task never ran: 'blocked' also covers a pipeline
+// step staged behind its dependencies. Those have no agent process to reclaim,
+// so they are not suspendable and report ok=false.
+func blockedIdleDuration(task *db.Task, now time.Time) (time.Duration, bool) {
+	if task == nil || task.CompletedAt == nil || task.CompletedAt.Time.IsZero() {
+		return 0, false
+	}
+	return now.Sub(task.CompletedAt.Time), true
+}
+
+// KillTaskWindows kills a task's tmux window in every daemon session that holds
+// one, taking the agent process with it. Returns true if any window was killed.
+//
+// Package-level so `ty sessions suspend` can reuse it without constructing an
+// Executor: the CLI and the daemon sweep must tear a session down the same way.
+func KillTaskWindows(ctx context.Context, taskID int64) bool {
+	out, err := tmuxCmd(ctx, "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return false
+	}
+
+	killed := false
+	for _, target := range taskWindowTargets(string(out), taskID) {
+		// Skip targets whose window does not exist in that session, so an absent
+		// window is not mistaken for a failed kill.
+		if err := tmuxCmd(ctx, "list-panes", "-t", target).Run(); err != nil {
+			continue
+		}
+		if err := tmuxCmd(ctx, "kill-window", "-t", target).Run(); err == nil {
+			killed = true
+		}
+	}
+	return killed
+}
+
+// idleSuspendListOptions selects the blocked tasks the idle sweep examines.
+//
+// The limit is explicitly unlimited. ListTasks caps an unset limit at 100 and
+// orders blocked tasks most-recently-parked first, so on a board with more than
+// 100 blocked tasks the longest-parked ones — precisely the ones holding agents
+// the sweep exists to reclaim — would fall off the end of the page and never be
+// seen. The rows are cheap; the filtering happens in eligibleForIdleSuspend.
+func idleSuspendListOptions() db.ListTasksOptions {
+	return db.ListTasksOptions{Status: db.StatusBlocked, Limit: -1}
+}
+
+// eligibleForIdleSuspend filters blocked tasks down to those parked longer than
+// timeout. Separated from the sweep so the selection rule is testable without a
+// live daemon, tmux server, or agent process.
+func eligibleForIdleSuspend(tasks []*db.Task, now time.Time, timeout time.Duration) []*db.Task {
+	var eligible []*db.Task
+	for _, task := range tasks {
+		idle, ok := blockedIdleDuration(task, now)
+		if !ok || idle < timeout {
+			continue
+		}
+		eligible = append(eligible, task)
+	}
+	return eligible
 }
 
 // findPanesForWindow parses tmux list-panes output and returns PIDs for panes
@@ -981,7 +1082,7 @@ func (e *Executor) getClaudePID(taskID int64) int {
 	windowName := TmuxWindowName(taskID)
 
 	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -1017,7 +1118,7 @@ func GetClaudePIDFromPane(paneID string) int {
 	defer cancel()
 
 	// Get the PID of the process in this pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "display-message", "-t", paneID, "-p", "#{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -1212,11 +1313,6 @@ func (e *Executor) KillClaudeProcess(taskID int64) bool {
 	}
 
 	e.logger.Info("Terminated Claude process", "task", taskID, "pid", pid)
-
-	// Clean up suspended task tracking if present
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
 
 	return true
 }
@@ -1639,35 +1735,25 @@ func (e *Executor) refreshActivePRInfo() {
 
 // suspendIdleBlockedTasks finds blocked tasks that have been idle and suspends their Claude processes.
 func (e *Executor) suspendIdleBlockedTasks() {
-	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 100})
+	tasks, err := e.db.ListTasks(idleSuspendListOptions())
 	if err != nil {
 		return
 	}
 
-	for _, task := range tasks {
-		// Skip if already suspended
-		e.mu.RLock()
-		_, alreadySuspended := e.suspendedTasks[task.ID]
-		e.mu.RUnlock()
-		if alreadySuspended {
+	now := time.Now()
+	timeout := e.getSuspendIdleTimeout()
+
+	for _, task := range eligibleForIdleSuspend(tasks, now, timeout) {
+		// Only tasks that still hold a live agent process cost anything to leave
+		// parked. This also skips anything already suspended: its window is gone,
+		// so there is no PID to find.
+		if pid := e.getClaudePID(task.ID); pid == 0 {
 			continue
 		}
 
-		// Check if task has been blocked for long enough
-		// Use UpdatedAt as proxy for when it became blocked
-		if task.UpdatedAt.Time.IsZero() {
-			continue
-		}
-
-		idleDuration := time.Since(task.UpdatedAt.Time)
-		if idleDuration >= e.getSuspendIdleTimeout() {
-			// Check if there's actually a Claude process to suspend
-			pid := e.getClaudePID(task.ID)
-			if pid > 0 {
-				e.logger.Info("Suspending idle blocked task", "task", task.ID, "idle", idleDuration.Round(time.Second))
-				e.SuspendTask(task.ID)
-			}
-		}
+		idle, _ := blockedIdleDuration(task, now)
+		e.logger.Info("Suspending idle blocked task", "task", task.ID, "idle", idle.Round(time.Second))
+		e.SuspendTaskSession(task.ID)
 	}
 }
 
@@ -1750,6 +1836,17 @@ func (e *Executor) cleanupStaleWorktrees() {
 			continue
 		}
 
+		// Never touch a main working tree. `git worktree remove` can never
+		// succeed against one, so attempting it is a guaranteed failure repeated
+		// on every sweep forever (one row did exactly that hourly for five
+		// months), and a row that names a real checkout is one bad code path away
+		// from something destructive running against main. Drop the bogus
+		// reference silently — there is no worktree here to archive or restore.
+		if isMainWorkingTree(task.WorktreePath) {
+			e.db.ClearTaskWorktreeRefs(task.ID)
+			continue
+		}
+
 		age := time.Since(task.CompletedAt.Time)
 		e.logger.Info("Archiving stale worktree",
 			"task", task.ID,
@@ -1757,12 +1854,20 @@ func (e *Executor) cleanupStaleWorktrees() {
 			"age", age.Round(time.Hour),
 		)
 
-		// Archive the worktree (preserves changes in git refs) then remove it
+		// Archive the worktree (preserves changes in git refs) then remove it.
+		// A failure here is recorded so the automatic sweep never retries this
+		// row: whatever made the archive impossible will still be true in ten
+		// minutes, and the only thing a retry produces is another log line and
+		// another git invocation. `task worktrees cleanup` still retries on
+		// demand, and setting up a worktree for the task again clears the mark.
 		if err := e.ArchiveWorktree(task); err != nil {
-			e.logger.Warn("Failed to archive stale worktree",
+			e.logger.Warn("Failed to archive stale worktree - marking un-sweepable, will not retry automatically",
 				"task", task.ID,
 				"error", err,
 			)
+			if markErr := e.db.MarkWorktreeSweepFailed(task.ID); markErr != nil {
+				e.logger.Debug("Failed to mark task un-sweepable", "task", task.ID, "error", markErr)
+			}
 			continue
 		}
 
@@ -1852,7 +1957,10 @@ func (e *Executor) getWorktreeCleanupMaxAge() time.Duration {
 // CleanupStaleWorktreesManual runs stale worktree cleanup on demand and returns
 // the list of tasks that were cleaned up. If dryRun is true, no changes are made.
 func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool) ([]*db.Task, error) {
-	tasks, err := e.db.GetStaleWorktreeTasks(maxAge)
+	// Include rows a prior automatic sweep marked un-sweepable: this run was asked
+	// for by a human, who gets the retry (and the error) the unattended sweep must
+	// not keep taking on its own.
+	tasks, err := e.db.GetStaleWorktreeTasksIncludingFailed(maxAge)
 	if err != nil {
 		return nil, fmt.Errorf("list stale worktree tasks: %w", err)
 	}
@@ -1877,13 +1985,26 @@ func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool
 			continue
 		}
 
+		// A main working tree is not a worktree: nothing to archive, nothing that
+		// can be removed. Drop the reference rather than running a git removal
+		// that is certain to fail.
+		if isMainWorkingTree(task.WorktreePath) {
+			e.db.ClearTaskWorktreeRefs(task.ID)
+			cleaned = append(cleaned, task)
+			continue
+		}
+
 		if err := e.ArchiveWorktree(task); err != nil {
 			e.logger.Warn("Failed to archive stale worktree",
 				"task", task.ID,
 				"error", err,
 			)
+			if markErr := e.db.MarkWorktreeSweepFailed(task.ID); markErr != nil {
+				e.logger.Debug("Failed to mark task un-sweepable", "task", task.ID, "error", markErr)
+			}
 			continue
 		}
+		e.db.ClearWorktreeSweepFailure(task.ID)
 		cleaned = append(cleaned, task)
 	}
 
@@ -2936,33 +3057,35 @@ func CapturePaneContent(windowTarget string, lines int) string {
 	if windowTarget == "" {
 		return ""
 	}
-
-	// If it's already a pane ID (starts with %), use directly; otherwise append .0
-	target := windowTarget
-	if !strings.HasPrefix(windowTarget, "%") {
-		target = windowTarget + ".0"
-	}
-
-	// Try capture with a 3-second timeout and one retry
 	for attempt := 0; attempt < 2; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		out, err := tmuxCmd(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+		content := CapturePaneContentContext(ctx, windowTarget, lines)
 		cancel()
-
-		if err == nil {
-			content := strings.TrimRight(string(out), " \t\n\r")
-			if content != "" {
-				return content
-			}
+		if content != "" {
+			return content
 		}
-
-		// Only retry once after a short delay
 		if attempt == 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-
 	return ""
+}
+
+// CapturePaneContentContext makes one best-effort capture without retrying.
+// Callers doing optional UI enrichment can share a deadline across all panes.
+func CapturePaneContentContext(ctx context.Context, windowTarget string, lines int) string {
+	if windowTarget == "" {
+		return ""
+	}
+	target := windowTarget
+	if !strings.HasPrefix(windowTarget, "%") {
+		target += ".0"
+	}
+	out, err := tmuxCmd(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(out), " \t\n\r")
 }
 
 // FormatSessionHandoff formats captured pane content into a handoff prompt for the new executor.
@@ -3091,47 +3214,14 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 		return
 	}
 
-	var windowsToKill []string
-	var canonicalFound bool
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
+	canonical, windowsToKill := duplicateTaskWindows(string(out), windowName, task.TmuxWindowID)
+	if canonical == "" {
+		return
+	}
+	if canonical != task.TmuxWindowID {
+		if err := e.db.UpdateTaskWindowID(taskID, canonical); err != nil {
+			return
 		}
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		sessionName := parts[0]
-		windowID := parts[1]
-		name := parts[2]
-
-		// Only look at daemon sessions
-		if !strings.HasPrefix(sessionName, "task-daemon-") {
-			continue
-		}
-
-		// Check for matching window name (including -shell variant)
-		if name != windowName && name != windowName+"-shell" {
-			continue
-		}
-
-		// Keep canonical window, kill duplicates
-		if task.TmuxWindowID != "" && windowID == task.TmuxWindowID {
-			canonicalFound = true
-			continue // Keep this one
-		}
-
-		if task.TmuxWindowID == "" && !canonicalFound {
-			// No canonical set - keep first, set it as canonical
-			if name == windowName { // Only set canonical for main window, not -shell
-				e.db.UpdateTaskWindowID(taskID, windowID)
-				canonicalFound = true
-				continue
-			}
-		}
-
-		windowsToKill = append(windowsToKill, windowID)
 	}
 
 	// Kill duplicates
@@ -3139,6 +3229,41 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
 		tmuxCmd(ctx, "kill-window", "-t", windowID).Run()
 	}
+}
+
+// Choose a surviving main window before deleting duplicates. Saved IDs become
+// stale when tmux restarts; their absence must never make every live window a
+// deletion candidate. Shell-only remnants are left alone without a main window.
+func duplicateTaskWindows(listing, windowName, savedID string) (string, []string) {
+	type window struct{ id, name string }
+	var windows []window
+	canonical := ""
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 || !strings.HasPrefix(parts[0], "task-daemon-") {
+			continue
+		}
+		id, name := parts[1], parts[2]
+		if (name != windowName && name != windowName+"-shell") || seen[id] {
+			continue
+		}
+		seen[id] = true
+		windows = append(windows, window{id, name})
+		if name == windowName && (canonical == "" || id == savedID) {
+			canonical = id
+		}
+	}
+	if canonical == "" {
+		return "", nil
+	}
+	var duplicates []string
+	for _, window := range windows {
+		if window.id != canonical {
+			duplicates = append(duplicates, window.id)
+		}
+	}
+	return canonical, duplicates
 }
 
 // GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
@@ -3281,7 +3406,8 @@ func ensureTmuxDaemon() (string, error) {
 	daemonSession := getDaemonSessionName()
 
 	// Create it with a placeholder window that stays alive (empty windows exit immediately)
-	cmd := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null")
+	args := append([]string{"new-session", "-d", "-s", daemonSession}, tmuxctl.DefaultSizeArgs()...)
+	cmd := tmuxCmd(ctx, append(args, "-n", "_placeholder", "tail", "-f", "/dev/null")...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Check if it failed because session already exists (race condition with another process)
@@ -3295,6 +3421,8 @@ func ensureTmuxDaemon() (string, error) {
 	if tmuxCmd(ctx, "has-session", "-t", daemonSession).Run() != nil {
 		return "", fmt.Errorf("session %s not found after creation", daemonSession)
 	}
+	// New task windows start at this size while nobody is attached.
+	_ = tmuxCmd(ctx, "set-option", "-t", daemonSession, "default-size", tmuxctl.DefaultSize()).Run()
 
 	return daemonSession, nil
 }
@@ -4695,16 +4823,18 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				}
 			}
 
-			// Also check task-ui (pane might be joined there). Local only: task-ui is
-			// THIS machine's TUI session, and asking a placed host about it is an ssh
-			// round trip that can only ever answer "no such session".
+			// Opening a task detail moves both panes out of the daemon window and into
+			// this instance's UI session. The source window then disappears even though
+			// the agent is still running. Follow the persisted agent pane ID instead of
+			// guessing a UI session name: pane IDs survive join-pane, and isolated or
+			// concurrent instances name their UI sessions task-ui-<session-id> rather
+			// than plain task-ui. Local only — a remotely placed task is probed through
+			// its remote window/channel above and its locally stored pane ID does not
+			// address that host's tmux server.
 			if !windowExists && remoteHost == "" {
 				checkCtx, checkCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
-				checkCmd := tmuxCmd(checkCtx, "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
-				if out, err := checkCmd.Output(); err == nil {
-					if strings.Contains(string(out), "claude") {
-						windowExists = true
-					}
+				if task != nil && task.ClaudePaneID != "" {
+					windowExists = probeWindow(checkCtx, task.ClaudePaneID, false) == windowLive
 				}
 				checkCancel()
 			}
@@ -4834,6 +4964,13 @@ func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID 
 	}
 	shellPaneID := strings.TrimSpace(string(shellPaneOut))
 
+	// Tag them too: this runs right after every window and shell is made, so
+	// every task pane says what it is (see tmuxctl.PaneRoleOption).
+	tagPane(ctx, claudePaneID, taskID, tmuxctl.RoleAgent)
+	if shellPaneID != claudePaneID {
+		tagPane(ctx, shellPaneID, taskID, tmuxctl.RoleShell)
+	}
+
 	// Save to database
 	if err := e.db.UpdateTaskPaneIDs(taskID, claudePaneID, shellPaneID); err != nil {
 		e.logger.Warn("failed to save pane IDs", "taskID", taskID, "error", err)
@@ -4911,6 +5048,80 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	return sb.String()
 }
 
+// EnsureLocalWorktree gives a task its isolated worktree on THIS machine,
+// returning the directory and whether this call created it.
+//
+// It exists so a task can be prepared at the moment it is placed here rather
+// than only at the moment the daemon happens to start it. `ty place <id> local`
+// used to write a placement and stop: the task arrived with an empty
+// worktree_path, and every start path that is not the daemon — the TUI, the
+// GUI, the HTTP API — refused it with "task has no worktree yet: refusing to
+// start outside an isolated worktree". The guard was right; nothing had done
+// the provisioning it was guarding.
+func (e *Executor) EnsureLocalWorktree(task *db.Task) (string, bool, error) {
+	e.adoptCarriedBranch(task)
+	return e.setupWorktree(task)
+}
+
+// adoptCarriedBranch points a task with no recorded branch at its own branch on
+// origin, when origin has one.
+//
+// A task's branch name is derived from its id, so a branch by that name on
+// origin is not a coincidence — it is this task's own work, pushed from wherever
+// it last ran. Without this, worktree setup sees no branch to attach to and does
+// the only other thing it can: cut a fresh one from the default branch. That
+// looks completely correct (right name, clean checkout) and contains none of the
+// work, which is how a carried task arrives empty.
+//
+// It fetches, because the whole premise is work that lives on another machine
+// and cannot be seen from here until it is fetched. That cost is why this hangs
+// off EnsureLocalWorktree — the landing path, walked once when a task arrives —
+// and not off setupWorktree, which every ordinary task start goes through.
+func (e *Executor) adoptCarriedBranch(task *db.Task) {
+	if task == nil || strings.TrimSpace(task.SourceBranch) != "" {
+		return
+	}
+	// An existing worktree is the work; there is nothing to go and find.
+	if strings.TrimSpace(task.WorktreePath) != "" {
+		return
+	}
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		return
+	}
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return
+	}
+
+	branch := newWorktreeBranchName(task, slugify(task.Title, 40))
+	// A local branch is already found by setupWorktree, which checks it out
+	// rather than recreating it. Leaving that path alone keeps this to the one
+	// case it is for.
+	if gitRefExists(projectDir, "refs/heads/"+branch) {
+		return
+	}
+
+	// The explicit refspec is deliberate: a bare `git fetch origin <branch>`
+	// leaves the answer in FETCH_HEAD, and what the check below needs is the
+	// remote-tracking ref itself.
+	ref := "refs/remotes/origin/" + branch
+	fetch := gitCmd(context.Background(), projectDir, "fetch", "origin",
+		"refs/heads/"+branch+":"+ref)
+	if out, err := fetch.CombinedOutput(); err != nil {
+		// Not an error worth surfacing: the overwhelmingly common case is a task
+		// that has simply never run anywhere, so origin has no such branch.
+		e.logger.Debug("no carried branch on origin", "task", task.ID, "branch", branch,
+			"error", err, "output", string(out))
+		return
+	}
+	if !gitRefExists(projectDir, ref) {
+		return
+	}
+
+	task.SourceBranch = branch
+	e.logLine(task.ID, "system", fmt.Sprintf("Found this task's work on origin at %s; checking it out here", branch))
+}
+
 // setupWorktree creates a git worktree for the task if the project is a git repo.
 // Returns the working directory to use (worktree path or project path) and whether
 // this call created the worktree fresh (false when an existing or restored worktree
@@ -4974,6 +5185,24 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 				return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 			}
 		}
+	}
+
+	// This task is being set up to run again, so any verdict a previous sweep
+	// reached about its old worktree no longer applies.
+	e.db.ClearWorktreeSweepFailure(task.ID)
+
+	// A recorded path that IS the project's main checkout is never a worktree.
+	// It means the task was created against the checkout directly, or the project
+	// was switched from shared-dir to worktree isolation after this task ran.
+	// Reusing it would run an "isolated" task straight in main and leave behind a
+	// row the worktree sweeper can never clean up. Drop it and build a real
+	// worktree instead.
+	if task.WorktreePath != "" && (sameDir(task.WorktreePath, projectDir) || isMainWorkingTree(task.WorktreePath)) {
+		e.logger.Warn("Recorded worktree path is the project's main checkout - creating an isolated worktree instead",
+			"task", task.ID, "project", task.Project, "path", task.WorktreePath)
+		task.WorktreePath = ""
+		task.BranchName = ""
+		e.db.ClearTaskWorktreeRefs(task.ID)
 	}
 
 	// If task already has a worktree path, reuse it (don't recalculate from title)
@@ -6403,6 +6632,18 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
+
+	// A worktree_path naming the project's own checkout is not a worktree, no
+	// matter what the column says — it predates this project switching to
+	// worktree isolation, or a task was created against the checkout directly.
+	// Archiving it would write an archive ref for the main tree and then fail
+	// forever at `git worktree remove` ("fatal: is a main working tree"). Drop
+	// the bogus reference instead; there is nothing here to preserve or remove.
+	if sameDir(task.WorktreePath, projectDir) || isMainWorkingTree(task.WorktreePath) {
+		e.db.ClearTaskWorktreeRefs(task.ID)
+		return nil
+	}
+
 	paths := e.claudePathsForTask(task)
 
 	// Get current HEAD commit
@@ -7051,7 +7292,7 @@ func (e *Executor) getPiPID(taskID int64) int {
 	windowName := TmuxWindowName(taskID)
 
 	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	out, err := tmuxctl.Agent(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -7096,11 +7337,6 @@ func (e *Executor) KillPiProcess(taskID int64) bool {
 	}
 
 	e.logger.Info("Terminated Pi process", "task", taskID, "pid", pid)
-
-	// Clean up suspended task tracking if present
-	e.mu.Lock()
-	delete(e.suspendedTasks, taskID)
-	e.mu.Unlock()
 
 	return true
 }

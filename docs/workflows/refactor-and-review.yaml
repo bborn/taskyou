@@ -1,0 +1,28 @@
+name: refactor-and-review
+description: Record a behavioral baseline, simplify implementation, then review and open a PR.
+steps:
+  - name: Baseline
+    executor: claude
+    prompt: >-
+      Read the project instructions and inspect the requested refactor boundary.
+      Write BASELINE.md with externally visible behavior that must remain stable,
+      relevant interfaces, existing test commands and results, and a small plan.
+      Add characterization tests where needed to protect that behavior, but do
+      not refactor application code yet. Report any pre-existing failures.
+  - name: Refactor
+    executor: claude
+    deps: [Baseline]
+    prompt: >-
+      Read BASELINE.md. Simplify the requested implementation while preserving
+      behavior and interfaces. Do not add features or change unrelated code.
+      Run the baseline checks and document before/after results and the concrete
+      simplification in REFACTOR.md. Do not weaken assertions to make tests pass.
+  - name: Review
+    executor: claude
+    deps: [Refactor]
+    prompt: >-
+      Independently review the diff against BASELINE.md for behavior drift,
+      interface changes, performance regressions, and unnecessary abstraction.
+      Fix material issues and rerun checks. Summarize what became simpler and
+      the before/after evidence in the PR, naming any unverified behavior.
+      Never report an unrun check as passing. Leave merging to the human reviewer.

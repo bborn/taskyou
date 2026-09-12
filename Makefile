@@ -28,11 +28,20 @@ build: build-ty build-taskd restart-daemon
 # Build binaries without touching any running daemon
 build-no-restart: build-ty build-taskd
 
+# The daemon usually IS bin/ty, and `build` writes these binaries before
+# restart-daemon stops anything — so the build would be overwriting the file a
+# running process is executing. Unlinking first leaves that process on its held
+# inode, alive and unharmed, and hands the build a fresh path. This belongs here
+# rather than in an ordering fix in `build`, so `build-no-restart` and a bare
+# `make build-ty` are equally safe, and so a FAILED build never leaves you with a
+# daemon that was killed for a binary that then did not appear.
 build-ty:
+	@rm -f bin/ty bin/taskyou
 	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o bin/ty ./cmd/task
 	ln -sf ty bin/taskyou
 
 build-taskd:
+	@rm -f bin/taskd
 	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o bin/taskd ./cmd/taskd
 
 # Build the web/desktop frontend and stage it for embedding into ty serve.

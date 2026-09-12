@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"os/exec"
+
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // Runner builds commands for execution in some location.
@@ -112,6 +114,13 @@ func gitCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
 // tmuxCmd builds `tmux <args>`. A tmux command addresses a server rather than a
 // directory, so it carries no workDir; the location it implies is the machine
 // whose tmux server the runner reaches.
+//
+// A local tmux command goes to the agent server (see tmuxctl); a runner for
+// another host reaches that host's server as it always has.
 func tmuxCmd(ctx context.Context, args ...string) *exec.Cmd {
-	return command(ctx, "", "tmux", args...)
+	r := RunnerFrom(ctx)
+	if r.Target() == "" {
+		args = tmuxctl.AgentArgs(args...)
+	}
+	return r.Command(ctx, "", "tmux", args...)
 }

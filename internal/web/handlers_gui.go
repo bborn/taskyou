@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 // SessionManager is the subset of executor functionality the API needs to
@@ -313,6 +315,8 @@ func (s *Server) handleLatestLogs(w http.ResponseWriter, r *http.Request) {
 // --- Terminal info & session bootstrap ---
 
 type terminalInfoJSON struct {
+	RemoteHost    string `json:"remote_host,omitempty"`
+	Error         string `json:"error,omitempty"`
 	DaemonSession string `json:"daemon_session"`
 	TmuxWindowID  string `json:"tmux_window_id"`
 	ClaudePaneID  string `json:"claude_pane_id"`
@@ -381,6 +385,11 @@ func (s *Server) taskWorkdir(task *db.Task) string {
 }
 
 func (s *Server) terminalInfo(task *db.Task) terminalInfoJSON {
+	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return s.remoteTerminalInfo(ctx, task, false)
+	}
 	target := s.findTaskWindowTarget(task.ID)
 	info := terminalInfoJSON{
 		DaemonSession: task.DaemonSession,
@@ -401,6 +410,29 @@ func (s *Server) terminalInfo(task *db.Task) terminalInfoJSON {
 	return info
 }
 
+// remoteTerminalInfo never probes the local server using a remote pane ID.
+func (s *Server) remoteTerminalInfo(ctx context.Context, task *db.Task, ensureShell bool) terminalInfoJSON {
+	workdir, _, err := s.db.GetTaskRemoteWorktree(task.ID)
+	info := terminalInfoJSON{RemoteHost: task.PlacementTarget, DaemonSession: task.DaemonSession, Workdir: workdir}
+	if err != nil {
+		info.Error = err.Error()
+		return info
+	}
+	terminal, err := executor.InspectRemoteTerminal(ctx, task, workdir, ensureShell)
+	if err != nil {
+		if errors.Is(err, executor.ErrRemoteTerminalEnded) {
+			return info
+		}
+		info.Error = err.Error()
+		return info
+	}
+	info.WindowTarget = terminal.WindowTarget
+	info.ClaudePaneID = terminal.AgentPaneID
+	info.ShellPaneID = terminal.ShellPaneID
+	info.WindowExists = true
+	return info
+}
+
 func (s *Server) handleTerminalInfo(w http.ResponseWriter, r *http.Request) {
 	task, ok := s.requireTask(w, r)
 	if !ok {
@@ -417,6 +449,21 @@ func (s *Server) handleEnsureSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		info := s.remoteTerminalInfo(ctx, task, false)
+		if !info.WindowExists && info.Error == "" {
+			info.Error = executor.ErrRemoteTerminalEnded.Error()
+		}
+		if info.Error != "" {
+			jsonErr(w, info.Error, http.StatusConflict)
+			return
+		}
+		jsonOK(w, info)
+		return
+	}
+
 	if s.sessions == nil {
 		jsonErr(w, "executor manager not configured", http.StatusServiceUnavailable)
 		return
@@ -460,6 +507,21 @@ func (s *Server) handleEnsureShellPane(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		info := s.remoteTerminalInfo(ctx, task, true)
+		if !info.WindowExists && info.Error == "" {
+			info.Error = executor.ErrRemoteTerminalEnded.Error()
+		}
+		if info.Error != "" {
+			jsonErr(w, info.Error, http.StatusConflict)
+			return
+		}
+		jsonOK(w, info)
+		return
+	}
+
 	if s.runner == nil {
 		jsonErr(w, "command runner not configured", http.StatusServiceUnavailable)
 		return

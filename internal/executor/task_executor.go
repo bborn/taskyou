@@ -50,12 +50,6 @@ type TaskExecutor interface {
 	// Kill terminates the executor process for a task.
 	Kill(taskID int64) bool
 
-	// Suspend pauses the executor process for a task (to save memory).
-	Suspend(taskID int64) bool
-
-	// IsSuspended checks if a task's executor process is suspended.
-	IsSuspended(taskID int64) bool
-
 	// ---- Session and Dangerous Mode Support ----
 	// These methods enable session tracking and runtime mode switching.
 	// Executors that don't support these features should return appropriate defaults.

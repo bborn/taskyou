@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/textutil"
+
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -194,7 +196,7 @@ func buildSummaryPrompt(task *db.Task, logs []*db.TaskLog) string {
 	sb.WriteString(fmt.Sprintf("Title: %s\n", task.Title))
 	if body := strings.TrimSpace(task.Body); body != "" {
 		if len(body) > 1200 {
-			body = body[:1200] + "..."
+			body = textutil.Truncate(body, 1203, "...")
 		}
 		sb.WriteString("Body:\n")
 		sb.WriteString(body)
@@ -236,7 +238,7 @@ func formatLogs(logs []*db.TaskLog) string {
 			continue
 		}
 		if len(content) > maxLineChars {
-			content = content[:maxLineChars] + "..."
+			content = textutil.Truncate(content, maxLineChars+3, "...")
 		}
 		line := fmt.Sprintf("[%s] %s: %s", log.CreatedAt.Format("15:04"), log.LineType, content)
 		if chars+len(line)+1 > maxLogChars {

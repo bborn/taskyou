@@ -61,16 +61,6 @@ func (p *PiExecutor) Kill(taskID int64) bool {
 	return p.executor.KillPiProcess(taskID)
 }
 
-// Suspend pauses the Pi process for a task.
-func (p *PiExecutor) Suspend(taskID int64) bool {
-	return p.executor.SuspendTask(taskID)
-}
-
-// IsSuspended checks if a task's Pi process is suspended.
-func (p *PiExecutor) IsSuspended(taskID int64) bool {
-	return p.executor.IsSuspended(taskID)
-}
-
 // BuildCommand returns the shell command to start an interactive Pi session.
 func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
 	// Get session ID for environment
@@ -174,9 +164,14 @@ func findPiSessionID(workDir string) string {
 		return ""
 	}
 
+	return findPiLegacySessionID(workDir, filepath.Join(home, ".pi", "agent", "sessions"))
+}
+
+// findPiLegacySessionID scans an explicit root without changing the process's home directory.
+func findPiLegacySessionID(workDir, sessionsDir string) string {
 	// Pi escapes the path similar to Claude: /Users/bruno/foo -> --Users-bruno-foo--
 	escapedPath := "--" + strings.ReplaceAll(workDir, "/", "-") + "--"
-	sessionDir := filepath.Join(home, ".pi", "agent", "sessions", escapedPath)
+	sessionDir := filepath.Join(sessionsDir, escapedPath)
 
 	// Find the most recent .jsonl file
 	entries, err := os.ReadDir(sessionDir)

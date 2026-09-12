@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/bborn/workflow/internal/textutil"
 )
 
 // EventTaskPlacement is the one hook ty *consults* rather than merely notifies.
@@ -40,11 +42,12 @@ const DefaultPlacementTimeout = 5 * time.Second
 // PlacementTaskInfo is the task half of the placement request — the facts a
 // resolver needs to pick a host, and nothing more.
 type PlacementTaskInfo struct {
-	ID       int64  `json:"id"`
-	Title    string `json:"title"`
-	Project  string `json:"project"`
-	RepoPath string `json:"repo_path"`
-	Executor string `json:"executor"`
+	ID             int64  `json:"id"`
+	Title          string `json:"title"`
+	Project        string `json:"project"`
+	RepoPath       string `json:"repo_path"`
+	Executor       string `json:"executor"`
+	RemoteRequired bool   `json:"remote_required,omitempty"`
 }
 
 // placementRequest is the JSON written to a handler's stdin.
@@ -56,7 +59,8 @@ type placementRequest struct {
 // Placement is a handler's answer: where the task should run.
 type Placement struct {
 	// Target names the host to run on. Empty means local.
-	Target string `json:"target"`
+	Target      string `json:"target"`
+	Unavailable bool   `json:"unavailable,omitempty"`
 	// WorkDir is the task's directory ON THAT HOST. It is a remote path, so a
 	// leading "~" is left alone for the remote shell to expand.
 	WorkDir string `json:"workdir"`
@@ -127,7 +131,7 @@ func (r *Runner) ResolvePlacement(ctx context.Context, info PlacementTaskInfo) P
 			}
 			got.Handler = a.Plugin
 
-			if !got.IsLocal() {
+			if got.Unavailable || !got.IsLocal() {
 				r.logger.Info("placement decided", "task", info.ID, "plugin", a.Plugin,
 					"target", got.Target, "workdir", got.WorkDir, "reason", got.Reason)
 				answered = got
@@ -182,5 +186,5 @@ func truncateForLog(s string) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return textutil.Truncate(s, max+1, "…")
 }

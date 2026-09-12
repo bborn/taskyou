@@ -101,6 +101,7 @@ func (s *Server) teaHandler(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
 	return model, []tea.ProgramOption{
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
+		tea.WithFPS(120), // Keep selection latency below a 60 Hz frame while scrolling.
 	}
 }
 

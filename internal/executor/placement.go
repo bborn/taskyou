@@ -48,7 +48,21 @@ const stickyPlacementHandler = "recorded"
 //     the load straight back on the machine placement exists to unload. A
 //     recorded host that has gone away fails the same way, rather than silently
 //     re-placing — `ty retry --replace` is the explicit way to move a task.
-func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (Runner, hooks.Placement, error) {
+func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (runner Runner, answer hooks.Placement, failure error) {
+	required := false
+	if task != nil {
+		cfg, err := LoadProjectConfig(e.getProjectDir(task.Project))
+		if err != nil {
+			return nil, hooks.Placement{}, fmt.Errorf("read placement policy: %w", err)
+		}
+		required = cfg != nil && cfg.Placement.RemoteRequired
+	}
+	defer func() {
+		if failure == nil && required && (runner == nil || runner.Target() == "") {
+			runner = nil
+			failure = fmt.Errorf("this project requires remote execution; choose an eligible host with ty place or restore the placement resolver")
+		}
+	}()
 	if task == nil {
 		return LocalRunner{}, hooks.Placement{}, nil
 	}
@@ -140,12 +154,17 @@ func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (Runner,
 		executorName = db.DefaultExecutor()
 	}
 	placement := e.hooks.ResolvePlacement(ctx, hooks.PlacementTaskInfo{
-		ID:       task.ID,
-		Title:    task.Title,
-		Project:  task.Project,
-		RepoPath: e.getProjectDir(task.Project),
-		Executor: executorName,
+		ID:             task.ID,
+		Title:          task.Title,
+		Project:        task.Project,
+		RepoPath:       e.getProjectDir(task.Project),
+		Executor:       executorName,
+		RemoteRequired: required,
 	})
+
+	if placement.Unavailable || (required && placement.IsLocal()) {
+		return nil, placement, fmt.Errorf("remote placement unavailable: %s", placement.Reason)
+	}
 
 	// Record the answer — including a deliberate "local", and including a host that
 	// then turns out to be unreachable — so a result can be traced to the machine

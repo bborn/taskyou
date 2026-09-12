@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/tmuxtest"
 )
 
 // The failure this guards against: an agent placed on another host ran the
@@ -27,15 +27,7 @@ func TestCleanupOrphanedSessions_SparesAnotherMachinesSession(t *testing.T) {
 		t.Skipf("db.DefaultPath() does not honor WORKTREE_DB_PATH (got %q)", got)
 	}
 
-	socketDir, err := os.MkdirTemp("/tmp", "tytmux")
-	if err != nil {
-		t.Fatalf("socket dir: %v", err)
-	}
-	t.Setenv("TMUX_TMPDIR", socketDir)
-	t.Cleanup(func() {
-		osexec.Command("tmux", "kill-server").Run()
-		_ = os.RemoveAll(socketDir)
-	})
+	tmuxtest.Isolate(t)
 	suppressStdout(t)
 
 	// A session owned by another machine, holding a window for a task ID this

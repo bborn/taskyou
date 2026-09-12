@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
@@ -427,8 +428,12 @@ func (k *KanbanBoard) columnLayoutFor(colIdx, maxVisible int) columnLayout {
 		maxVisible = 1
 	}
 	col := k.columns[colIdx]
-	pinned, _ := splitPinnedTasks(col.Tasks)
-	pinnedCount := len(pinned)
+	// Once pins fill the viewport they all scroll; scanning the rest cannot
+	// change the layout. Keep navigation constant-time even in all-pinned lists.
+	pinnedCount := 0
+	for pinnedCount < len(col.Tasks) && pinnedCount < maxVisible && col.Tasks[pinnedCount].Pinned {
+		pinnedCount++
+	}
 
 	fixedPinned := pinnedCount
 	if pinnedCount >= maxVisible {
@@ -736,7 +741,8 @@ func (s *sigHasher) boolean(b bool) {
 	}
 }
 
-// renderSignature hashes every input that affects the board's rendered output.
+// renderSignature hashes inputs that affect the current viewport. Off-screen
+// cards cannot change its pixels; their current state is hashed when scrolled in.
 //
 // IMPORTANT: when adding a new field to renderTaskCard / viewDesktop / viewMobile
 // that changes what is drawn, add it here too, or the render cache will show stale
@@ -761,10 +767,21 @@ func (k *KanbanBoard) renderSignature() uint64 {
 	for ci := range k.columns {
 		col := &k.columns[ci]
 		h.str(col.Status)
+		h.str(col.Title)
 		h.str(string(col.Color))
 		h.str(col.Icon)
 		h.int(len(col.Tasks))
-		for _, t := range col.Tasks {
+		if (k.IsMobileMode() && ci != k.selectedCol) || (!k.IsMobileMode() && k.IsColumnCollapsed(ci)) {
+			continue
+		}
+		lay := k.columnLayoutFor(ci, k.maxVisibleCards())
+		h.int(lay.fixedPinned)
+		for _, t := range col.Tasks[:lay.fixedPinned] {
+			k.hashTaskCard(&h, t)
+		}
+		start := lay.fixedPinned + lay.scrollOffset
+		end := min(start+lay.scrollCapacity, len(col.Tasks))
+		for _, t := range col.Tasks[start:end] {
 			k.hashTaskCard(&h, t)
 		}
 	}
@@ -1346,9 +1363,17 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
-	}
+	// ansi.Truncate measures display columns and never cuts inside a rune. The
+	// old form sliced by BYTES: a title carrying any multi-byte character (a "·"
+	// in a digest title, an accent, an emoji) could be cut mid-rune, leaving a
+	// dangling byte. The terminal and lipgloss then disagreed about the line's
+	// width, so the card's background and border stopped short of the column.
+	// ansi.Truncate measures display columns and never cuts inside a rune. The
+	// old form sliced by BYTES: a title carrying any multi-byte character (a "·"
+	// in a digest title, an accent, an emoji) could be cut mid-rune, leaving a
+	// dangling byte. The terminal and lipgloss then disagreed about the line's
+	// width, so the card's background and border stopped short of the column.
+	title = ansi.Truncate(title, maxTitleLen, "…")
 
 	leftLine := b.String()
 	indicatorText := strings.Join(indicators, " ")

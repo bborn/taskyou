@@ -256,3 +256,72 @@ func TestGateParkedLogIsWritten(t *testing.T) {
 		t.Error("expected a 'question' log marking the gate parked for human review")
 	}
 }
+
+// A remotely placed task keeps its branch in remote_branch and its worktree on
+// another host, so branch_name and worktree_path are both empty. PR lookup must
+// still resolve a branch to ask about and a local checkout to ask in — otherwise
+// it reports "no PR" for every placed task and Complete routes finished work to
+// done instead of parking it in blocked.
+func TestPRLookupTargetUsesRemoteBranchAndProjectDir(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "placed work", db.StatusProcessing, "", "")
+	if err := database.SetTaskRemoteWorktree(task.ID,
+		"/home/olgm/projects/engineering/.task-worktrees/5316-x", "task/5316-x"); err != nil {
+		t.Fatalf("set remote worktree: %v", err)
+	}
+	task, _ = database.GetTask(task.ID)
+
+	repoDir, branch := prLookupTarget(database, task)
+	if branch != "task/5316-x" {
+		t.Errorf("branch = %q, want the remote branch task/5316-x", branch)
+	}
+	proj, _ := database.GetProjectByName("proj")
+	if repoDir != proj.Path {
+		t.Errorf("repoDir = %q, want the local project checkout %q", repoDir, proj.Path)
+	}
+}
+
+// A worktree path belonging to another machine must never be handed to git as if
+// it were a local checkout.
+func TestPRLookupTargetIgnoresANonLocalWorktreePath(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "placed work", db.StatusProcessing, "", "")
+	task.WorktreePath = "/home/olgm/definitely/not/on/this/machine"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("set worktree path: %v", err)
+	}
+	task, _ = database.GetTask(task.ID)
+
+	repoDir, _ := prLookupTarget(database, task)
+	if repoDir == task.WorktreePath {
+		t.Fatalf("repoDir = %q, want the local project checkout, not the remote path", repoDir)
+	}
+	proj, _ := database.GetProjectByName("proj")
+	if repoDir != proj.Path {
+		t.Errorf("repoDir = %q, want %q", repoDir, proj.Path)
+	}
+}
+
+// The whole point: a placed task that opened a PR must park in blocked, where it
+// is visible, rather than being reported PR-less and buried in done.
+func TestPlacedTaskWithPRParksForReview(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "placed ship", db.StatusProcessing, "", "")
+	if err := database.SetTaskRemoteWorktree(task.ID, "/home/olgm/wt/5316", "task/5316-x"); err != nil {
+		t.Fatalf("set remote worktree: %v", err)
+	}
+	if err := database.UpdateTaskPRInfo(task.ID, "https://example.com/pull/3598", 3598, ""); err != nil {
+		t.Fatalf("seed PR: %v", err)
+	}
+
+	outcome, err := Complete(database, task.ID, "opened PR 3598", Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Kind != KindPRReview {
+		t.Fatalf("kind = %q, want %q", outcome.Kind, KindPRReview)
+	}
+	if got := statusOf(t, database, task.ID); got != db.StatusBlocked {
+		t.Errorf("status = %q, want blocked so it shows up for review", got)
+	}
+}

@@ -27,8 +27,47 @@ fn zoomed(pane: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The `-L` name of the tmux server ty runs agents on, from the value that
+/// chooses it: `None` means tmux's own default server.
+fn socket_from(choice: &str) -> Option<String> {
+    match choice.trim() {
+        "" | "default" => None,
+        name => Some(name.to_string()),
+    }
+}
+
+/// The agent server's socket, by the same rule as ty's Go side
+/// (internal/tmuxctl): the TASKYOU_TMUX_SOCKET override, else the choice ty
+/// records next to its database, else tmux's default server. Read on every
+/// call: ty records the choice the first time it touches tmux, which can be
+/// after this app started.
+fn agent_socket() -> Option<String> {
+    if let Ok(choice) = std::env::var("TASKYOU_TMUX_SOCKET") {
+        return socket_from(&choice);
+    }
+    let db = std::env::var("WORKTREE_DB_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".local/share/task/tasks.db"))
+        })?;
+    let choice = std::fs::read_to_string(db.parent()?.join("tmux-socket")).ok()?;
+    socket_from(&choice)
+}
+
+/// `-L <socket>` for the agent server, or nothing for the default server.
+pub(crate) fn socket_args() -> Vec<String> {
+    match agent_socket() {
+        Some(socket) => vec!["-L".into(), socket],
+        None => Vec::new(),
+    }
+}
+
 fn tmux(args: &[&str]) -> Result<String, String> {
     let out = Command::new("tmux")
+        .args(socket_args())
         .args(args)
         .output()
         .map_err(|e| format!("tmux not available: {e}"))?;
@@ -114,17 +153,20 @@ pub fn prepare_attach(
     // Attach, then mark the session for destruction on detach. Chaining via
     // tmux's ";" separator means destroy-unattached only applies once a
     // client is actually connected.
+    // The PTY's client must reach the same server the view session is on.
+    let mut command: Vec<String> = vec!["tmux".into()];
+    command.extend(socket_args());
+    command.extend([
+        "attach-session".into(),
+        "-t".into(),
+        view_session.clone(),
+        ";".into(),
+        "set-option".into(),
+        "destroy-unattached".into(),
+        "on".into(),
+    ]);
     Ok(AttachPlan {
-        command: vec![
-            "tmux".into(),
-            "attach-session".into(),
-            "-t".into(),
-            view_session.clone(),
-            ";".into(),
-            "set-option".into(),
-            "destroy-unattached".into(),
-            "on".into(),
-        ],
+        command,
         view_session,
     })
 }
@@ -143,6 +185,13 @@ mod tests {
     fn rejects_missing_daemon_session_with_pane() {
         let err = prepare_attach(1, "", "task-1", Some("%5")).unwrap_err();
         assert!(err.contains("daemon session"));
+    }
+
+    #[test]
+    fn socket_choice_matches_ty() {
+        assert_eq!(socket_from("taskyou\n"), Some("taskyou".to_string()));
+        assert_eq!(socket_from("default"), None);
+        assert_eq!(socket_from("  "), None);
     }
 
     #[test]

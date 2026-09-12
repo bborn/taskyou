@@ -1544,7 +1544,18 @@ func TestTaskEventDetectsPermissionPrompt(t *testing.T) {
 		TaskID: task.ID,
 		Task:   task,
 	}}
-	m.Update(event)
+	m.eventCh = make(chan executor.TaskEvent)
+	close(m.eventCh)
+	_, cmd := m.Update(event)
+	// Process the asynchronous prompt read, without executing the long-lived
+	// event subscription or optional terminal enrichment.
+	for _, command := range cmd().(tea.BatchMsg) {
+		if result := command(); result != nil {
+			if prompt, ok := result.(eventPromptMsg); ok {
+				m.Update(prompt)
+			}
+		}
+	}
 
 	// The handler should have detected the permission prompt
 	if !m.tasksNeedingInput[task.ID] {

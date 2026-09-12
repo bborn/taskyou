@@ -77,3 +77,45 @@ An earlier draft made carrying opt-in, on the reasoning that most placements hap
 tasks that have never run and so have nothing to carry. That reasoning was invented, not
 measured. Counting a real board: 31 of 31 placement decisions were on tasks that had
 already run; none on a task that never had. Carrying is the default.
+
+## Correction: step 6 was never implemented
+
+"Land" was written as a sentence about what would happen on its own — "the task's next
+spawn on the target clones the pushed branch" — and no code did it. Task 5286 found all
+three ways that failed.
+
+The branch existed only as prose. `CarryWork` returned it, the placement reason quoted it
+("moved here by hand, carrying task/5286-…"), and nothing wrote it to a field. Worktree
+setup reads `SourceBranch` and `BranchName`, so it saw a task with no branch and did what
+that means: cut a new one from the default branch.
+
+That made both landings wrong, in opposite ways:
+
+- **Local** never provisioned at all. The task arrived with an empty `worktree_path`, and
+  every start path but the daemon's refuses that — "task has no worktree yet: refusing to
+  start outside an isolated worktree". The guard was right; nothing did the provisioning
+  it was guarding.
+- **Remote** provisioned cleanly and silently dropped the work. Its script asked only
+  whether a *local* branch of that name existed; a carried branch is on origin and
+  nowhere else, so it fell through to a fresh branch off main. Correct name, clean
+  checkout, none of the work — immediately after the carry gate finished proving that
+  work was safe. This is the more dangerous of the two, because nothing looks wrong.
+
+So step 6 is now code, and it runs at move time rather than being left to the next spawn:
+
+6. **Land.** Write the carried branch to the task (`SourceBranch`, `BranchName`), so the
+   receiving host can find the work as data rather than as English. Provision the local
+   worktree immediately when the target is here; remote targets still provision at spawn,
+   which is the only moment that host is reachable, but now attach to `origin/<branch>`
+   when there is no local ref.
+
+Landing is best effort by design. It runs *after* the carry gate and the placement write,
+so a landing failure means a task that starts a little later — never a task that reports
+"NOT been moved" when it has in fact moved.
+
+Re-running `ty place <id> local` on a task that is already placed here but has no worktree
+repairs it instead of reporting a no-op, and finds the work by looking for a branch named
+for that task on origin. A task's branch name is derived from its id, so a branch by that
+name is that task's own work and not a coincidence. That lookup fetches, which is why it
+hangs off the landing path and not off `setupWorktree`, which every ordinary task start
+goes through.

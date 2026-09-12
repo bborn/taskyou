@@ -681,7 +681,7 @@ func TestPendingPaneAction_DaemonOwnedTasksWaitRegardlessOfWorktree(t *testing.T
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			task := &db.Task{ID: 4847, Status: tc.status, WorktreePath: tc.worktree}
-			if got := pendingPaneAction(task); got != tc.want {
+			if got := pendingPaneAction(task, false); got != tc.want {
 				t.Errorf("pendingPaneAction(status=%s worktree=%q) = %v, want %v",
 					tc.status, tc.worktree, got, tc.want)
 			}

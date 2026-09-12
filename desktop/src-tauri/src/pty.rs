@@ -188,6 +188,7 @@ fn cleanup_session(mut session: PtySession) {
     // the client detaches; kill-session is belt-and-braces (e.g. SIGKILLed client).
     if let Some(name) = &session.kill_tmux_session {
         let _ = Command::new("tmux")
+            .args(crate::terminal::socket_args())
             .args(["kill-session", "-t", name])
             .output();
     }

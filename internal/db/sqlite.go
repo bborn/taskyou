@@ -309,6 +309,7 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_task_status_events_outcome ON task_status_events(outcome)`,
 	}
 
+	migrations = append(migrations, remoteMigrations...)
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
@@ -436,11 +437,38 @@ func (db *DB) migrate() error {
 		// does not exist here.
 		`ALTER TABLE tasks ADD COLUMN remote_worktree_path TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN remote_branch TEXT DEFAULT ''`,
+		// When the stale-worktree sweeper last failed to archive this task's
+		// worktree. A sweep target whose archive fails is un-sweepable until
+		// something changes: retrying it every 10 minutes forever only spams the
+		// daemon log and burns a git invocation per attempt (one row did exactly
+		// that hourly for five months). Set once on failure, cleared whenever the
+		// task gets a worktree again, and used to exclude the row from the
+		// automatic sweep — `task worktrees cleanup` still retries on demand.
+		`ALTER TABLE tasks ADD COLUMN worktree_sweep_failed_at DATETIME`,
 	}
 
 	for _, m := range alterMigrations {
 		// Ignore "duplicate column" errors for idempotent migrations
 		db.Exec(m)
+	}
+
+	// Build board indexes after column migrations so older databases have
+	// pinned/deleted_at before these expressions are compiled.
+	for _, query := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_tasks_active_board ON tasks(
+			pinned DESC,
+			CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC,
+			id DESC
+		) WHERE deleted_at IS NULL AND status NOT IN ('done', 'archived')`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_status_recency ON tasks(
+			status,
+			CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC,
+			id DESC
+		) WHERE deleted_at IS NULL`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			return fmt.Errorf("create task listing index: %w", err)
+		}
 	}
 
 	// Note: SQLite doesn't support ALTER COLUMN DEFAULT directly

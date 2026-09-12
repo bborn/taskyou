@@ -130,7 +130,7 @@ Create a new task in the system.
 
 ### taskyou_create_pipeline
 
-Create a multi-step **workflow** for a goal: the goal is split into a DAG of step tasks (default `plan-code-review`: plan → code → two parallel reviewers → collect), each on its own executor/model, sharing one git branch and advancing automatically. Use this instead of a single task when a goal benefits from a plan/code/review split. The first step is queued immediately. Requires a git-worktree project with a remote. See [Workflows](../README.md#workflows).
+Create a multi-step **workflow** for a goal: the goal is split into a DAG of step tasks (default `plan-code-review`: plan → code → two parallel reviewers → collect), each on its own executor/model, sharing one git branch and advancing automatically. Use this instead of a single task when a goal benefits from a plan/code/review split. The first step is queued immediately. Requires a git-worktree project with a remote. See [Workflows](reference.md#workflows).
 
 **Parameters:**
 - `goal` (string, required) - The overall goal, threaded into every step's prompt

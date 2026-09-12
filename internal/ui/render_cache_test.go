@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
@@ -197,5 +198,36 @@ func TestCardCacheRespectsWidthAndSelection(t *testing.T) {
 	again := k.renderTaskCard(task, 36, false)
 	if again != unselected {
 		t.Error("card cache returned different output for identical inputs")
+	}
+}
+
+func TestKanbanViewportCacheRefreshesOffscreenChangesWhenRevealed(t *testing.T) {
+	forceColor(t)
+	for _, width := range []int{160, 60} {
+		k := NewKanbanBoard(width, 50)
+		tasks := make([]*db.Task, 1000)
+		for i := range tasks {
+			tasks[i] = &db.Task{ID: int64(i + 1), Title: "Original task title", Status: db.StatusBacklog}
+		}
+		k.SetTasks(tasks)
+		before := k.View()
+		sig := k.renderSignature()
+		tasks[500].Title = "Updated while offscreen"
+		if got := k.renderSignature(); got != sig {
+			t.Fatal("offscreen content invalidated viewport")
+		}
+		if got := k.View(); got != before {
+			t.Fatal("offscreen content changed visible pixels")
+		}
+		k.SelectTask(tasks[500].ID)
+		actual := k.View()
+		k.cachedViewOK = false
+		k.cardCache = nil
+		if actual != k.View() {
+			t.Fatal("scroll revealed stale cached content")
+		}
+		if !strings.Contains(actual, "Updated while offscreen") {
+			t.Fatal("changed task was not visible")
+		}
 	}
 }

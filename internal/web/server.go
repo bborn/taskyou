@@ -87,6 +87,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/board/stream", s.handleBoardStream)
 
 	// Tasks CRUD
+	mux.HandleFunc("POST /api/tui/reload", s.handleTUIReload)
 	mux.HandleFunc("GET /api/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /api/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /api/tasks/{id}", s.handleTaskDetail)
@@ -94,6 +95,8 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 
 	// Task actions
+	mux.HandleFunc("GET /api/tasks/{id}/placement", s.handleGetPlacement)
+	mux.HandleFunc("POST /api/tasks/{id}/placement", s.handleSetPlacement)
 	mux.HandleFunc("POST /api/tasks/{id}/move", s.handleMoveTask)
 	mux.HandleFunc("POST /api/tasks/{id}/status", s.handleSetStatus)
 	mux.HandleFunc("POST /api/tasks/{id}/execute", s.handleExecuteTask)

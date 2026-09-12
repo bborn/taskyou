@@ -24,13 +24,17 @@ git -C "$PROJECT_PATH" worktree remove --force "$WT" 2>/dev/null || true
 git -C "$PROJECT_PATH" worktree add -q "$WT" -b "qa-$TASK_ID" 2>/dev/null \
   || git -C "$PROJECT_PATH" worktree add -q "$WT"
 
-# NOTE: these guards intentionally bypass lib.sh's tmux() wrapper: /bin/bash
-# 3.2 (macOS default) aborts on a failing *function* under set -e even inside
-# || lists, so a missing session/window would silently kill the script.
-# Direct `command tmux` calls in || lists are safe.
-command tmux -L "$TY_QA_TMUX_SOCKET" has-session -t "$TY_DAEMON_SESSION" 2>/dev/null \
-  || command tmux -L "$TY_QA_TMUX_SOCKET" new-session -d -s "$TY_DAEMON_SESSION" -n _placeholder "tail -f /dev/null"
-command tmux -L "$TY_QA_TMUX_SOCKET" kill-window -t "$WIN" 2>/dev/null || true
+# NOTE: these guards are `if` statements on purpose. /bin/bash 3.2 (macOS
+# default) aborts a set -e script when a failing function, or a failing
+# `command ...`, sits on the left of `||` — so the fallback never ran and the
+# script exited silently on a fresh server. A failing `if` condition never
+# trips errexit, on any bash.
+if ! tmux has-session -t "$TY_DAEMON_SESSION" 2>/dev/null; then
+  tmux new-session -d -s "$TY_DAEMON_SESSION" -n _placeholder "tail -f /dev/null"
+fi
+if tmux list-windows -t "$TY_DAEMON_SESSION" -F '#{window_name}' | grep -qx "task-$TASK_ID"; then
+  tmux kill-window -t "$WIN"
+fi
 
 runner="$TY_QA_ROOT/agent-$TASK_ID.sh"
 printf '#!/usr/bin/env bash\ncd %q\nexec %s\n' "$WT" "$AGENT_CMD" > "$runner"

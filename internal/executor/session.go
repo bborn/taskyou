@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executorlock"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // spawnLockTimeout bounds how long a spawner waits for the per-task executor
@@ -175,6 +177,9 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 
 	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
 	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	// The split made the shell active. A view's keystrokes go to the active pane,
+	// so hand it back to the agent, as ensureShellPane does.
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0").Run()
 
 	// Persist pane IDs so other clients (HTTP API, TUI) can target the panes.
 	e.savePaneIDs(ctx, windowTarget, task.ID)
@@ -217,6 +222,31 @@ var ErrNoWorktree = errors.New("task has no worktree yet")
 // a broken local setup when the truth is that the task is alive and well on
 // another host.
 var ErrPlacedRemotely = errors.New("task is running on another machine")
+
+// ErrWorktreeMissing means the task still records a worktree path, but nothing
+// is there any more — the worktree was reaped (or moved) while the DB row kept
+// pointing at it.
+//
+// It must be its own failure, and it must be fatal to the start path. tmux's
+// `new-window -c <dir>` does NOT fail on a missing directory: it silently starts
+// the window in $HOME. So a task whose worktree had been reaped would launch an
+// agent in the user's home directory, where the ownership check that follows
+// ("is this pane in the task's worktree?") could never accept the pane it had
+// just created — and the detail view would start another one. That loop burned
+// 178 Claude sessions and $43 in 30 minutes on one task.
+var ErrWorktreeMissing = errors.New("task worktree no longer exists")
+
+// worktreeUsable reports whether path is a directory that exists right now.
+// Only a definite "not there" counts as missing: a stat that fails for any other
+// reason (permissions, a flaky network mount) is treated as usable so a
+// transient error never blocks a legitimate start.
+func worktreeUsable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return info.IsDir()
+}
 
 // RemoteTaskLocation describes where a remotely placed task actually lives, for
 // surfaces (the TUI, `ty show`) that can only say so rather than show it.
@@ -291,12 +321,20 @@ func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
 		return "", fmt.Errorf("%w: task %d was placed on %s", ErrPlacedRemotely, task.ID, task.PlacementTarget)
 	}
 	if task.WorktreePath != "" {
+		// Recorded but gone: fail loudly rather than let tmux quietly start the
+		// agent in $HOME (see ErrWorktreeMissing).
+		if !worktreeUsable(task.WorktreePath) {
+			return "", fmt.Errorf("%w: task %d records %s, which is not on disk", ErrWorktreeMissing, task.ID, task.WorktreePath)
+		}
 		return task.WorktreePath, nil
 	}
 	// A project that does not use worktrees shares the project directory by
 	// design; that is its normal, isolated-enough working directory.
 	if task.Project != "" && !e.config.ProjectUsesWorktrees(task.Project) {
 		if dir := e.GetProjectDir(task.Project); dir != "" {
+			if !worktreeUsable(dir) {
+				return "", fmt.Errorf("%w: project %s directory %s is not on disk", ErrWorktreeMissing, task.Project, dir)
+			}
 			return dir, nil
 		}
 	}
@@ -334,9 +372,12 @@ func findOrCreateDaemonSession(ctx context.Context) (string, error) {
 
 	daemonSession := fmt.Sprintf("task-daemon-%d", os.Getpid())
 	// "tail -f /dev/null" keeps the placeholder window alive (empty windows exit immediately).
-	if err := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
+	args := append([]string{"new-session", "-d", "-s", daemonSession}, tmuxctl.DefaultSizeArgs()...)
+	if err := tmuxCmd(ctx, append(args, "-n", "_placeholder", "tail", "-f", "/dev/null")...).Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session failed: %w", err)
 	}
+	// New task windows start at this size while nobody is attached.
+	_ = tmuxCmd(ctx, "set-option", "-t", daemonSession, "default-size", tmuxctl.DefaultSize()).Run()
 	tagSessionOwner(ctx, daemonSession)
 	return daemonSession, nil
 }
@@ -365,4 +406,30 @@ func LocalOwnerTag() string {
 // Best-effort: an untagged session is treated as "unknown", never as "mine".
 func tagSessionOwner(ctx context.Context, session string) {
 	_ = tmuxCmd(ctx, "set-option", "-t", session, TmuxOwnerOption, LocalOwnerTag()).Run()
+}
+
+// tagPane labels a pane with its task and role on the agent server (see
+// tmuxctl.PaneTaskOption). Best effort: an untagged pane is still found the old
+// way, by stored ID or position.
+func tagPane(ctx context.Context, pane string, taskID int64, role string) {
+	if pane == "" {
+		return
+	}
+	for _, args := range tmuxctl.TagPaneArgs(pane, taskID, role) {
+		_ = tmuxCmd(ctx, args...).Run()
+	}
+}
+
+// taggedPane returns the pane in windowTarget tagged with role, or "".
+func taggedPane(ctx context.Context, windowTarget, role string) string {
+	out, err := tmuxCmd(ctx, "list-panes", "-t", windowTarget, "-F", "#{pane_id} #{"+tmuxctl.PaneRoleOption+"}").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if id, r, _ := strings.Cut(strings.TrimSpace(line), " "); r == role {
+			return id
+		}
+	}
+	return ""
 }

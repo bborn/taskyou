@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -290,7 +291,7 @@ func (m *TaskRefAutocompleteModel) renderTaskItem(task *db.Task, isSelected bool
 	title := task.Title
 	maxTitleLen := 40
 	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-3] + "..."
+		title = ansi.Truncate(title, maxTitleLen, "...")
 	}
 
 	titleStyle := lipgloss.NewStyle()

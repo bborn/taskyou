@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // How a remotely placed agent says it is finished.
@@ -42,6 +44,8 @@ const (
 // hostEvent is one signal from one task.
 type hostEvent struct {
 	TaskID int64
+	RunID  string
+	ID     string
 	Kind   hostEventKind
 	Detail string
 	At     time.Time
@@ -51,7 +55,7 @@ type hostEvent struct {
 // per-user rather than per-worktree so the host agent has one place to watch,
 // and it is outside the worktree so a signal is not something the agent can
 // accidentally commit.
-const remoteSpoolDir = "$HOME/.ty-events"
+const remoteSpoolDir = "$HOME/.ty-events/${WORKTREE_COORDINATOR_ID:?}"
 
 // signalScriptPath is where the script is installed inside a task's worktree.
 // Inside the worktree because that is the one directory the agent is certain to
@@ -80,12 +84,16 @@ const signalScriptTemplate = `#!/bin/sh
 set -u
 kind=${1:-done}
 shift 2>/dev/null || true
-id=${WORKTREE_TASK_ID:-0}
+id=${WORKTREE_TASK_ID:?}
+run=${WORKTREE_RUN_ID:?}
+case "$id:$run" in *[!0-9a-f:]*|:*) exit 1 ;; esac
 spool=@@SPOOL@@
-mkdir -p "$spool" 2>/dev/null || exit 1
-tmp="$spool/.$id.$$.tmp"
-printf '%s %s\n' "$kind" "$(printf '%s' "$*" | base64 | tr -d '\n')" >"$tmp" || exit 1
-mv "$tmp" "$spool/$id.$(date +%s)-$$.evt" || exit 1
+umask 077
+mkdir -p "$spool" || exit 1
+tmp=$(mktemp "$spool/.$id.$run.XXXXXXXX") || exit 1
+name=${tmp##*/}; name=${name#.}
+printf '%s %s %s %s\n' "$id" "$run" "$kind" "$(printf '%s' "$*" | base64 | tr -d '\n')" >"$tmp" || exit 1
+mv "$tmp" "$spool/$name.evt" || exit 1
 `
 
 // signalInstructions is appended to a remotely placed agent's prompt.
@@ -131,6 +139,16 @@ func (e *Executor) installSignalScript(ctx context.Context, workDir string) erro
 // parseHostEvent reads one "E <task-id> <kind> <base64 detail>" line.
 func parseHostEvent(line string) (hostEvent, bool) {
 	fields := strings.SplitN(strings.TrimPrefix(line, "E "), " ", 3)
+	// Version 2 includes the run fence and spool entry ID.
+	var runID, eventID string
+	v2 := strings.SplitN(strings.TrimPrefix(line, "E "), " ", 5)
+	if len(v2) == 5 {
+		runID, eventID = v2[1], v2[2]
+		if !validSignalID(runID) || !validSignalID(eventID) {
+			return hostEvent{}, false
+		}
+		fields = []string{v2[0], v2[3], v2[4]}
+	}
 	if len(fields) < 2 {
 		return hostEvent{}, false
 	}
@@ -138,10 +156,12 @@ func parseHostEvent(line string) (hostEvent, bool) {
 	if err != nil || id <= 0 {
 		return hostEvent{}, false
 	}
-	ev := hostEvent{TaskID: id, Kind: hostEventKind(fields[1]), At: time.Now()}
+	ev := hostEvent{TaskID: id, RunID: runID, ID: eventID, Kind: hostEventKind(fields[1]), At: time.Now()}
 	if len(fields) == 3 {
 		if raw, derr := base64.StdEncoding.DecodeString(fields[2]); derr == nil {
 			ev.Detail = strings.TrimSpace(string(raw))
+		} else if runID != "" {
+			return hostEvent{}, false
 		}
 	}
 	switch ev.Kind {
@@ -174,9 +194,39 @@ func (e *Executor) taskSignal(host string, taskID int64) (hostEvent, bool) {
 	if host == "" {
 		return hostEvent{}, false
 	}
-	channel := e.hostChannelFor(host)
-	if channel == nil {
+	e.hostChannelFor(host)
+	ev, ok, err := e.db.RemoteSignal(taskID, host)
+	if err != nil {
+		e.logger.Warn("read remote signal", "error", err)
 		return hostEvent{}, false
 	}
-	return channel.TakeEvent(taskID)
+	return hostEvent{TaskID: ev.TaskID, RunID: ev.RunID, ID: ev.ID, Kind: hostEventKind(ev.Kind), Detail: ev.Detail}, ok
+}
+
+func validSignalID(s string) bool {
+	if s == "" || len(s) > 160 {
+		return false
+	}
+	for _, c := range s {
+		valid := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-'
+		if !valid {
+			return false
+		}
+	}
+	return !strings.Contains(s, "..")
+}
+
+func (c *hostChannel) persistSignal(ev hostEvent) {
+	if c.database == nil || ev.ID == "" || ev.RunID == "" {
+		return
+	}
+	err := c.database.SaveRemoteEvent(db.RemoteEvent{ID: ev.ID, TaskID: ev.TaskID, RunID: ev.RunID, Host: c.host, Kind: string(ev.Kind), Detail: ev.Detail})
+	if err != nil {
+		return
+	} // No acknowledgement until the inbox is durable.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	path := "~/.ty-events/" + c.coordinator + "/" + ev.ID
+	cmd := (RemoteRunner{Host: c.host}).Command(ctx, "", "sh", "-c", "rm -f -- "+shellQuoteRemotePath(path))
+	_ = cmd.Run() // A failed acknowledgement is safely retried on redelivery.
 }

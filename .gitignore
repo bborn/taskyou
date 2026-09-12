@@ -14,6 +14,7 @@
 .claude/*
 !.claude/settings.json
 .crush/
+.codex/
 
 # Archives
 *.tar.gz
@@ -64,3 +65,6 @@ ty-chrome.zip
 # Plugin user config (copied from *.example.env)
 examples/plugins/**/config.env
 .task-worktrees-manual/
+
+# Downloadable onboarding project served by the static site
+!docs/downloads/taskyou-storefront.zip

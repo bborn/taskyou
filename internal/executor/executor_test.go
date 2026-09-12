@@ -343,26 +343,22 @@ func TestAttachmentsInPrompt(t *testing.T) {
 
 func TestFindClaudeSessionID(t *testing.T) {
 	// Create a temporary directory structure mimicking Claude's session storage
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("Could not get home directory")
-	}
+	configDir := t.TempDir()
 
 	// Create a unique test directory
-	testWorkDir := "/tmp/test-claude-session-" + time.Now().Format("20060102150405")
+	testWorkDir := t.TempDir()
 	// Match Claude's escaping: replace / with -, replace . with -, keep leading -
 	escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")
 	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
-	projectDir := home + "/.claude/projects/" + escapedPath
+	projectDir := filepath.Join(configDir, "projects", escapedPath)
 
 	// Create the project directory
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatalf("Could not create project directory: %v", err)
 	}
-	defer os.RemoveAll(projectDir)
 
 	t.Run("no session files", func(t *testing.T) {
-		result := FindClaudeSessionID(testWorkDir)
+		result := findClaudeSessionIDImpl(testWorkDir, configDir)
 		if result != "" {
 			t.Errorf("expected empty string, got %q", result)
 		}
@@ -384,7 +380,7 @@ func TestFindClaudeSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := FindClaudeSessionID(testWorkDir)
+		result := findClaudeSessionIDImpl(testWorkDir, configDir)
 		if result != "def67890-1234-5678-abcd-123456789def" {
 			t.Errorf("expected most recent session, got %q", result)
 		}
@@ -406,7 +402,7 @@ func TestFindClaudeSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := FindClaudeSessionID(testWorkDir)
+		result := findClaudeSessionIDImpl(testWorkDir, configDir)
 		if result != "xyz99999-1234-5678-abcd-123456789xyz" {
 			t.Errorf("expected regular session, got %q (should ignore agent files)", result)
 		}
@@ -721,33 +717,43 @@ func TestBuildPromptIncludesTaskMetadata(t *testing.T) {
 }
 
 func TestCleanupClaudeSessions(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("Could not get home directory")
-	}
-	defaultDir := filepath.Join(home, ".claude")
+	configDir := t.TempDir()
 
 	t.Run("returns nil for empty worktree path", func(t *testing.T) {
-		err := CleanupClaudeSessions("", defaultDir)
+		err := CleanupClaudeSessions("", configDir)
 		if err != nil {
 			t.Errorf("expected nil error for empty path, got: %v", err)
 		}
 	})
 
 	t.Run("returns nil for non-existent session directory", func(t *testing.T) {
-		err := CleanupClaudeSessions("/tmp/non-existent-worktree-12345", defaultDir)
+		err := CleanupClaudeSessions("/tmp/non-existent-worktree-12345", configDir)
 		if err != nil {
 			t.Errorf("expected nil error for non-existent directory, got: %v", err)
 		}
 	})
 
 	t.Run("removes existing session directory", func(t *testing.T) {
+		// Cleanup must preserve the rest of the agent's configuration and history.
+		preservedPaths := []string{
+			filepath.Join(configDir, "settings.json"),
+			filepath.Join(configDir, "projects", "unrelated-project", "session.jsonl"),
+		}
+		for _, path := range preservedPaths {
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("preserve this data"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
 		// Create a unique test worktree path
-		testWorkDir := "/tmp/test-cleanup-sessions-" + time.Now().Format("20060102150405")
+		testWorkDir := t.TempDir()
 		// Match Claude's escaping: replace / with -, replace . with -, keep leading -
 		escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")
 		escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
-		projectDir := home + "/.claude/projects/" + escapedPath
+		projectDir := filepath.Join(configDir, "projects", escapedPath)
 
 		// Create the project directory with some session files
 		if err := os.MkdirAll(projectDir, 0755); err != nil {
@@ -775,16 +781,20 @@ func TestCleanupClaudeSessions(t *testing.T) {
 		}
 
 		// Run cleanup
-		err := CleanupClaudeSessions(testWorkDir, defaultDir)
+		err := CleanupClaudeSessions(testWorkDir, configDir)
 		if err != nil {
 			t.Errorf("CleanupClaudeSessions failed: %v", err)
+		}
+		for _, path := range preservedPaths {
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != "preserve this data" {
+				t.Errorf("cleanup changed unrelated data at %s: content=%q, err=%v", path, data, err)
+			}
 		}
 
 		// Verify directory was removed
 		if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
 			t.Error("Project directory should not exist after cleanup")
-			// Clean up manually if test failed
-			os.RemoveAll(projectDir)
 		}
 	})
 }

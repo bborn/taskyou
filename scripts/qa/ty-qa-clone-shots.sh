@@ -23,7 +23,7 @@ REPO_URL="https://github.com/charmbracelet/bubbletea"
 REPO_NAME="bubbletea"
 
 echo "==> Building ty -> $TY_BIN"
-( cd "$TY_REPO_ROOT" && go build -o "$TY_BIN" ./cmd/task )
+( cd "$TY_REPO_ROOT" && go build -buildvcs=false -o "$TY_BIN" ./cmd/task )
 
 # Only now: everything below runs against the throwaway home (the go build above
 # would otherwise rebuild its cache inside it).

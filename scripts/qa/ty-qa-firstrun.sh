@@ -21,7 +21,7 @@ PLAIN="$ROOT/just-a-folder"
 SID="$TY_UI_SESSION"
 
 echo "==> Building ty -> $TY_BIN"
-( cd "$TY_REPO_ROOT" && go build -o "$TY_BIN" ./cmd/task )
+( cd "$TY_REPO_ROOT" && go build -buildvcs=false -o "$TY_BIN" ./cmd/task )
 
 echo "==> Preparing scenario folders under $ROOT"
 rm -rf "$ROOT"; mkdir -p "$GITPROJ" "$MARKER" "$PLAIN"

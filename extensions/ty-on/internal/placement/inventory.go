@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -86,4 +87,12 @@ func (inv *Inventory) Serving(project string) []Candidate {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// Destination resolves the inventory label to the SSH destination.
+func (c Candidate) Destination() string {
+	if ssh := strings.TrimSpace(c.Host.SSH); ssh != "" {
+		return ssh
+	}
+	return c.Name
 }

@@ -145,3 +145,36 @@ func TestSoftDeletedTaskFreesPort(t *testing.T) {
 		t.Error("soft-deleted task must not keep its port reserved")
 	}
 }
+
+// TestSoftDeleteHidesFromSearch pins the board filter and command palette. Both
+// supplement their in-memory task list with SearchTasks, so a trashed task that
+// still matches the query is pulled straight back out of the database and the
+// card never leaves the board — it survives every reload.
+func TestSoftDeleteHidesFromSearch(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	id := mkTask(t, database, "catalog sync throttling")
+
+	found, err := database.SearchTasks("catalog sync", 50)
+	if err != nil {
+		t.Fatalf("search before soft-delete: %v", err)
+	}
+	if len(found) != 1 || found[0].ID != id {
+		t.Fatalf("expected task %d in search results before soft-delete, got %+v", id, found)
+	}
+
+	if err := database.SoftDeleteTask(id); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	found, err = database.SearchTasks("catalog sync", 50)
+	if err != nil {
+		t.Fatalf("search after soft-delete: %v", err)
+	}
+	for _, tk := range found {
+		if tk.ID == id {
+			t.Fatalf("soft-deleted task %d still returned by SearchTasks", id)
+		}
+	}
+}

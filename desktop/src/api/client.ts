@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  Placement,
   Routine,
   RoutineRun,
   Dependencies,
@@ -59,6 +60,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+ placement: (id: number) => request<Placement>("GET", `/api/tasks/${id}/placement`),
+ placeTask: (id: number, target: string, workdir: string) => request<{messages: string[]}>("POST", `/api/tasks/${id}/placement`, {target, workdir}),
   // Tasks
   listTasks: (opts?: { all?: boolean; project?: string; limit?: number }) => {
     const params = new URLSearchParams();
@@ -67,6 +70,8 @@ export const api = {
     params.set("limit", String(opts?.limit ?? 1000));
     return request<Task[]>("GET", `/api/tasks?${params}`);
   },
+  taskLogsBefore: (id: number, before: number, limit = 200) =>
+    request<LogLine[]>("GET", `/api/tasks/${id}/logs?before=${before}&limit=${limit}`),
   taskDetail: (id: number) => request<TaskDetail>("GET", `/api/tasks/${id}`),
   createTask: (task: {
     title: string;

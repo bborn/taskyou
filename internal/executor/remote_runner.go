@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -93,14 +94,38 @@ func (r RemoteRunner) remoteScript(workDir, name string, args ...string) string 
 
 // sshBinary is the ssh client every remote command goes through. A package-level
 // var only so tests can point it at a stub; nothing user-facing changes it.
-var sshBinary = "ssh"
+//
+// Read and written atomically because a host channel runs its ssh from its own
+// goroutine while a test's cleanup restores this. t.Cleanup is LIFO, so a stub
+// installed AFTER an executor is restored BEFORE that executor's channels are
+// closed, and the still-running goroutine reads what the cleanup is writing.
+// Making the access atomic closes that window outright instead of resting on the
+// order two helpers happen to be called in — an invariant no future test can
+// accidentally break by moving a line.
+var sshBinary atomic.Pointer[string]
+
+// sshBin returns the ssh client to shell out to. The zero value means "ssh",
+// which is what every non-test caller gets.
+func sshBin() string {
+	if p := sshBinary.Load(); p != nil {
+		return *p
+	}
+	return "ssh"
+}
+
+// setSSHBinary points remote commands at path and returns the restore func.
+// Tests only; nothing in normal operation replaces the ssh client.
+func setSSHBinary(path string) func() {
+	prev := sshBinary.Swap(&path)
+	return func() { sshBinary.Store(prev) }
+}
 
 // ssh returns the ssh binary to use.
 func (r RemoteRunner) ssh() string {
 	if r.SSHBin != "" {
 		return r.SSHBin
 	}
-	return sshBinary
+	return sshBin()
 }
 
 // sshArgs are the options every remote command carries.
@@ -114,7 +139,7 @@ func (r RemoteRunner) sshArgs() []string {
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(r.connectTimeout().Seconds())),
 	}
 	args = append(args, sshMultiplexArgs()...)
-	return append(args, r.Host)
+	return append(args, "--", r.Host)
 }
 
 // sshMultiplexArgs reuse ONE ssh connection per host across every command ty
@@ -190,8 +215,8 @@ func (r RemoteRunner) connectTimeout() time.Duration {
 // fallback would put the load right back on the machine this feature exists to
 // unload, on exactly the days nobody is watching.
 func (r RemoteRunner) Preflight(ctx context.Context) (string, error) {
-	if strings.TrimSpace(r.Host) == "" {
-		return "", fmt.Errorf("placement named no host")
+	if strings.TrimSpace(r.Host) == "" || strings.HasPrefix(r.Host, "-") || strings.ContainsAny(r.Host, " \t\r\n") {
+		return "", fmt.Errorf("placement must name a valid SSH destination")
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.connectTimeout()+5*time.Second)
 	defer cancel()

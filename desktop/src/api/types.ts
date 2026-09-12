@@ -7,6 +7,8 @@ export type TaskStatus =
   | "archived";
 
 export interface Task {
+ placement_target?: string;
+ placement_reason?: string;
   id: number;
   title: string;
   body: string;
@@ -97,6 +99,8 @@ export interface Attachment {
 }
 
 export interface TerminalInfo {
+  remote_host?: string;
+  error?: string;
   daemon_session: string;
   tmux_window_id: string;
   claude_pane_id: string;
@@ -166,4 +170,13 @@ export interface Routine {
   disabled: boolean;
   schedule?: { backend: string; detail: string };
   last_run?: RoutineRun;
+}
+
+export interface Placement {
+ target: string;
+ workdir: string;
+ remote_worktree: string;
+ reason: string;
+ decided: boolean;
+ health: { state: string; last_seen?: string; problem?: string };
 }

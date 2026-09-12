@@ -36,6 +36,9 @@ func TestPlaceTaskPinsLocal(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
 
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
 	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false); err != nil {
 		t.Fatalf("carryAndPlace: %v", err)
 	}
@@ -59,6 +62,9 @@ func TestPlaceTaskAcceptsEveryNameForLocal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			database := placeTestDB(t)
 			task := placeTestTask(t, database)
+			if err := database.UpdateTask(task); err != nil {
+				t.Fatal(err)
+			}
 			if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, name, "", false); err != nil {
 				t.Fatalf("carryAndPlace(%q): %v", name, err)
 			}
@@ -78,6 +84,9 @@ func TestPlaceTaskWillNotMoveWorkItCannotCarry(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
 	task.WorktreePath = t.TempDir() // a directory, but not a git repo
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
 
 	err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false)
 	if err == nil {
@@ -99,6 +108,9 @@ func TestPlaceTaskForceMovesWithoutTheWork(t *testing.T) {
 	task := placeTestTask(t, database)
 	task.WorktreePath = t.TempDir()
 
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
 	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", true); err != nil {
 		t.Fatalf("--force did not move the task: %v", err)
 	}
@@ -121,6 +133,9 @@ func TestPlaceTaskForgetsTheOldHostsWorktree(t *testing.T) {
 	}
 	current, _ := database.GetTaskPlacementDecision(task.ID)
 
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
 	if err := carryAndPlace(context.Background(), database, task, current, "local", "", true); err != nil {
 		t.Fatalf("carryAndPlace: %v", err)
 	}
@@ -158,6 +173,9 @@ func TestPlaceTaskIsANoOpOnTheSameHost(t *testing.T) {
 	}
 	current, _ := database.GetTaskPlacementDecision(task.ID)
 
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
 	if err := carryAndPlace(context.Background(), database, task, current, "local", "", false); err != nil {
 		t.Fatalf("carryAndPlace: %v", err)
 	}
@@ -174,6 +192,9 @@ func TestPlaceTaskMovesARunningTask(t *testing.T) {
 	task := placeTestTask(t, database)
 	task.Status = db.StatusProcessing
 
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
 	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false); err != nil {
 		t.Fatalf("refused to move a running task: %v", err)
 	}

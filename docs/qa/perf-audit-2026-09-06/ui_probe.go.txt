@@ -1,0 +1,98 @@
+package ui
+
+import (
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// Temporary audit probe: all process calls are intercepted; no agent is launched.
+func TestPerfAuditBlockingPaths(t *testing.T) {
+	m, _ := refreshTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tmux"), []byte("#!/bin/sh\n/bin/sleep 0.03\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	task := &db.Task{Title: "Synthetic audit task", Status: db.StatusBacklog}
+	if err := m.db.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.db.AppendTaskLog(task.ID, "question", "Audit question"); err != nil {
+		t.Fatal(err)
+	}
+	m.tasks = []*db.Task{task}
+	changed := *task
+	changed.Status = db.StatusProcessing
+	start := time.Now()
+	m.Update(taskEventMsg{event: executor.TaskEvent{TaskID: task.ID, Task: &changed}})
+	t.Logf("status event handler with 30ms failed tmux: %.2f ms", float64(time.Since(start).Microseconds())/1000)
+	for i := 0; i < 3; i++ {
+		m.tasks = []*db.Task{task}
+		delete(m.tasksNeedingInput, task.ID)
+		start = time.Now()
+		m.Update(taskEventMsg{event: executor.TaskEvent{TaskID: task.ID, Task: &changed}})
+		t.Logf("repeat status handler: %.2f ms", float64(time.Since(start).Microseconds())/1000)
+	}
+	t.Setenv("TMUX", "audit-stub")
+	d := &DetailModel{tuiPaneID: "%audit"}
+	start = time.Now()
+	m.detailView = d
+ m.currentView = ViewDetail
+ m.Update(focusTickMsg(time.Now()))
+	t.Logf("focus update with 30ms failed tmux: %.2f ms", float64(time.Since(start).Microseconds())/1000)
+	d = &DetailModel{task: task, database: m.db, claudePaneID: "%audit", tuiPaneID: "%audit-ui"}
+	start = time.Now()
+	d.Cleanup()
+	t.Logf("detail cleanup with 30ms failed tmux: %.2f ms", float64(time.Since(start).Microseconds())/1000)
+
+}
+
+func TestPerfAuditDatabasePaths(t *testing.T) {
+	m, _ := refreshTestModel(t)
+	if _, err := m.db.Exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2131) INSERT INTO tasks(title,body,status,project,created_at,updated_at) SELECT 'Audit task '||x, printf('%01024d',x), CASE WHEN x<124 THEN 'blocked' ELSE 'done' END,'personal',datetime('now'),datetime('now') FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{2131, 50000} {
+		if n == 50000 {
+			if _, err := m.db.Exec(`WITH RECURSIVE n(x) AS (VALUES(2132) UNION ALL SELECT x+1 FROM n WHERE x<50000) INSERT INTO tasks(title,body,status,project,created_at,updated_at) SELECT 'Audit task '||x, printf('%01024d',x),'done','personal',datetime('now'),datetime('now') FROM n`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, q := range []string{"Audit", "no-matching-task"} {
+			start := time.Now()
+			for i := 0; i < 10; i++ {
+				if _, err := m.db.SearchTasks(q, 100); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Logf("SearchTasks %d rows query=%q mean %.2f ms", n, q, float64(time.Since(start).Microseconds())/10000)
+		}
+		start := time.Now()
+		for i := 0; i < 10; i++ {
+			m.loadTasks()()
+			m.tasksLoadInFlight = false
+		}
+		t.Logf("board data load %d rows mean %.2f ms", n, float64(time.Since(start).Microseconds())/10000)
+		if n == 50000 {
+			for _, q := range []string{
+				`CREATE INDEX audit_active_order ON tasks(pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC) WHERE deleted_at IS NULL AND status NOT IN ('done', 'archived')`,
+				`CREATE INDEX audit_status_recency ON tasks(status, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC) WHERE deleted_at IS NULL`,
+			} {
+				if _, err := m.db.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			start = time.Now()
+			for i := 0; i < 10; i++ {
+				m.loadTasks()()
+				m.tasksLoadInFlight = false
+			}
+			t.Logf("board data load 50000 rows with experimental indexes mean %.2f ms", float64(time.Since(start).Microseconds())/10000)
+		}
+
+	}
+}
