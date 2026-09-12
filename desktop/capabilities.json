@@ -30,6 +30,9 @@
     "CommandPalette": {
       "note": "p, f, \u2318P \u2014 cmdk palette"
     },
+    "CopyTaskID": {
+      "note": "y \u2014 copies the bare task number to the clipboard"
+    },
     "Delete": {
       "api": [
         "DELETE /api/tasks/{id}"

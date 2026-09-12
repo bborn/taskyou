@@ -32,11 +32,11 @@ type Config struct {
 		CLI string `yaml:"cli"`
 	} `yaml:"taskyou"`
 	Sync struct {
-		Auto         bool          `yaml:"auto"`
-		Interval     time.Duration `yaml:"interval"`
-		Statuses     []string      `yaml:"statuses"`
-		IncludeLogs  bool          `yaml:"include_logs"`
-		MaxLogLines  int           `yaml:"max_log_lines"`
+		Auto        bool          `yaml:"auto"`
+		Interval    time.Duration `yaml:"interval"`
+		Statuses    []string      `yaml:"statuses"`
+		IncludeLogs bool          `yaml:"include_logs"`
+		MaxLogLines int           `yaml:"max_log_lines"`
 	} `yaml:"sync"`
 	Collections struct {
 		Tasks    string            `yaml:"tasks"`

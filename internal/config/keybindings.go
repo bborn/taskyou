@@ -53,6 +53,8 @@ type KeybindingsConfig struct {
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
+	CopyTaskID         *KeybindingConfig `yaml:"copy_task_id,omitempty"`
+	OpenTerminal       *KeybindingConfig `yaml:"open_terminal,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
@@ -258,5 +260,14 @@ open_browser:
 open_pr:
   keys: ["G"]
   help: "open PR"
+
+# Detail-view shortcuts
+copy_task_id:
+  keys: ["y"]
+  help: "copy id"
+
+open_terminal:
+  keys: ["T"]
+  help: "terminal"
 `
 }

@@ -3247,6 +3247,13 @@ func (m *DetailModel) renderContent() string {
 	return content
 }
 
+// helpSeparatorWidth is the gap rendered between two help-row entries.
+const helpSeparatorWidth = 2
+
+// defaultHelpWidth is the width the help row assumes before the first
+// WindowSizeMsg tells it how wide the terminal really is.
+const defaultHelpWidth = 80
+
 func (m *DetailModel) renderHelp() string {
 	type helpKey struct {
 		key      string
@@ -3328,43 +3335,90 @@ func (m *DetailModel) renderHelp() string {
 	}
 	keys = append(keys, []helpKey{
 		{"b", browserLabel, false, false},
+		{"y", "copy id", false, false},
+		{"T", "terminal", false, false},
 		{"c", "close", false, false},
 		{"a", "archive", false, false},
 		{"d", "delete", false, false},
 		{"esc", "back", false, true},
 	}...)
 
-	var help string
 	dimmedKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	dimmedDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
-
-	rendered := 0
-	for _, k := range keys {
-		// When collapsed, only the primary keys are shown.
-		if !m.helpExpanded && !k.primary {
-			continue
-		}
-		if rendered > 0 {
-			help += "  "
-		}
-		// Disabled keys are always dimmed, regardless of focus
-		if k.disabled || !m.focused {
-			help += dimmedKeyStyle.Render(k.key) + " " + dimmedDescStyle.Render(k.desc)
-		} else {
-			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
-		}
-		rendered++
-	}
 
 	// Trailing '?' affordance to expand/collapse the rest.
 	moreDesc := "more"
 	if m.helpExpanded {
 		moreDesc = "less"
 	}
-	if rendered > 0 {
+	moreSeg := dimmedKeyStyle.Render("?") + " " + dimmedDescStyle.Render(moreDesc)
+
+	// Render each key into its own segment first, so we can measure the row
+	// before committing to it.
+	type helpSegment struct {
+		text    string
+		width   int
+		primary bool
+	}
+	var segments []helpSegment
+	for _, k := range keys {
+		// When collapsed, only the primary keys are shown.
+		if !m.helpExpanded && !k.primary {
+			continue
+		}
+		// Disabled keys are always dimmed, regardless of focus
+		var text string
+		if k.disabled || !m.focused {
+			text = dimmedKeyStyle.Render(k.key) + " " + dimmedDescStyle.Render(k.desc)
+		} else {
+			text = HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
+		}
+		segments = append(segments, helpSegment{text: text, width: lipgloss.Width(text), primary: k.primary})
+	}
+
+	// The row is a single line, so anything past the terminal width is clipped
+	// mid-word — and the tail is where 'esc back' and the '?' affordance live.
+	// Budget the width instead and drop whole secondary keys that do not fit.
+	// Primary keys and '?' are always drawn: they are the ones a user needs to
+	// get back out of the view.
+	budget := m.width
+	if budget <= 0 {
+		budget = defaultHelpWidth
+	}
+	budget -= lipgloss.Width(moreSeg) + helpSeparatorWidth
+
+	// Width the primary keys still ahead of us will need, so a secondary key
+	// never eats the room reserved for them.
+	reserved := 0
+	for _, seg := range segments {
+		if seg.primary {
+			reserved += seg.width + helpSeparatorWidth
+		}
+	}
+
+	var help string
+	used := 0
+	for _, seg := range segments {
+		cost := seg.width
+		if help != "" {
+			cost += helpSeparatorWidth
+		}
+		if seg.primary {
+			reserved -= seg.width + helpSeparatorWidth
+		} else if used+cost+reserved > budget {
+			continue
+		}
+		if help != "" {
+			help += "  "
+		}
+		help += seg.text
+		used += cost
+	}
+
+	if help != "" {
 		help += "  "
 	}
-	help += dimmedKeyStyle.Render("?") + " " + dimmedDescStyle.Render(moreDesc)
+	help += moreSeg
 
 	return HelpBar.Render(help)
 }

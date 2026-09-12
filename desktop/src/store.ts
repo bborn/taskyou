@@ -249,6 +249,20 @@ class Store {
     this.set({ theme });
   }
 
+  /** Copies the bare task number, which is what `ty` commands take as an argument. */
+  async copyTaskId(id: number) {
+    try {
+      await navigator.clipboard.writeText(String(id));
+      this.toast({ title: `Copied task #${id}`, kind: "success" });
+    } catch (err) {
+      this.toast({
+        title: "Could not copy task ID",
+        body: err instanceof Error ? err.message : String(err),
+        kind: "error",
+      });
+    }
+  }
+
   // --- Toasts (sonner) ---
 
   toast(toast: Toast) {

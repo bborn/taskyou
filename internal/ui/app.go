@@ -7,9 +7,11 @@ import (
 	osExec "os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -98,6 +100,9 @@ type KeyMap struct {
 	OpenBrowser key.Binding
 	// Open PR
 	OpenPR key.Binding
+	// Detail-view shortcuts
+	CopyTaskID   key.Binding
+	OpenTerminal key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -270,6 +275,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("G"),
 			key.WithHelp("G", "open PR"),
 		),
+		CopyTaskID: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "copy id"),
+		),
+		OpenTerminal: key.NewBinding(
+			key.WithKeys("T"),
+			key.WithHelp("T", "terminal"),
+		),
 	}
 }
 
@@ -334,6 +347,8 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
+	km.CopyTaskID = applyBinding(km.CopyTaskID, cfg.CopyTaskID)
+	km.OpenTerminal = applyBinding(km.OpenTerminal, cfg.OpenTerminal)
 
 	return km
 }
@@ -1309,6 +1324,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 		} else if msg.message != "" {
 			m.notification = fmt.Sprintf("🌐 %s", msg.message)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
+	case taskIDCopiedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s Failed to copy task ID: %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else {
+			m.notification = fmt.Sprintf("📋 Copied task #%d", msg.id)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
+	case terminalOpenedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.message != "" {
+			m.notification = fmt.Sprintf("🖥  %s", msg.message)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
@@ -2584,6 +2617,12 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenPR) && m.selectedTask != nil && m.selectedTask.PRURL != "" {
 		return m, m.openPR(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.CopyTaskID) && m.selectedTask != nil {
+		return m, m.copyTaskID(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.OpenTerminal) && m.selectedTask != nil {
+		return m, m.openTerminal(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
@@ -4493,6 +4532,83 @@ func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened %s in Finder", filepath.Base(task.WorktreePath))}
 	}
+}
+
+// taskIDCopiedMsg is returned after attempting to copy a task ID to the clipboard.
+type taskIDCopiedMsg struct {
+	id  int64
+	err error
+}
+
+// copyTaskID copies the task's numeric ID to the system clipboard. The plain
+// number (no "#") is what the `ty` CLI and MCP tools expect, so it can be pasted
+// straight into commands like `ty task <id>`.
+func (m *AppModel) copyTaskID(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if err := clipboard.WriteAll(strconv.FormatInt(task.ID, 10)); err != nil {
+			return taskIDCopiedMsg{id: task.ID, err: err}
+		}
+		return taskIDCopiedMsg{id: task.ID}
+	}
+}
+
+// terminalOpenedMsg is returned after attempting to open a terminal in the
+// task's working directory.
+type terminalOpenedMsg struct {
+	message string
+	err     error
+}
+
+// taskWorkdir resolves the directory a terminal should open in: the task's
+// worktree if it has one, otherwise the project directory. Returns "" when
+// neither is known.
+func (m *AppModel) taskWorkdir(task *db.Task) string {
+	if task.WorktreePath != "" {
+		return task.WorktreePath
+	}
+	if task.Project != "" && m.executor != nil {
+		if dir := m.executor.GetProjectDir(task.Project); dir != "" {
+			return dir
+		}
+	}
+	return ""
+}
+
+// openTerminal opens a new terminal tab in the task's working directory, in
+// whichever terminal application ty is being displayed in.
+func (m *AppModel) openTerminal(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		workdir := m.taskWorkdir(task)
+		if workdir == "" {
+			return terminalOpenedMsg{err: fmt.Errorf("no working directory for task #%d", task.ID)}
+		}
+		if _, err := os.Stat(workdir); err != nil {
+			return terminalOpenedMsg{err: fmt.Errorf("directory not found: %s", workdir)}
+		}
+
+		app := detectTerminalApp()
+		cmd := buildTerminalCommand(app, workdir)
+		// Both osascript and open return once the new tab exists, so their exit
+		// status is a real answer rather than a launch acknowledgement.
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return terminalOpenedMsg{err: fmt.Errorf("failed to open terminal: %s", terminalFailure(out, err))}
+		}
+
+		name := app
+		if name == "" {
+			name = "terminal"
+		}
+		return terminalOpenedMsg{message: fmt.Sprintf("Opened %s tab in %s", name, filepath.Base(workdir))}
+	}
+}
+
+// terminalFailure prefers the message osascript printed over Go's exit-status
+// error, which on its own says nothing about what went wrong.
+func terminalFailure(out []byte, err error) string {
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		return msg
+	}
+	return err.Error()
 }
 
 // resolveEditor returns the user's configured editor: VISUAL, then EDITOR.

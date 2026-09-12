@@ -232,6 +232,8 @@ export default function App() {
                 void store.deleteTask(task.id);
               },
             });
+          case "y":
+            return void store.copyTaskId(task.id);
           case "t":
             return void store.pinTask(task.id);
           case "S":

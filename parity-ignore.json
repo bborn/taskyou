@@ -1,1 +1,3 @@
-{}
+{
+  "OpenTerminal": "Opens a tab in the user's own terminal application (iTerm2, Terminal.app) at the task's worktree. The desktop GUI is not a terminal and does not script the user's terminal, so there is nothing to open a tab in."
+}
