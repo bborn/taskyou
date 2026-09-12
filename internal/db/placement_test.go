@@ -93,3 +93,25 @@ func TestSetTaskPlacementRecordsALocalDecision(t *testing.T) {
 		t.Errorf("PlacementReason = %q", loaded.PlacementReason)
 	}
 }
+
+// The fleet is not configured anywhere: the tasks are the only record of which
+// machines exist, so the filter's "@host" autocomplete reads them back from
+// here — busiest host first, and never the empty target a local run carries.
+func TestListPlacementHosts(t *testing.T) {
+	database := placementTestDB(t)
+
+	for _, host := range []string{"mona", "mona", "bruce", ""} {
+		task := placementTask(t, database, "placed on "+host)
+		if err := database.SetTaskPlacement(task.ID, host, "test"); err != nil {
+			t.Fatalf("set placement: %v", err)
+		}
+	}
+
+	hosts, err := database.ListPlacementHosts()
+	if err != nil {
+		t.Fatalf("ListPlacementHosts: %v", err)
+	}
+	if len(hosts) != 2 || hosts[0] != "mona" || hosts[1] != "bruce" {
+		t.Errorf("ListPlacementHosts() = %v, want [mona bruce]", hosts)
+	}
+}

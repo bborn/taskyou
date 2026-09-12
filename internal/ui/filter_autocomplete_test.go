@@ -116,3 +116,88 @@ func TestFilterAutocompleteView(t *testing.T) {
 		t.Error("view should contain [offerlab]")
 	}
 }
+
+// The dropdown completes "@host" chips as well as "[project]" ones, so the
+// machine names — which live nowhere but in the tasks themselves — are
+// discoverable instead of having to be remembered.
+func TestFilterAutocompleteHostSuggestions(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	for _, host := range []string{"mona", "mona", "bruce"} {
+		task := &db.Task{Title: "placed", Project: "personal"}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		if err := database.SetTaskPlacement(task.ID, host, "test"); err != nil {
+			t.Fatalf("set placement: %v", err)
+		}
+	}
+
+	m := NewFilterAutocompleteModel(database)
+	m.SetHostQuery("")
+	if !m.IsHostMode() {
+		t.Fatal("SetHostQuery did not switch the dropdown to hosts")
+	}
+	// Busiest host first, with "local" offered for the tasks that ran here.
+	if got := m.hosts; len(got) != 3 || got[0] != "mona" || got[2] != "local" {
+		t.Fatalf("host suggestions = %v, want [mona bruce local]", got)
+	}
+
+	m.SetHostQuery("br")
+	if got := m.Select(); got != "bruce" {
+		t.Errorf("Select() after query %q = %q, want bruce", "br", got)
+	}
+	if view := m.View(); !contains(view, "@bruce") {
+		t.Errorf("host dropdown does not render the chip syntax: %q", view)
+	}
+
+	// Switching back to projects must not leave stale hosts behind.
+	m.SetQuery("")
+	if m.IsHostMode() || len(m.hosts) != 0 {
+		t.Errorf("project query left host state behind: mode=%v hosts=%v", m.IsHostMode(), m.hosts)
+	}
+}
+
+// The filter bar has two chip syntaxes; whichever one the cursor is inside is
+// the one that gets completed.
+func TestFilterAutocompleteModeFollowsTheChipBeingTyped(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "placed", Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := database.SetTaskPlacement(task.ID, "mona", "test"); err != nil {
+		t.Fatalf("set placement: %v", err)
+	}
+	if err := database.CreateProject(&db.Project{Name: "offerlab", Path: "/tmp/offerlab"}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	m := &AppModel{db: database, filterAutocomplete: NewFilterAutocompleteModel(database)}
+
+	m.updateFilterAutocomplete("@mo")
+	if !m.filterAutocomplete.IsHostMode() || !m.showFilterDropdown {
+		t.Errorf("typing @mo did not open the host dropdown (host=%v shown=%v)",
+			m.filterAutocomplete.IsHostMode(), m.showFilterDropdown)
+	}
+
+	m.updateFilterAutocomplete("@mona [off")
+	if m.filterAutocomplete.IsHostMode() || !m.showFilterDropdown {
+		t.Errorf("a project chip after a finished host chip should complete projects (host=%v shown=%v)",
+			m.filterAutocomplete.IsHostMode(), m.showFilterDropdown)
+	}
+
+	m.updateFilterAutocomplete("[offerlab] flaky")
+	if m.showFilterDropdown {
+		t.Error("a closed chip should leave the dropdown shut")
+	}
+}

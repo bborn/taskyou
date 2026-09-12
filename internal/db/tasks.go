@@ -1547,6 +1547,37 @@ func (db *DB) GetTaskPlacement(taskID int64) (target, reason string, err error) 
 	return target, reason, nil
 }
 
+// ListPlacementHosts returns the hosts tasks have actually been placed on, most
+// used first. It is the source for the filter's `@host` autocomplete: the fleet
+// is not configured anywhere central — a placement hook names whatever hosts it
+// likes — so the tasks themselves are the only record of which machines exist.
+//
+// Local runs (an empty placement_target) are not hosts and never appear here.
+func (db *DB) ListPlacementHosts() ([]string, error) {
+	rows, err := db.Query(`
+		SELECT placement_target, COUNT(*) AS n
+		FROM tasks
+		WHERE COALESCE(placement_target, '') != ''
+		GROUP BY placement_target
+		ORDER BY n DESC, placement_target
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query placement hosts: %w", err)
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		var n int
+		if err := rows.Scan(&host, &n); err != nil {
+			return nil, fmt.Errorf("scan placement host: %w", err)
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
 // TaskPlacement is a task's recorded placement decision: where it runs, why,
 // and the checkout it was given on that host.
 //
