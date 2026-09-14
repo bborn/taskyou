@@ -2925,9 +2925,9 @@ func (m *DetailModel) renderContent() string {
 				}
 			} else {
 				if m.focused {
-					b.WriteString(strings.TrimSpace(rendered))
+					b.WriteString(linkifyURLs(strings.TrimSpace(rendered)))
 				} else {
-					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+					b.WriteString(dimmedStyle.Render(linkifyURLs(strings.TrimSpace(rendered))))
 				}
 			}
 		}
@@ -2999,9 +2999,9 @@ func (m *DetailModel) renderContent() string {
 				}
 			} else {
 				if m.focused {
-					b.WriteString(strings.TrimSpace(rendered))
+					b.WriteString(linkifyURLs(strings.TrimSpace(rendered)))
 				} else {
-					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+					b.WriteString(dimmedStyle.Render(linkifyURLs(strings.TrimSpace(rendered))))
 				}
 			}
 		}
