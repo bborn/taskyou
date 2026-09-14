@@ -148,6 +148,7 @@ system. The ones dispatched today:
 | `task.auth_required` | Executor session needs re-authentication |
 | `task.route` | **Consulted** before a task spawns: which profile runs it. See [Routing](#routing-pre-spawn) |
 | `task.placement` | **Consulted** before a task spawns: which machine runs it. See below |
+| `task.hosts` | **Consulted** while a new-task form is open: which machines *could* run it. See [Offering a choice of machines](#taskhosts--offering-a-choice-of-machines) |
 
 A plugin may declare any event string; it only runs for events TaskYou actually
 emits, so unknown events are harmless.
@@ -192,9 +193,9 @@ Worked example: **claude-profile-router** in the
 ## `task.placement` — which machine a task runs on
 
 Most events are fire-and-forget: the script runs in the background and nothing
-waits for it or reads what it says. `task.placement` is one of the two
-exceptions, alongside `task.route` below — ty asks it a question and uses the
-answer.
+waits for it or reads what it says. `task.placement` is one of the
+exceptions, alongside `task.route` above and `task.hosts` below — ty asks it a
+question and uses the answer.
 Where a task runs has to be decided **before** the executor spawns, and the
 answer has to come back — so this hook is synchronous, bounded by a short
 timeout, and its stdout is parsed.
@@ -259,6 +260,50 @@ memory when several do). Build and install it with:
 make install-ty-on     # builds the binary and installs it as a plugin
 make uninstall-ty-on   # every task goes back to running locally
 ```
+
+### `task.hosts` — offering a choice of machines
+
+`task.placement` answers *where a task goes*. `task.hosts` answers *where it
+could go*, and it exists so a person can overrule the automatic answer at the
+moment they create the task rather than moving it afterwards.
+
+ty asks it while a new-task form is open — in the TUI, in the desktop/browser
+GUI, and for `ty create --host <tab>`. The request is the placement request
+without a task id, since nothing has been created yet:
+
+```json
+{"event":"task.hosts",
+ "task":{"project":"taskyou","repo_path":"/Users/you/Projects/workflow",
+         "executor":"claude"}}
+```
+
+and the answer is a list:
+
+```json
+{"hosts":[{"name":"ol-agents","target":"ol-agents",
+           "workdir":"~/projects/engineering","detail":"agent, ruby"}]}
+```
+
+- **`name`** — what the user sees. Defaults to `target` when omitted.
+- **`target`** — the SSH destination ty records if this one is picked. Defaults
+  to `name` when omitted; an entry with neither is dropped.
+- **`workdir`** — that project's directory on that host. ty stores it with the
+  placement, so nobody has to look the path up to choose a machine.
+- **`detail`** — optional one-liner shown beside the name.
+
+Unlike placement, **every** handler is consulted and the answers are merged
+(duplicate targets keep the first): two fleets installed side by side are two
+sets of candidates, not a race. A handler that fails, times out (5s) or answers
+unusably contributes nothing.
+
+An empty list is the normal answer for a project no host serves — and the answer
+for everyone with no placement plugin at all. The forms then show no host picker,
+which is exactly how ty looked before this existed.
+
+Picking a host records it as the task's placement decision before it can spawn,
+which is the decision the executor already prefers over asking the resolver. So
+nothing downstream has to know a human made it, and `ty place` still moves the
+task afterwards, work and all.
 
 ### How ty watches a placed task
 

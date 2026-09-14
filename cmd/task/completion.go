@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/hooks"
 )
 
 // newCompletionCmd creates the completion command with subcommands for each shell.
@@ -149,6 +152,31 @@ func completeFlagExecutors(cmd *cobra.Command, args []string, toComplete string)
 		"opencode\tOpenCode",
 		"openclaw\tOpenClaw",
 	}, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeFlagHosts completes --host with the machines the placement resolver
+// offers for the project being created in, plus "local". With no resolver
+// installed there is nothing to complete, which is the honest answer.
+func completeFlagHosts(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	completions := []string{"local\tthis machine"}
+	database, err := db.Open(db.DefaultPath())
+	if err != nil {
+		return completions, cobra.ShellCompDirectiveNoFileComp
+	}
+	defer database.Close()
+
+	project, _ := cmd.Flags().GetString("project")
+	executorName, _ := cmd.Flags().GetString("executor")
+	ctx, cancel := context.WithTimeout(cmd.Context(), hooks.DefaultHostsTimeout)
+	defer cancel()
+	for _, h := range executor.PlacementChoices(ctx, database, project, executorName) {
+		detail := h.Detail
+		if detail == "" {
+			detail = h.WorkDir
+		}
+		completions = append(completions, fmt.Sprintf("%s\t%s", h.Target, detail))
+	}
+	return completions, cobra.ShellCompDirectiveNoFileComp
 }
 
 // completeFlagTypes provides completions for --type flag values.

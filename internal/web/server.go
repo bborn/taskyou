@@ -95,6 +95,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 
 	// Task actions
+	mux.HandleFunc("GET /api/placement/hosts", s.handlePlacementHosts)
 	mux.HandleFunc("GET /api/tasks/{id}/placement", s.handleGetPlacement)
 	mux.HandleFunc("POST /api/tasks/{id}/placement", s.handleSetPlacement)
 	mux.HandleFunc("POST /api/tasks/{id}/move", s.handleMoveTask)

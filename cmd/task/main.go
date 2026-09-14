@@ -775,6 +775,8 @@ Examples:
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			remoteControl, _ := cmd.Flags().GetBool("remote-control")
 			branch, _ := cmd.Flags().GetString("branch")
+			placementHost, _ := cmd.Flags().GetString("host")
+			placementDir, _ := cmd.Flags().GetString("host-dir")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			// Validate that either title or body is provided
@@ -918,6 +920,15 @@ Examples:
 				os.Exit(1)
 			}
 
+			// A host named here is recorded as the task's placement decision, so the
+			// resolver is never asked. The task is already created: a placement that
+			// cannot be recorded is a warning, not a lost task.
+			if err := executor.ChoosePlacement(cmd.Context(), database, task, placementHost, placementDir); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(
+					fmt.Sprintf("Created task #%d, but its host could not be set: %v", task.ID, err)))
+				os.Exit(1)
+			}
+
 			if outputJSON {
 				output := map[string]interface{}{
 					"id":       task.ID,
@@ -967,10 +978,13 @@ Examples:
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().Bool("remote-control", false, "Launch Claude with --remote-control (interactive, remote-drivable session)")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
+	createCmd.Flags().String("host", "", "Run this task on a specific host instead of asking the placement resolver: an SSH destination, or \"local\" for this machine")
+	createCmd.Flags().String("host-dir", "", "The project's directory on --host (looked up from the host inventory when omitted)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
 	createCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
+	createCmd.RegisterFlagCompletionFunc("host", completeFlagHosts)
 	createCmd.RegisterFlagCompletionFunc("effort", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
 	})

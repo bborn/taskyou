@@ -14,3 +14,7 @@ version: 0.1.0
 description: Decide which machine a task should run on, from the "on" host inventory.
 hooks:
   task.placement: ty-on
+  # Asked by the new-task forms rather than by the spawn path: which machines
+  # COULD run this task, so a person can pick one instead of taking the
+  # automatic answer.
+  task.hosts: ty-on

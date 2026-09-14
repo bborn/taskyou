@@ -15,7 +15,9 @@ it, and it answers.
 ## The contract
 
 ty-on is a binary that reads one JSON request on stdin and writes one JSON
-response on stdout. It is invoked once per task, before the executor is spawned.
+response on stdout. It is invoked once per task, before the executor is spawned
+— and again, with a different event, whenever a new-task form wants the list of
+machines to offer (see [below](#the-other-question-which-hosts-are-there)).
 
 Request:
 
@@ -54,6 +56,23 @@ stops before launching locally. The resolver exits 0 for either decision.
 
 `reason` is always populated and is shown to the user, so it is written to
 explain a surprising placement without further digging.
+
+## The other question: which hosts are there
+
+ty also asks this resolver `task.hosts` while a new-task form is open — not
+"where does this task go" but "where *could* it go", so a person can pick a
+machine instead of taking the automatic answer.
+
+```console
+$ echo '{"event":"task.hosts","task":{"project":"taskyou"}}' | ./ty-on
+{"hosts":[{"name":"mona","target":"mona","workdir":"~/Projects/taskyou","detail":"agent, docker"}]}
+```
+
+It is the eligibility half of the placement rules below (rule 1) with no ranking
+and no probe: every host that serves the project and can run the task's executor
+is offered, answered from the inventory file alone. A host that is currently
+unreachable is still listed — ty says so when it tries to launch there, which is
+more useful than a machine that silently vanishes from the list.
 
 ## Placement rules
 
@@ -98,14 +117,14 @@ prefers a local placement to a late answer.
 
 ## Installing
 
-ty-on is a **plugin**: ty consults it on `task.placement` (see
+ty-on is a **plugin**: ty consults it on `task.placement` and `task.hosts` (see
 [docs/plugins.md](../../docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)),
 so it has to live in the plugins dir alongside its `plugin.yaml` manifest. From
 the repo root:
 
 ```console
 $ make install-ty-on     # builds the binary and installs it as a plugin
-$ ty plugins list        # ty-on ... hook task.placement → ty-on
+$ ty plugins list        # ty-on ... hooks task.placement, task.hosts → ty-on
 ```
 
 From then on every task ty starts asks this resolver where to run, and the

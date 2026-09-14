@@ -809,7 +809,12 @@ ty plugins list
 Queue tasks as usual. ty-on selects a host configured for the task's project and
 executor. With one eligible host, it selects that host directly. With several,
 it uses `on ls` to pick the reachable host with the most free memory. Task detail
-shows the selected host and the reason. You can also choose a host yourself with
+shows the selected host and the reason.
+
+To choose the machine yourself, pick one in the **Host** selector the new-task
+form shows once hosts are configured (TUI advanced fields, GUI **Advanced**, or
+`ty create --host <destination|local>`); that overrides the automatic placement
+for that task. To move a task that already exists — which carries its work — use
 **Change host** in the desktop/browser, `@` in the TUI, or `ty place` in the CLI.
 
 Tasks fall back to local execution when no remote placement is available. To
