@@ -461,6 +461,11 @@ The skill works with Claude Code, Codex, Gemini, or any agent that can execute s
 | `d` | Delete task |
 | `Esc` | Back to kanban |
 
+The agent/shell split is remembered per task: drag the divider in one task and
+only that task reopens at the new width. A task you have never resized opens at
+the even 50/50 split (or at the width you had set before widths became
+per-task).
+
 ### Task Form (Autocomplete)
 
 | Key | Action |
