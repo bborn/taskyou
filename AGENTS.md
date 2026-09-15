@@ -101,9 +101,14 @@ workflow/
 │   │   └── mcp.go               # MCP server integration
 │   ├── server/
 │   │   └── ssh.go               # Wish SSH server
+│   ├── taskfilter/
+│   │   └── filter.go            # Filter query grammar shared by TUI/CLI/API
 │   └── ui/
 │       ├── app.go               # Main Bubble Tea app + key bindings
 │       ├── kanban.go            # Kanban board view (4 columns)
+│       ├── list.go              # Flat list view (the board's second face)
+│       ├── views.go             # Saved-view picker modal
+│       ├── board_view.go        # Display mode + filter persistence
 │       ├── detail.go            # Task detail view with logs
 │       ├── form.go              # New/edit task forms (Huh)
 │       ├── retry.go             # Retry task with feedback
