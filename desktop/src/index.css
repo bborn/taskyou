@@ -204,6 +204,13 @@
     height: 100%;
   }
 
+  /* Keyboard-shortcut hints mean nothing on a touch screen. */
+  @media (max-width: 767px) {
+    .kbd {
+      display: none;
+    }
+  }
+
   .kbd {
     @apply font-mono text-[11px] bg-surface-3 border rounded px-1.5 py-px;
   }

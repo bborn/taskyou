@@ -16,9 +16,12 @@ type Config struct {
 
 // Setting keys
 const (
-	SettingProjectsDir           = "projects_dir"
-	SettingTheme                 = "theme"
-	SettingDetailPaneHeight      = "detail_pane_height"
+	SettingProjectsDir      = "projects_dir"
+	SettingTheme            = "theme"
+	SettingDetailPaneHeight = "detail_pane_height"
+	// SettingShellPaneWidth is the fallback shell pane width, used for tasks
+	// that have never been resized. A task's own width lives under
+	// ShellPaneWidthKey; see that function.
 	SettingShellPaneWidth        = "shell_pane_width"
 	SettingShellPaneHidden       = "shell_pane_hidden"
 	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
@@ -35,6 +38,14 @@ const (
 	// HTTP API (for headless/security-sensitive boxes). The API is on by default.
 	SettingHTTPAPIDisabled = "http_api_disabled"
 )
+
+// ShellPaneWidthKey is the settings key holding one task's shell pane width.
+// Widths are per task: dragging the agent/shell split in one task must not move
+// it in every other task. SettingShellPaneWidth remains the fallback for tasks
+// with no width of their own.
+func ShellPaneWidthKey(taskID int64) string {
+	return db.TaskSettingKey(SettingShellPaneWidth, taskID)
+}
 
 // DefaultHTTPAPIPort is the port the daemon-hosted HTTP API binds by default.
 // Matches the standalone `ty serve` default so existing clients (ty-web, the

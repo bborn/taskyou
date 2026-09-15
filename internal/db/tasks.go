@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -1111,6 +1112,10 @@ func (db *DB) DeleteTask(id int64) error {
 		return fmt.Errorf("delete task: %w", err)
 	}
 
+	// Per-task settings are keyed by task ID, so they would otherwise outlive the
+	// row and be inherited by whatever task reuses the ID.
+	db.DeleteTaskSettings(id)
+
 	// Emit delete event
 	db.emitTaskDeleted(id, title)
 
@@ -2049,6 +2054,27 @@ func (db *DB) SetProjectContext(projectName string, context string) error {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		return fmt.Errorf("project '%s' not found", projectName)
+	}
+	return nil
+}
+
+// TaskSettingKey namespaces a setting to a single task. Per-task preferences
+// live in the settings table under "<base>:<taskID>", beside the global default
+// stored under "<base>" alone.
+func TaskSettingKey(base string, taskID int64) string {
+	return base + ":" + strconv.FormatInt(taskID, 10)
+}
+
+// perTaskSettingBases lists the settings that have per-task values, so deleting
+// a task can clear them. Keep in sync with internal/config.
+var perTaskSettingBases = []string{"shell_pane_width"}
+
+// DeleteTaskSettings removes every per-task setting belonging to a task.
+func (db *DB) DeleteTaskSettings(taskID int64) error {
+	for _, base := range perTaskSettingBases {
+		if _, err := db.Exec("DELETE FROM settings WHERE key = ?", TaskSettingKey(base, taskID)); err != nil {
+			return fmt.Errorf("delete task settings: %w", err)
+		}
 	}
 	return nil
 }

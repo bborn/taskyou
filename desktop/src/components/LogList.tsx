@@ -43,7 +43,11 @@ const LogRow = memo(function LogRow({ log }: { log: LogLine }) {
         {new Date(log.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </span>
       <span className="shrink-0">{TYPE_ICONS[log.line_type] ?? "·"}</span>
-      <span className="whitespace-pre-wrap break-words">{log.content}</span>
+      {/* min-w-0 lets the row shrink and anywhere-wrapping breaks the long
+          paths agents log, which otherwise run off a phone screen. */}
+      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+        {log.content}
+      </span>
     </div>
   );
 });

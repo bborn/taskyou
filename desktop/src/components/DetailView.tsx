@@ -11,6 +11,8 @@ import { LogList } from "./LogList";
 import { mergeRecentLogs } from "../lib/logs";
 import { Markdown } from "./Markdown";
 import { TerminalPane } from "./TerminalPane";
+import { ReplyComposer } from "./ReplyComposer";
+import { useIsMobile } from "../hooks/use-mobile";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -91,7 +93,10 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [task, setTask] = useState<Task | null>(tasks.find((t) => t.id === taskId) ?? null);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [deps, setDeps] = useState<Dependencies | null>(null);
-  const [showLogs, setShowLogs] = useState(false);
+  const isMobile = useIsMobile();
+  // A phone has no terminal, so the execution log is how you see what the
+  // agent is doing: start it open there.
+  const [showLogs, setShowLogs] = useState(isMobile);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -191,12 +196,19 @@ export function DetailView({ taskId }: { taskId: number }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-4 py-2.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-3 py-2.5 md:px-4">
         <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
           {task.status}
         </Badge>
         <span className="font-mono text-[11px] text-muted-foreground">#{task.id}</span>
-        <span className="max-w-[44ch] truncate text-sm font-semibold" title={task.title}>
+        <span
+          className={
+            isMobile
+              ? "order-last line-clamp-3 w-full text-[15px] leading-snug font-semibold"
+              : "max-w-[44ch] truncate text-sm font-semibold"
+          }
+          title={task.title}
+        >
           {task.title}
         </span>
         {task.pinned && <Pin className="size-3.5 text-amber-300" />}
@@ -211,45 +223,50 @@ export function DetailView({ taskId }: { taskId: number }) {
 
         <div className="flex-1" />
 
-        <Select
-          value={task.executor || "claude"}
-          onValueChange={async (v) => {
-            await api.updateTask(task.id, { executor: v }).catch(() => {});
-            void store.refreshTasks();
-          }}
-        >
-          <SelectTrigger size="sm" className="w-32" title="Executor">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
-              (ex) => (
-                <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
-                  {ex.name}
-                  {ex.available ? "" : " (not installed)"}
-                </SelectItem>
-              ),
-            )}
-          </SelectContent>
-        </Select>
-
-        {blocked ? (
-          <Button size="sm" onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}>
-            Reply
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            disabled={task.status === "processing" || task.status === "queued"}
-            onClick={() => void store.executeTask(task.id)}
+        {/* Phone: Execute and Reply live in the composer at the bottom, and
+            there is no local editor to open. */}
+        {!isMobile && (
+          <Select
+            value={task.executor || "claude"}
+            onValueChange={async (v) => {
+              await api.updateTask(task.id, { executor: v }).catch(() => {});
+              void store.refreshTasks();
+            }}
           >
-            Execute
-          </Button>
+            <SelectTrigger size="sm" className="w-32" title="Executor">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+                (ex) => (
+                  <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                    {ex.name}
+                    {ex.available ? "" : " (not installed)"}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
         )}
+
+        {!isMobile &&
+          (blocked ? (
+            <Button size="sm" onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}>
+              Reply
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              disabled={task.status === "processing" || task.status === "queued"}
+              onClick={() => void store.executeTask(task.id)}
+            >
+              Execute
+            </Button>
+          ))}
         <Button variant="outline" size="sm" onClick={() => store.setForm({ kind: "edit", taskId: task.id })}>
           Edit
         </Button>
-        {task.worktree_path && (
+        {task.worktree_path && !isMobile && (
           <Button
             variant="outline"
             size="sm"
@@ -291,7 +308,7 @@ export function DetailView({ taskId }: { taskId: number }) {
       )}
 
       <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-        <div className="min-h-[140px] flex-1 overflow-y-auto px-5 py-3.5 select-text">
+        <div className="min-h-[140px] min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-3.5 break-words select-text md:px-5">
           {task.body ? (
             <Markdown source={task.body} />
           ) : (
@@ -363,32 +380,40 @@ export function DetailView({ taskId }: { taskId: number }) {
           </>}
         </div>
 
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          title="Drag to resize · double-click to reset"
-          className="group relative z-10 -my-1 h-2.5 shrink-0 cursor-row-resize touch-none"
-          onPointerDown={onDividerPointerDown}
-          onPointerMove={onDividerPointerMove}
-          onPointerUp={onDividerPointerUp}
-          onPointerCancel={onDividerPointerUp}
-          onDoubleClick={resetTerminalHeight}
-        >
-          <div
-            className={`pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-[background-color,height] ${
-              resizing
-                ? "h-[3px] bg-status-backlog"
-                : "h-px bg-border group-hover:h-[3px] group-hover:bg-status-backlog/60"
-            }`}
-          />
-        </div>
+        {/* A phone gets a reply box where the desktop gets the live terminal:
+            xterm needs a keyboard and ~80 columns. */}
+        {isMobile ? (
+          <ReplyComposer task={task} />
+        ) : (
+          <>
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              title="Drag to resize · double-click to reset"
+              className="group relative z-10 -my-1 h-2.5 shrink-0 cursor-row-resize touch-none"
+              onPointerDown={onDividerPointerDown}
+              onPointerMove={onDividerPointerMove}
+              onPointerUp={onDividerPointerUp}
+              onPointerCancel={onDividerPointerUp}
+              onDoubleClick={resetTerminalHeight}
+            >
+              <div
+                className={`pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-[background-color,height] ${
+                  resizing
+                    ? "h-[3px] bg-status-backlog"
+                    : "h-px bg-border group-hover:h-[3px] group-hover:bg-status-backlog/60"
+                }`}
+              />
+            </div>
 
-        <div
-          className="flex min-h-[140px] flex-col"
-          style={{ height: terminalHeight, maxHeight: "calc(100% - 140px)" }}
-        >
-          <TerminalPane task={task} />
-        </div>
+            <div
+              className="flex min-h-[140px] flex-col"
+              style={{ height: terminalHeight, maxHeight: "calc(100% - 140px)" }}
+            >
+              <TerminalPane task={task} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

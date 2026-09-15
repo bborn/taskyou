@@ -2074,21 +2074,51 @@ func (m *DetailModel) getDetailPaneHeight() string {
 	return "20%"
 }
 
-// getShellPaneWidth returns the configured shell pane width percentage.
-// Default is 50% for equal split between Claude and Shell panes.
-func (m *DetailModel) getShellPaneWidth() string {
-	widthStr, err := m.database.GetSetting(config.SettingShellPaneWidth)
-	if err != nil || widthStr == "" {
-		return "50%"
+// Shell pane width bounds. tmux keeps both panes usable inside them, and a
+// width outside the range is treated as absent rather than clamped.
+const (
+	minShellPaneWidth = 10
+	maxShellPaneWidth = 90
+	// defaultShellPaneWidth splits the agent and shell panes evenly.
+	defaultShellPaneWidth = "50%"
+)
+
+// parseShellPaneWidth reads a stored "NN%" width, reporting whether it is a
+// usable percentage.
+func parseShellPaneWidth(widthStr string) (int, bool) {
+	widthStr = strings.TrimSpace(widthStr)
+	if !strings.HasSuffix(widthStr, "%") {
+		return 0, false
 	}
-	// Validate the width is a valid percentage (10-90%)
-	if strings.HasSuffix(widthStr, "%") {
-		percentStr := strings.TrimSuffix(widthStr, "%")
-		if percent, err := strconv.Atoi(percentStr); err == nil && percent >= 10 && percent <= 90 {
-			return widthStr
+	percent, err := strconv.Atoi(strings.TrimSuffix(widthStr, "%"))
+	if err != nil || percent < minShellPaneWidth || percent > maxShellPaneWidth {
+		return 0, false
+	}
+	return percent, true
+}
+
+// getShellPaneWidth returns this task's shell pane width percentage. Widths are
+// per task, so each task reopens at the split its own last resize left it at;
+// the global setting is only the fallback for a task that has never been
+// resized, and the even split is the fallback for that.
+func (m *DetailModel) getShellPaneWidth() string {
+	if m.database == nil {
+		return defaultShellPaneWidth
+	}
+	keys := []string{config.SettingShellPaneWidth}
+	if m.task != nil {
+		keys = append([]string{config.ShellPaneWidthKey(m.task.ID)}, keys...)
+	}
+	for _, key := range keys {
+		widthStr, err := m.database.GetSetting(key)
+		if err != nil || widthStr == "" {
+			continue
+		}
+		if percent, ok := parseShellPaneWidth(widthStr); ok {
+			return fmt.Sprintf("%d%%", percent)
 		}
 	}
-	return "50%"
+	return defaultShellPaneWidth
 }
 
 // getCurrentDetailPaneHeight returns the current detail pane height as a percentage (0-100).
@@ -2925,9 +2955,9 @@ func (m *DetailModel) renderContent() string {
 				}
 			} else {
 				if m.focused {
-					b.WriteString(strings.TrimSpace(rendered))
+					b.WriteString(linkifyURLs(strings.TrimSpace(rendered)))
 				} else {
-					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+					b.WriteString(dimmedStyle.Render(linkifyURLs(strings.TrimSpace(rendered))))
 				}
 			}
 		}
@@ -2999,9 +3029,9 @@ func (m *DetailModel) renderContent() string {
 				}
 			} else {
 				if m.focused {
-					b.WriteString(strings.TrimSpace(rendered))
+					b.WriteString(linkifyURLs(strings.TrimSpace(rendered)))
 				} else {
-					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+					b.WriteString(dimmedStyle.Render(linkifyURLs(strings.TrimSpace(rendered))))
 				}
 			}
 		}

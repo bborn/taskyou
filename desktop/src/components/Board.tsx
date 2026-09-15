@@ -135,6 +135,9 @@ interface CardProps {
   selected: boolean;
   projectColor: string;
   latest: LogLine | undefined;
+  /** Phone layout: a single tap opens the task (touch has no double-click or
+   * drag-and-drop), with larger text and a taller touch target. */
+  tapToOpen?: boolean;
 }
 
 /** Field-level equality: API refreshes return fresh objects every time, so
@@ -145,6 +148,7 @@ function cardPropsEqual(prev: CardProps, next: CardProps): boolean {
   return (
     prev.selected === next.selected &&
     prev.projectColor === next.projectColor &&
+    prev.tapToOpen === next.tapToOpen &&
     prev.latest?.id === next.latest?.id &&
     a.id === b.id &&
     a.title === b.title &&
@@ -195,7 +199,13 @@ function cardSubLine(task: Task, latest?: LogLine): { text: string; title?: stri
   return { text: ageHint(task) };
 }
 
-const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }: CardProps) {
+export const CardSlot = memo(function CardSlot({
+  task,
+  selected,
+  projectColor,
+  latest,
+  tapToOpen = false,
+}: CardProps) {
   const ref = useRef<HTMLDivElement>(null);
   const spinner = useSpinner(task.status === "processing");
 
@@ -218,7 +228,7 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
     >
       <div
         ref={ref}
-        draggable
+        draggable={!tapToOpen}
         onDragStart={(e) => {
           e.dataTransfer.setData("text/x-task-id", String(task.id));
           e.dataTransfer.effectAllowed = "move";
@@ -229,8 +239,9 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
           "hover:shadow-md hover:border-foreground/15",
           "active:cursor-grabbing",
           selected && "border-ring ring-1 ring-ring",
+          tapToOpen && "gap-1.5 px-3.5 py-3 active:bg-surface-2",
         )}
-        onClick={() => store.selectTask(task.id)}
+        onClick={() => (tapToOpen ? store.openDetail(task.id) : store.selectTask(task.id))}
         onDoubleClick={() => store.openDetail(task.id)}
       >
         <div className="flex items-baseline gap-1.5">
@@ -238,7 +249,7 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
             <span className="w-3 shrink-0 font-mono text-status-processing">{spinner}</span>
           )}
           <span className="shrink-0 font-mono text-[11px] text-muted-foreground">#{task.id}</span>
-          <span className="line-clamp-2 text-[12.5px] leading-snug">
+          <span className={cn("line-clamp-2 leading-snug", tapToOpen ? "text-[15px]" : "text-[12.5px]")}>
             {task.title || "(untitled)"}
           </span>
         </div>
