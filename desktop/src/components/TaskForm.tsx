@@ -229,7 +229,10 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           <DialogTitle>{form.kind === "new" ? "New task" : `Edit #${editing?.id}`}</DialogTitle>
         </DialogHeader>
 
-        <div className="flex max-h-[62vh] flex-col gap-3.5 overflow-y-auto pr-1">
+        {/* In the phone sheet the sheet itself scrolls (capped at 92dvh minus
+            the keyboard), so an inner cap here would produce two nested
+            scrollers and strand the footer. */}
+        <div className="flex max-h-none flex-col gap-3.5 overflow-y-auto pr-1 md:max-h-[62vh]">
           <div className="grid gap-1.5">
             <Label>Project</Label>
             <Select value={project || NONE} onValueChange={(v) => setProject(fromSelect(v))}>
@@ -307,7 +310,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label>Type</Label>
               <Select value={type || NONE} onValueChange={(v) => setType(fromSelect(v))}>
@@ -350,7 +353,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
             {showAdvanced ? "▾" : "▸"} Advanced
           </button>
           {showAdvanced && (
-            <div className="grid grid-cols-2 gap-3.5">
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <Label>Effort</Label>
                 <Select value={toSelect(effort)} onValueChange={(v) => setEffort(fromSelect(v))}>

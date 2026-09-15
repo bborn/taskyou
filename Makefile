@@ -66,14 +66,34 @@ desktop-bundle: build-ui
 	cd desktop && pnpm tauri build
 
 # Restart daemon if it's running (silent if not). Never fail the build if we lack permissions.
+#
+# The old version did `pkill; sleep 1; bin/ty daemon &` and lost the race often
+# enough to leave no daemon at all: SIGTERM only *starts* the shutdown, and the
+# replacement would come up while the corpse still held the flock, die on
+# "daemon already running (could not acquire lock)", and take the board offline
+# until someone noticed. `ty daemon status` is no help as a readiness probe --
+# it reports "not running" before the lock is actually released -- so wait for
+# the PROCESS to disappear, launch detached (a bare `&` job gets reaped with the
+# make shell), and say so loudly if it did not come back.
 restart-daemon:
 	@if pgrep -f "ty daemon" > /dev/null; then \
 		echo "Restarting daemon..."; \
-		pkill -f "ty daemon" || true; \
-		sleep 1; \
-		bin/ty daemon > /tmp/ty-daemon.log 2>&1 & \
-		sleep 1; \
-		echo "Daemon restarted (PID $$(pgrep -f 'ty daemon' || true))"; \
+		bin/ty daemon stop > /dev/null 2>&1 || pkill -f "ty daemon" || true; \
+		for i in $$(seq 1 40); do \
+			pgrep -f "ty daemon" > /dev/null || break; \
+			sleep 0.25; \
+		done; \
+		( nohup bin/ty daemon > /tmp/ty-daemon.log 2>&1 < /dev/null & ); \
+		for i in $$(seq 1 40); do \
+			sleep 0.25; \
+			pgrep -f "ty daemon" > /dev/null && break; \
+		done; \
+		if pgrep -f "ty daemon" > /dev/null; then \
+			echo "Daemon restarted (PID $$(pgrep -f 'ty daemon' | head -1))"; \
+		else \
+			echo "WARNING: daemon did NOT come back -- see /tmp/ty-daemon.log"; \
+			tail -3 /tmp/ty-daemon.log 2>/dev/null || true; \
+		fi; \
 	fi
 
 # ---- Extensions ----------------------------------------------------------

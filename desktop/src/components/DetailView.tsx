@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
-import type { Dependencies, LogLine, Task } from "../api/types";
+import type { ChatMessage, Dependencies, LogLine, Task } from "../api/types";
 import { openExternal, openInEditor } from "../tauri";
 import { store, useAppState } from "../store";
 import { PlacementPanel } from "./PlacementPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
+import { ChatList } from "./ChatList";
 import { LogList } from "./LogList";
 import { mergeRecentLogs } from "../lib/logs";
 import { Markdown } from "./Markdown";
@@ -94,9 +95,11 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [deps, setDeps] = useState<Dependencies | null>(null);
   const isMobile = useIsMobile();
-  // A phone has no terminal, so the execution log is how you see what the
-  // agent is doing: start it open there.
-  const [showLogs, setShowLogs] = useState(isMobile);
+  // The conversation is what you came to read; the execution log is machinery
+  // (tool calls and system lines) and stays collapsed until asked for.
+  const [showLogs, setShowLogs] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [showChat, setShowChat] = useState(true);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -143,6 +146,7 @@ export function DetailView({ taskId }: { taskId: number }) {
   useEffect(() => {
     let active = true;
     let unsubscribe: (() => void) | undefined;
+    let messageRefresh: ReturnType<typeof setTimeout> | null = null;
     historyRevision.current++;
     setTask((current) => current?.id === taskId ? current : null);
     setLogs([]);
@@ -157,13 +161,35 @@ export function DetailView({ taskId }: { taskId: number }) {
       setLogs(mergeRecentLogs([], detail.logs));
       const since = detail.logs[detail.logs.length - 1]?.id ?? 0;
       unsubscribe = subscribeTaskLogs(taskId, since, (batch) => {
-        if (active) setLogs((prev) => mergeRecentLogs(prev, batch));
+        if (!active) return;
+        setLogs((prev) => mergeRecentLogs(prev, batch));
+        // Log activity means the transcript on disk has almost certainly grown
+        // too, so keep the conversation live. Throttled hard: the server
+        // re-reads and re-parses the whole session file, which must not happen
+        // once per log line.
+        if (messageRefresh === null) {
+          messageRefresh = setTimeout(() => {
+            messageRefresh = null;
+            api
+              .taskMessages(taskId)
+              .then((m) => { if (active) setMessages(m); })
+              .catch(() => {});
+          }, 4000);
+        }
       });
     }).catch((e) => {
       if (active) store.toast({title: `Failed to load #${taskId}`, body: String(e), kind: "error"});
     });
     api.deps(taskId).then((value) => { if (active) setDeps(value); }).catch(() => { if (active) setDeps(null); });
-    return () => { active = false; unsubscribe?.(); };
+    setMessages([]);
+    api.taskMessages(taskId)
+      .then((m) => { if (active) setMessages(m); })
+      .catch(() => { if (active) setMessages([]); });
+    return () => {
+      active = false;
+      unsubscribe?.();
+      if (messageRefresh !== null) clearTimeout(messageRefresh);
+    };
   }, [taskId]);
 
   async function loadOlderLogs() {
@@ -194,6 +220,22 @@ export function DetailView({ taskId }: { taskId: number }) {
   const blocked = task.status === "blocked";
   const refreshDeps = () => api.deps(task.id).then(setDeps).catch(() => {});
 
+  // The executor's actual conversation, read from the Claude session
+  // transcript. It was never in task_logs — that table only ever held tool
+  // calls and system lines, so the prose had nowhere to go.
+  //
+  // `follow` on a phone: 135 turns deep, opening at the oldest message means
+  // scrolling the whole history to find what the agent is waiting on.
+  const conversationSection = (
+    <>
+      <SectionTitle onClick={() => setShowChat(!showChat)}>
+        {showChat ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        Conversation <span className="font-normal">({messages.length})</span>
+      </SectionTitle>
+      {showChat && <ChatList messages={messages} follow={isMobile} />}
+    </>
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-3 py-2.5 md:px-4">
@@ -204,7 +246,9 @@ export function DetailView({ taskId }: { taskId: number }) {
         <span
           className={
             isMobile
-              ? "order-last line-clamp-3 w-full text-[15px] leading-snug font-semibold"
+              ? // Title first on a phone: the badges and buttons used to push it
+                // onto a third row, so you scrolled before reading what this is.
+                "order-first line-clamp-3 w-full text-[15px] leading-snug font-semibold"
               : "max-w-[44ch] truncate text-sm font-semibold"
           }
           title={task.title}
@@ -223,31 +267,29 @@ export function DetailView({ taskId }: { taskId: number }) {
 
         <div className="flex-1" />
 
-        {/* Phone: Execute and Reply live in the composer at the bottom, and
-            there is no local editor to open. */}
-        {!isMobile && (
-          <Select
-            value={task.executor || "claude"}
-            onValueChange={async (v) => {
-              await api.updateTask(task.id, { executor: v }).catch(() => {});
-              void store.refreshTasks();
-            }}
-          >
-            <SelectTrigger size="sm" className="w-32" title="Executor">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
-                (ex) => (
-                  <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
-                    {ex.name}
-                    {ex.available ? "" : " (not installed)"}
-                  </SelectItem>
-                ),
-              )}
-            </SelectContent>
-          </Select>
-        )}
+        {/* The executor decides what actually runs when you tap Execute in the
+            phone composer, so it belongs on the phone too. */}
+        <Select
+          value={task.executor || "claude"}
+          onValueChange={async (v) => {
+            await api.updateTask(task.id, { executor: v }).catch(() => {});
+            void store.refreshTasks();
+          }}
+        >
+          <SelectTrigger size="sm" className={isMobile ? "h-9 w-28" : "w-32"} title="Executor">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+              (ex) => (
+                <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                  {ex.name}
+                  {ex.available ? "" : " (not installed)"}
+                </SelectItem>
+              ),
+            )}
+          </SelectContent>
+        </Select>
 
         {!isMobile &&
           (blocked ? (
@@ -309,6 +351,10 @@ export function DetailView({ taskId }: { taskId: number }) {
 
       <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-[140px] min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-3.5 break-words select-text md:px-5">
+          {/* Phone: the conversation is why you opened this, so it comes before
+              the ticket body, placement, dependencies and attachments. */}
+          {isMobile && conversationSection}
+
           {task.body ? (
             <Markdown source={task.body} />
           ) : (
@@ -364,6 +410,9 @@ export function DetailView({ taskId }: { taskId: number }) {
 
           <SectionTitle>Attachments</SectionTitle>
           <AttachmentsPanel taskId={task.id} />
+
+          {/* Desktop keeps it in place; the phone hoists it to the top. */}
+          {!isMobile && conversationSection}
 
           <SectionTitle onClick={() => setShowLogs(!showLogs)}>
             {showLogs ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}

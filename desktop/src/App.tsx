@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { motion } from "motion/react";
-import { Plus, Search, Settings2, ChevronLeft, Sun, Moon, MonitorSmartphone } from "lucide-react";
+import { Plus, Search, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
 import { applyFilter, buildColumns } from "./lib/board";
@@ -9,7 +9,9 @@ import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
 import { MobileBoard } from "./components/MobileBoard";
+import { MobileDrawer } from "./components/MobileDrawer";
 import { useIsMobile } from "./hooks/use-mobile";
+import { useKeyboardInset } from "./hooks/use-keyboard-inset";
 import { SetupCheck } from "./components/SetupCheck";
 import { RoutinesView } from "./components/RoutinesView";
 import { DetailView } from "./components/DetailView";
@@ -38,6 +40,13 @@ function isEditableTarget(target: EventTarget | null): boolean {
 export default function App() {
   const state = useAppState();
   const isMobile = useIsMobile();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  // popstate handlers close over stale state, so the drawer's open-ness has to
+  // be readable from inside one.
+  const drawerOpenRef = useRef(false);
+  drawerOpenRef.current = drawerOpen;
+  // Publishes the soft keyboard's height so bottom-anchored UI can clear it.
+  useKeyboardInset();
   const [bootPhase, setBootPhase] = useState<"starting" | "setup" | "ready" | "error">("starting");
   const [bootMessage, setBootMessage] = useState("Starting TaskYou…");
   const [envReport, setEnvReport] = useState<import("./api/types").EnvironmentReport | null>(null);
@@ -71,12 +80,15 @@ export default function App() {
       setBootMessage("Loading board…");
       await store.boot();
       setBootPhase("ready");
-      // Deep link (a bookmark or a notification tap): /?task=123
-      const deepLink = Number(new URLSearchParams(window.location.search).get("task"));
-      if (Number.isInteger(deepLink) && deepLink > 0) {
-        store.openDetail(deepLink);
-        window.history.replaceState({}, "", window.location.pathname);
-      }
+      // Deep link (a bookmark, a shared link, a notification tap, or a tab the
+      // phone reloaded from scratch): /?task=123 or /?view=settings. The URL is
+      // left intact — it's the source of truth for the view from here on.
+      const params = new URLSearchParams(window.location.search);
+      const deepTask = Number(params.get("task"));
+      const deepView = params.get("view");
+      if (Number.isInteger(deepTask) && deepTask > 0) store.openDetail(deepTask);
+      else if (deepView === "settings") store.openSettings();
+      else if (deepView === "routines") store.openRoutines();
     } catch (e) {
       setBootMessage(e instanceof Error ? e.message : String(e));
       setBootPhase("error");
@@ -131,6 +143,99 @@ export default function App() {
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, [state.theme]);
+
+  // --- View <-> URL ---
+  // In-app navigation used to leave the URL alone, so on a phone the system
+  // Back button exited the app instead of returning to the board, and an open
+  // task couldn't be linked to. Pushing state fixes both.
+  useEffect(() => {
+    if (bootPhase !== "ready") return;
+    const view = state.view;
+    const path = window.location.pathname;
+    const target =
+      view.kind === "board"
+        ? path
+        : view.kind === "detail"
+          ? `${path}?task=${view.taskId}`
+          : `${path}?view=${view.kind}`;
+    if (path + window.location.search !== target) window.history.pushState({}, "", target);
+  }, [state.view, bootPhase]);
+
+  useEffect(() => {
+    function onPopState() {
+      // An open drawer owns the Back gesture: dismiss it and stay put, rather
+      // than navigating out from underneath it.
+      if (drawerOpenRef.current) {
+        setDrawerOpen(false);
+        return;
+      }
+      const params = new URLSearchParams(window.location.search);
+      const task = Number(params.get("task"));
+      const view = params.get("view");
+      if (Number.isInteger(task) && task > 0) store.openDetail(task);
+      else if (view === "settings") store.openSettings();
+      else if (view === "routines") store.openRoutines();
+      else store.openBoard();
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Swipe in from the left edge to open the menu. The numbers are bb's: ignore
+  // the first 24px so the browser's own back-swipe still works, only start
+  // inside a 72px edge zone, and require a mostly-horizontal drag so a normal
+  // vertical scroll never trips it.
+  useEffect(() => {
+    if (!isMobile) return;
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+
+    function onTouchStart(e: TouchEvent) {
+      if (drawerOpenRef.current || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (t.clientX < 24 || t.clientX > 72) return;
+      startX = t.clientX;
+      startY = t.clientY;
+      tracking = true;
+    }
+    function onTouchMove(e: TouchEvent) {
+      if (!tracking) return;
+      const t = e.touches[0];
+      if (Math.abs(t.clientY - startY) > 40) {
+        tracking = false;
+        return;
+      }
+      if (t.clientX - startX > 48) {
+        tracking = false;
+        openDrawer();
+      }
+    }
+    function onTouchEnd() {
+      tracking = false;
+    }
+
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    return () => {
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [isMobile]);
+
+  // Opening the drawer pushes a history entry so the phone's Back button pops
+  // it; closing by any other means pops that entry back off so Back doesn't
+  // need two presses afterwards.
+  function openDrawer() {
+    setDrawerOpen(true);
+    window.history.pushState({ drawer: true }, "", window.location.href);
+  }
+  function closeDrawer() {
+    setDrawerOpen(false);
+    if (window.history.state?.drawer) window.history.back();
+  }
 
   const projectNames = useMemo(() => state.projects.map((p) => p.name), [state.projects]);
   const filteredTasks = useMemo(
@@ -391,6 +496,19 @@ export default function App() {
           inTauri() ? "pl-20" : "pl-3"
         } ${isMobile ? "h-12 pt-[env(safe-area-inset-top)]" : "h-11"}`}
       >
+        {/* Everything the phone can't fit in the header lives behind this:
+            Routines, Settings, search, theme and permission mode. */}
+        {isMobile && state.view.kind === "board" && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="-ml-1 size-9"
+            aria-label="Menu"
+            onClick={openDrawer}
+          >
+            <Menu className="size-5" />
+          </Button>
+        )}
         {/* On a phone the back button replaces the wordmark; there is no room for both. */}
         {!(isMobile && state.view.kind !== "board") && (
           <>
@@ -497,6 +615,14 @@ export default function App() {
           {state.view.kind === "settings" && <SettingsView />}
           {state.view.kind === "routines" && <RoutinesView />}
       </motion.div>
+
+      {isMobile && (
+        <MobileDrawer
+          open={drawerOpen}
+          onClose={closeDrawer}
+          view={state.view.kind}
+        />
+      )}
 
       {state.paletteOpen && <Palette />}
       {state.form && <TaskForm form={state.form} />}

@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  ChatMessage,
   Placement,
   PlacementHost,
   Routine,
@@ -126,6 +127,10 @@ export const api = {
   sendInput: (id: number, message: string) =>
     request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true }),
   taskLogs: (id: number, limit = 200) => request<LogLine[]>("GET", `/api/tasks/${id}/logs?limit=${limit}`),
+  // 60 turns is a long scroll on a phone and ~50KB instead of ~175KB; older
+  // history is a deliberate request, not something to ship on every poll.
+  taskMessages: (id: number, limit = 60) =>
+    request<ChatMessage[]>("GET", `/api/tasks/${id}/messages?limit=${limit}`),
   latestLogs: (ids: number[]) =>
     request<Record<string, LogLine>>("GET", `/api/tasks/latest-logs?ids=${ids.join(",")}`),
 

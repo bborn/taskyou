@@ -38,6 +38,38 @@
   --surface-1: oklch(0 0 0 / 2.5%);
   --surface-2: oklch(0 0 0 / 4.5%);
   --surface-3: oklch(0 0 0 / 7%);
+
+  /* Shell height. `dvh` in a browser tab so the collapsing URL bar cannot
+     clip the app; see the standalone override below. */
+  --ty-shell-height: 100dvh;
+  /* Height of the on-screen keyboard, published by useKeyboardInset on iOS
+     (where the soft keyboard moves only the visual viewport). 0 elsewhere. */
+  --ty-keyboard-inset: 0px;
+}
+
+/* Installed to the home screen there is no browser chrome left to collapse,
+   so the stable large viewport avoids resize jitter while scrolling. */
+@media (display-mode: standalone) {
+  :root {
+    --ty-shell-height: 100lvh;
+  }
+}
+
+/* Phones get a larger type scale, not just bigger hit targets — the 13px
+   desktop baseline is a squint at arm's length.
+   Width only, deliberately: gating on `pointer: coarse` reads better in theory
+   but cannot be exercised by any browser automation available here (headless
+   Chrome reports a fine pointer even under device emulation, and there is no
+   iOS Simulator on this machine), so it would ship untested every time. */
+@media (max-width: 767px) {
+  :root {
+    --text-xs: 0.8125rem;
+    --text-xs--line-height: 1.125rem;
+    --text-sm: 0.9375rem;
+    --text-sm--line-height: 1.375rem;
+    --text-base: 1rem;
+    --text-base--line-height: 1.5rem;
+  }
 }
 
 .dark {
@@ -124,7 +156,17 @@
   html,
   body,
   #root {
-    height: 100%;
+    height: var(--ty-shell-height);
+  }
+  button,
+  a,
+  [role="button"],
+  input,
+  textarea,
+  select,
+  label {
+    /* Removes the 300ms double-tap-to-zoom delay without disabling pinch. */
+    touch-action: manipulation;
   }
   html {
     /* Opaque by default (browser, Linux); the macOS desktop shell clears
@@ -211,9 +253,43 @@
     }
   }
 
+  /* Body copy tracks the phone type scale too; .markdown pins 13px itself. */
+  @media (max-width: 767px) {
+    .markdown {
+      font-size: 0.9375rem;
+    }
+  }
+
   .kbd {
     @apply font-mono text-[11px] bg-surface-3 border rounded px-1.5 py-px;
   }
+}
+
+/* A Radix Select renders as a popover anchored to its trigger, which on a phone
+   lands wherever the trigger happens to be and is easy to miss with a thumb.
+   Dock it to the bottom instead, like every other sheet. Radix writes its
+   positioning as INLINE styles, so these have to be !important to win. */
+@media (max-width: 767px) {
+  [data-slot="select-content"] {
+    position: fixed !important;
+    inset-inline: 0 !important;
+    top: auto !important;
+    bottom: 0 !important;
+    transform: none !important;
+    width: 100% !important;
+    min-width: 100% !important;
+    max-width: 100% !important;
+    max-height: 70dvh !important;
+    border-radius: 0.75rem 0.75rem 0 0 !important;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom)) !important;
+  }
+}
+
+/* The sheet's close button is absolutely positioned top-right, so a long title
+   (the retry sheet quotes the whole task title) runs underneath it. Reserve
+   the gutter on the title rather than truncating each caller's string. */
+[data-mobile-sheet="true"] [data-slot="dialog-title"] {
+  padding-right: 2rem;
 }
 
 /* Snappier overlay animations — the tw-animate defaults read as sluggish. */

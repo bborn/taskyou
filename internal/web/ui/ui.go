@@ -54,6 +54,15 @@ func Handler() http.Handler {
 		if name != "" {
 			if f, err := sub.Open(name); err == nil {
 				_ = f.Close()
+				// Everything under assets/ carries a content hash in its name,
+				// so it is safe to cache forever. The shell and the manifest do
+				// NOT, and a phone that cached an old index.html keeps loading
+				// the old bundle no matter how many times the server is
+				// redeployed — which looks exactly like "the new feature never
+				// shipped".
+				if noStore(name) {
+					w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+				}
 				fileServer.ServeHTTP(w, r)
 				return
 			}
@@ -65,6 +74,13 @@ func Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		_, _ = w.Write(index)
 	})
+}
+
+// noStore reports whether a path must always be revalidated: the unhashed
+// entry points into the app.
+func noStore(name string) bool {
+	return name == "index.html" || strings.HasSuffix(name, ".webmanifest")
 }

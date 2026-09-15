@@ -3,6 +3,7 @@ import { SendHorizonal } from "lucide-react";
 import { api } from "../api/client";
 import type { Task } from "../api/types";
 import { store } from "../store";
+import { useIsCoarsePointer } from "../hooks/use-mobile";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -15,6 +16,7 @@ const QUICK = ["yes", "continue"];
 export function ReplyComposer({ task }: { task: Task }) {
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
+  const touch = useIsCoarsePointer();
 
   const live = task.status === "processing" || task.status === "blocked";
 
@@ -38,9 +40,16 @@ export function ReplyComposer({ task }: { task: Task }) {
     }
   }
 
+  // On iOS the soft keyboard doesn't resize the layout viewport, so a bottom
+  // anchored bar would sit underneath it. useKeyboardInset measures it.
+  const liftForKeyboard = { transform: "translateY(calc(-1 * var(--ty-keyboard-inset, 0px)))" };
+
   if (!live) {
     return (
-      <div className="shrink-0 border-t bg-surface-1 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <div
+        style={liftForKeyboard}
+        className="shrink-0 border-t bg-surface-1 px-3 pt-3 pb-[max(0.75rem,var(--ty-safe-area-bottom,env(safe-area-inset-bottom)))]"
+      >
         <Button
           className="h-11 w-full text-sm"
           disabled={task.status === "queued"}
@@ -53,7 +62,10 @@ export function ReplyComposer({ task }: { task: Task }) {
   }
 
   return (
-    <div className="shrink-0 border-t bg-surface-1 px-3 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
+    <div
+      style={liftForKeyboard}
+      className="shrink-0 border-t bg-surface-1 px-3 pt-2.5 pb-[max(0.625rem,var(--ty-safe-area-bottom,env(safe-area-inset-bottom)))]"
+    >
       <div className="mb-2 flex gap-1.5">
         {QUICK.map((word) => (
           <Button
@@ -82,10 +94,14 @@ export function ReplyComposer({ task }: { task: Task }) {
           value={message}
           disabled={sending}
           placeholder="Reply to the agent…"
+          enterKeyHint={touch ? "enter" : "send"}
           className="max-h-40 min-h-11 resize-none text-base md:text-base"
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {
-            // Enter sends; Shift+Enter is a newline.
+            // A touch keyboard has no usable Shift+Enter, so Enter-to-send
+            // would make multi-line replies impossible. There, Return inserts
+            // a newline and the send button is the only way to send.
+            if (touch) return;
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               void send(message);

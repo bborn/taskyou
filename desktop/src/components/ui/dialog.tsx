@@ -4,6 +4,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { useIsMobile } from "@/hooks/use-mobile"
 
 function Dialog({
   ...props
@@ -53,13 +54,22 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
+  // On a phone a centred modal is the wrong shape: it fights the keyboard and
+  // strands its buttons mid-screen. Same content, bottom-sheet shell — which
+  // is what makes the retry, edit, status and settings dialogs usable without
+  // re-fitting each of them by hand.
+  const isMobile = useIsMobile()
+
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        data-mobile-sheet={isMobile ? "true" : undefined}
         className={cn(
-          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
+          isMobile
+            ? "fixed inset-x-0 bottom-0 z-50 grid max-h-[calc(92dvh-var(--ty-keyboard-inset,0px))] w-full grid-cols-[minmax(0,1fr)] gap-4 overflow-y-auto overscroll-contain rounded-t-xl border bg-background p-4 pb-[max(1rem,var(--ty-safe-area-bottom,env(safe-area-inset-bottom)))] shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:slide-out-to-bottom data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom"
+            : "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
           className
         )}
         {...props}
@@ -97,11 +107,19 @@ function DialogFooter({
 }: React.ComponentProps<"div"> & {
   showCloseButton?: boolean
 }) {
+  // `flex-col-reverse` exists so the primary action sits on top when a desktop
+  // footer wraps. On a phone sheet it reverses source order instead: a footer
+  // with a leading control (TaskForm's "Execute immediately") threw that
+  // control *underneath* the buttons. Natural order, full-width targets, and
+  // the primary action ends up nearest the thumb.
+  const isMobile = useIsMobile()
   return (
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        isMobile
+          ? "flex flex-col gap-2 [&>button]:h-11 [&>button]:w-full"
+          : "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
         className
       )}
       {...props}
