@@ -121,6 +121,13 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /api/tasks/{id}/shell", s.handleEnsureShellPane)
 	mux.HandleFunc("GET /api/tasks/latest-logs", s.handleLatestLogs)
 
+	// Task workspace providers and persistent resource tabs.
+	mux.HandleFunc("GET /api/tasks/{id}/panel-providers", s.handlePanelProviders)
+	mux.HandleFunc("GET /api/tasks/{id}/panels", s.handlePanels)
+	mux.HandleFunc("POST /api/tasks/{id}/panels", s.handlePanels)
+	mux.HandleFunc("DELETE /api/tasks/{id}/panels/{panelID}", s.handleClosePanel)
+	mux.HandleFunc("GET /api/tasks/{id}/panels/{panelID}/content", s.handlePanelContent)
+
 	// Attachments
 	mux.HandleFunc("GET /api/tasks/{id}/attachments", s.handleListAttachments)
 	mux.HandleFunc("POST /api/tasks/{id}/attachments", s.handleAddAttachment)

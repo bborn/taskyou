@@ -602,6 +602,7 @@ Examples:
 	// plain status write that skips all of it.
 	rootCmd.AddCommand(newCompleteCmd())
 	rootCmd.AddCommand(newPlaceCmd())
+	rootCmd.AddCommand(newPanelCmd())
 
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
