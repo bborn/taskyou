@@ -1581,7 +1581,14 @@ func (e *Executor) prTargets() ([]github.PRTarget, map[int64]*db.Task) {
 	var targets []github.PRTarget
 	tasks := make(map[int64]*db.Task)
 	for _, status := range []string{db.StatusProcessing, db.StatusBlocked, db.StatusDone} {
-		list, err := e.db.ListTasks(db.ListTasksOptions{Status: status, Limit: 200})
+		opts := db.ListTasksOptions{Status: status, Limit: 200}
+		if status == db.StatusDone {
+			// Done runs thousands deep and is listed newest first, so a cap
+			// would strand older tasks whose PR is still open. Ask only for
+			// those, however old.
+			opts = db.ListTasksOptions{Status: status, OpenPROnly: true, Limit: -1}
+		}
+		list, err := e.db.ListTasks(opts)
 		if err != nil {
 			continue
 		}
