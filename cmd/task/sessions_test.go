@@ -256,7 +256,7 @@ func TestCleanupOrphanedSessions_KillsWindowForDeletedTask(t *testing.T) {
 		t.Fatalf("tag session as ours: %v", err)
 	}
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if windowExists(sessionName, fmt.Sprintf("task-%d", orphanID)) {
 		t.Error("orphan window still exists after cleanup; deleted-task windows should be killed")
@@ -283,7 +283,7 @@ func TestCleanupOrphanedSessions_KeepsWindowForActiveTask(t *testing.T) {
 
 	makeDaemonSessionWithName(t, sessionName, int(task.ID))
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if !windowExists(sessionName, fmt.Sprintf("task-%d", task.ID)) {
 		t.Error("active task window was killed; cleanup should leave it alone")
@@ -316,7 +316,7 @@ func TestCleanupOrphanedSessions_KillsWindowForOldDoneTask(t *testing.T) {
 
 	makeDaemonSessionWithName(t, sessionName, int(task.ID))
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if windowExists(sessionName, fmt.Sprintf("task-%d", task.ID)) {
 		t.Error("old done task window survived cleanup")
@@ -347,7 +347,7 @@ func TestCleanupOrphanedSessions_KeepsWindowForRecentDoneTask(t *testing.T) {
 
 	makeDaemonSessionWithName(t, sessionName, int(task.ID))
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if !windowExists(sessionName, fmt.Sprintf("task-%d", task.ID)) {
 		t.Error("recently-done task window was killed; should stay for review window")
