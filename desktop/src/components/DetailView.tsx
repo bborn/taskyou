@@ -422,6 +422,13 @@ export function DetailView({ taskId }: { taskId: number }) {
           </div>
 
           <ActionRow
+            label={task.pinned ? "Unpin task" : "Pin task"}
+            onClick={() => {
+              setActionsOpen(false);
+              void store.pinTask(task.id);
+            }}
+          />
+          <ActionRow
             label="Change status"
             onClick={() => {
               setActionsOpen(false);

@@ -256,6 +256,11 @@ export const CardSlot = memo(function CardSlot({
               {task.status === "processing" && (
                 <span className="w-3 shrink-0 font-mono text-status-processing">{spinner}</span>
               )}
+              {/* Only pinned cards pay for the icon; unpinned ones stay as thin
+                  as they were. */}
+              {task.pinned && (
+                <Pin className="size-3.5 shrink-0 self-center text-amber-500 dark:text-amber-300" />
+              )}
               <span className="min-w-0 truncate text-[15px] leading-snug">
                 {task.title || "(untitled)"}
               </span>

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
-import { Check, ListFilter, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ListFilter, X } from "lucide-react";
 import type { Column } from "../lib/board";
 import { parseFilter, referenceTime } from "../lib/board";
 import { store, useAppSelector } from "../store";
@@ -73,6 +73,9 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
   const filter = useAppSelector((s) => s.filter);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  // Fold state is deliberately not persisted — deck does the same; it is a
+  // glance-level toggle, not a preference.
+  const [pinnedFolded, setPinnedFolded] = useState(false);
 
   const parsed = parseFilter(filter);
   const activeStatus: FilterKey | null = (parsed.status as FilterKey | undefined) ?? null;
@@ -91,7 +94,13 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
       });
   }, [columns, activeStatus]);
 
-  const visible = showAll ? listTasks : listTasks.slice(0, RENDER_CAP);
+  // Pins lead in their own group, as bb's deck does: scattering them through
+  // the list is what makes pinning pointless. The render cap applies to the
+  // remainder only — a pinned task must never fall outside the cap and vanish
+  // from the very group that exists to keep it visible.
+  const pinnedTasks = useMemo(() => listTasks.filter((t) => t.pinned), [listTasks]);
+  const restTasks = useMemo(() => listTasks.filter((t) => !t.pinned), [listTasks]);
+  const visible = showAll ? restTasks : restTasks.slice(0, RENDER_CAP);
 
   // Counts ignore the dimension they describe: status counts span every status,
   // project counts sit within the chosen one (or all of them when none is set).
@@ -200,6 +209,41 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
               : "No tasks yet."}
           </div>
         ) : (
+          <>
+            {pinnedTasks.length > 0 && (
+              <>
+                <button
+                  onClick={() => setPinnedFolded(!pinnedFolded)}
+                  className="-mx-1 flex items-center gap-1.5 px-1 py-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase active:text-foreground"
+                >
+                  {pinnedFolded ? (
+                    <ChevronRight className="size-3" />
+                  ) : (
+                    <ChevronDown className="size-3" />
+                  )}
+                  Pinned
+                  <span className="tabular-nums opacity-70">{pinnedTasks.length}</span>
+                </button>
+                {!pinnedFolded && (
+                  <AnimatePresence initial={false}>
+                    {pinnedTasks.map((task) => (
+                      <CardSlot
+                        key={task.id}
+                        task={task}
+                        selected={false}
+                        tapToOpen
+                        projectColor={
+                          projects.find((p) => p.name === task.project)?.color ||
+                          "var(--muted-foreground)"
+                        }
+                        latest={latestLogs[String(task.id)]}
+                      />
+                    ))}
+                  </AnimatePresence>
+                )}
+                {restTasks.length > 0 && <div className="my-1 border-t" />}
+              </>
+            )}
           <AnimatePresence initial={false}>
             {visible.map((task) => (
               <CardSlot
@@ -212,13 +256,14 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
               />
             ))}
           </AnimatePresence>
+          </>
         )}
-        {listTasks.length > visible.length && (
+        {restTasks.length > visible.length && (
           <button
             className="rounded-lg py-3 text-center text-[13px] text-muted-foreground active:bg-surface-2"
             onClick={() => setShowAll(true)}
           >
-            {listTasks.length - visible.length} more…
+            {restTasks.length - visible.length} more…
           </button>
         )}
       </div>
