@@ -469,10 +469,10 @@ func (m *DetailModel) saveLayout(ctx context.Context, force bool) {
 			m.database.SetSetting(config.SettingDetailPaneHeight, fmt.Sprintf("%d%%", height))
 		}
 	}
-	if width := m.getCurrentShellPaneWidth(); width >= 10 && width <= 90 {
+	if width := m.getCurrentShellPaneWidth(); width >= minShellPaneWidth && width <= maxShellPaneWidth {
 		changed := m.initialShellWidth > 0 && (width < m.initialShellWidth-2 || width > m.initialShellWidth+2)
 		if force || changed {
-			m.database.SetSetting(config.SettingShellPaneWidth, fmt.Sprintf("%d%%", width))
+			m.setShellPaneWidth(width)
 		}
 	}
 }
@@ -633,14 +633,20 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 	return (shellWidth*100 + total/2) / total
 }
 
-// saveShellPaneWidth records the shell's current width as the preference.
+// saveShellPaneWidth records the shell's current width as this task's width.
 func (m *DetailModel) saveShellPaneWidth() {
-	if m.database == nil {
+	if pct := m.getCurrentShellPaneWidth(); pct >= minShellPaneWidth && pct <= maxShellPaneWidth {
+		m.setShellPaneWidth(pct)
+	}
+}
+
+// setShellPaneWidth stores a width for this task alone, leaving every other
+// task's split where its own last resize left it.
+func (m *DetailModel) setShellPaneWidth(pct int) {
+	if m.database == nil || m.task == nil {
 		return
 	}
-	if pct := m.getCurrentShellPaneWidth(); pct >= 10 && pct <= 90 {
-		m.database.SetSetting(config.SettingShellPaneWidth, fmt.Sprintf("%d%%", pct))
-	}
+	m.database.SetSetting(config.ShellPaneWidthKey(m.task.ID), fmt.Sprintf("%d%%", pct))
 }
 
 // killPaneWithProcess kills a UI pane and the process in it (remote attach and
