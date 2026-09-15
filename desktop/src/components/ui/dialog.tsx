@@ -5,6 +5,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useSheetKeyboardInset } from "@/hooks/use-keyboard-inset"
 
 function Dialog({
   ...props
@@ -59,11 +60,17 @@ function DialogContent({
   // is what makes the retry, edit, status and settings dialogs usable without
   // re-fitting each of them by hand.
   const isMobile = useIsMobile()
+  const panelRef = React.useRef<HTMLDivElement>(null)
+  // bb's second keyboard layer: a sheet is fixed to the viewport bottom, so
+  // resizing the shell is not enough — the panel lifts itself by the measured
+  // overlap. This is what was leaving the filter sheet's input under the keys.
+  useSheetKeyboardInset(panelRef, isMobile)
 
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
       <DialogPrimitive.Content
+        ref={panelRef}
         data-slot="dialog-content"
         data-mobile-sheet={isMobile ? "true" : undefined}
         className={cn(

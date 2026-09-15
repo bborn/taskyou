@@ -11,7 +11,7 @@ import { Board } from "./components/Board";
 import { MobileBoard } from "./components/MobileBoard";
 import { MobileDrawer } from "./components/MobileDrawer";
 import { useIsMobile } from "./hooks/use-mobile";
-import { useKeyboardInset } from "./hooks/use-keyboard-inset";
+import { useVisualViewportShell } from "./hooks/use-keyboard-inset";
 import { SetupCheck } from "./components/SetupCheck";
 import { RoutinesView } from "./components/RoutinesView";
 import { DetailView } from "./components/DetailView";
@@ -45,8 +45,10 @@ export default function App() {
   // be readable from inside one.
   const drawerOpenRef = useRef(false);
   drawerOpenRef.current = drawerOpen;
-  // Publishes the soft keyboard's height so bottom-anchored UI can clear it.
-  useKeyboardInset();
+  // Resizes the whole shell to the visual viewport while the keyboard is up,
+  // so every input inside it clears the keys — not just the reply composer.
+  const shellRef = useRef<HTMLDivElement>(null);
+  useVisualViewportShell(shellRef, isMobile);
   const [bootPhase, setBootPhase] = useState<"starting" | "setup" | "ready" | "error">("starting");
   const [bootMessage, setBootMessage] = useState("Starting TaskYou…");
   const [envReport, setEnvReport] = useState<import("./api/types").EnvironmentReport | null>(null);
@@ -487,7 +489,7 @@ export default function App() {
   const permLabel = state.permissionMode === "" ? "default" : state.permissionMode;
 
   return (
-    <div className="app-shell flex h-full flex-col">
+    <div ref={shellRef} className="app-shell fixed inset-x-0 top-0 flex h-full flex-col">
       {/* Titlebar: overlay style — traffic lights sit in the left inset; the
           whole bar is a drag region. */}
       <header

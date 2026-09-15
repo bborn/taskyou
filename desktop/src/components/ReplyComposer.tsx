@@ -59,9 +59,10 @@ export function ReplyComposer({ task }: { task: Task }) {
     }
   }
 
-  // On iOS the soft keyboard doesn't resize the layout viewport, so a bottom
-  // anchored bar would sit underneath it. useKeyboardInset measures it.
-  const liftForKeyboard = { transform: "translateY(calc(-1 * var(--ty-keyboard-inset, 0px)))" };
+  // No lift here any more: the shell itself is resized to the visual viewport
+  // while the keyboard is up, so this bar is already inside a box that ends
+  // above the keys. Translating it too would double-count the inset.
+  const liftForKeyboard = undefined;
 
   if (!live) {
     return (
