@@ -695,3 +695,29 @@ func TestHandleEnsureSession_RefusesWhileBorrowed(t *testing.T) {
 		t.Error("EnsureTaskWindow must not run while the pane is borrowed")
 	}
 }
+
+func TestHandleEnsureShellPane_ReusesOwnedParkedPane(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "shared workspace", Status: db.StatusProcessing})
+	if err := database.UpdateTaskPaneIDs(task.ID, "%10", "%11"); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputByCmd = map[string][]byte{
+		"list-windows":    []byte(fmt.Sprintf("task-daemon-99:3:task-%d\n", task.ID)),
+		"list-panes":      []byte("%10\n"),
+		"display-message": []byte(fmt.Sprintf("%%11\t%d\tshell\n", task.ID)),
+	}
+	response := ensureShellPaneRequest(t, srv, task.ID)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", response.Code, response.Body.String())
+	}
+	for _, call := range runner.calls {
+		if len(call) > 1 && call[1] == "split-window" {
+			t.Fatalf("duplicated the parked shell: %v", call)
+		}
+	}
+	fresh, err := database.GetTask(task.ID)
+	if err != nil || fresh.ShellPaneID != "%11" {
+		t.Fatalf("lost parked shell: %#v %v", fresh, err)
+	}
+}

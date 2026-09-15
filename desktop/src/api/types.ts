@@ -180,3 +180,18 @@ export interface Placement {
  decided: boolean;
  health: { state: string; last_seen?: string; problem?: string };
 }
+
+export interface PanelInstance {
+  id: string;
+  task_id: number;
+  provider_id: string;
+  resource: string;
+  title: string;
+}
+export interface PanelProvider { id: string; title: string; kind: string }
+export interface PanelContent {
+  kind: string;
+  text?: string;
+  url?: string;
+  entries?: { path: string; name: string; directory: boolean }[];
+}

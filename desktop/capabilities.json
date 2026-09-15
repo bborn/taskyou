@@ -166,6 +166,16 @@
         "POST /api/tasks/{id}/placement"
       ],
       "note": "@ opens placement in the TUI; task detail placement panel in desktop and browser."
+    },
+    "Workspace": {
+      "api": [
+        "GET /api/tasks/{id}/panel-providers",
+        "GET /api/tasks/{id}/panels",
+        "POST /api/tasks/{id}/panels",
+        "DELETE /api/tasks/{id}/panels/{panelID}",
+        "GET /api/tasks/{id}/panels/{panelID}/content"
+      ],
+      "note": "Workspace beside the conversation: Shell, pull request, files and Markdown; launcher and persistent resource tabs."
     }
   },
   "gui_only": [

@@ -121,7 +121,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 					Rows int    `json:"rows"`
 				}
 				if json.Unmarshal(msg, &resizeMsg) == nil && resizeMsg.Type == "resize" {
-					if resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
+					if r.URL.Query().Get("resize") != "0" && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
 						if err := terminal.run("resize-pane", "-t", paneID,
 							"-x", strconv.Itoa(resizeMsg.Cols),
 							"-y", strconv.Itoa(resizeMsg.Rows)); err != nil {
@@ -163,6 +163,17 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	var fastUntil time.Time
 	lastOutput := output
 	sendFrame := func() bool {
+		if r.URL.Query().Get("resize") == "0" {
+			newCols, newRows := terminal.getPaneSize(paneID)
+			if newCols != cols || newRows != rows {
+				cols, rows = newCols, newRows
+				size, _ := json.Marshal(map[string]interface{}{"type": "size", "cols": cols, "rows": rows})
+				if err := conn.WriteMessage(websocket.TextMessage, size); err != nil {
+					return false
+				}
+				lastOutput = "" // redraw after the client resizes its emulator
+			}
+		}
 		current, err := terminal.paneFrame(paneID)
 		if err != nil {
 			return false

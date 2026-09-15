@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"unicode"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -71,7 +72,7 @@ func noResource(v string) (string, error) {
 	return "", nil
 }
 func fileResource(v string) (string, error) {
-	if strings.ContainsAny(v, "\x00\r\n\\") || strings.HasPrefix(v, "/") {
+	if strings.Contains(v, "\\") || strings.IndexFunc(v, unicode.IsControl) >= 0 || strings.HasPrefix(v, "/") {
 		return "", fmt.Errorf("use a relative workspace path")
 	}
 	v = path.Clean(v)
@@ -162,6 +163,9 @@ func (s *Service) Open(taskID int64, providerID, resource string) (Instance, err
 	title := provider.Title
 	if providerID == "file" {
 		title = path.Base(normalized)
+	}
+	if providerID == "files" && normalized != "." {
+		title = path.Base(normalized) + "/"
 	}
 	p := instance(taskID, providerID, normalized, title)
 	_, err = s.DB.Exec("INSERT OR IGNORE INTO task_panels(id,task_id,provider_id,resource,title) VALUES(?,?,?,?,?)", p.ID, p.TaskID, p.ProviderID, p.Resource, p.Title)

@@ -1,4 +1,5 @@
 import type {
+  PanelInstance, PanelProvider, PanelContent,
   Attachment,
   Placement,
   Routine,
@@ -60,6 +61,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  panelProviders: (id: number) => request<PanelProvider[]>("GET", `/api/tasks/${id}/panel-providers`),
+  panels: (id: number) => request<PanelInstance[]>("GET", `/api/tasks/${id}/panels`),
+  openPanel: (id: number, provider_id: string, resource = "") => request<PanelInstance>("POST", `/api/tasks/${id}/panels`, { provider_id, resource }),
+  closePanel: (id: number, panelId: string) => request<void>("DELETE", `/api/tasks/${id}/panels/${panelId}`),
+  panelContent: (id: number, panelId: string) => request<PanelContent>("GET", `/api/tasks/${id}/panels/${panelId}/content`),
  placement: (id: number) => request<Placement>("GET", `/api/tasks/${id}/placement`),
  placeTask: (id: number, target: string, workdir: string) => request<{messages: string[]}>("POST", `/api/tasks/${id}/placement`, {target, workdir}),
   // Tasks

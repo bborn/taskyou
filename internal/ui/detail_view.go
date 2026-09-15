@@ -430,6 +430,9 @@ func (m *DetailModel) styleDetailLayout(ctx context.Context, tuiPaneID string) {
 // shell's width become the new defaults; otherwise they are saved only if the
 // user resized them.
 func (m *DetailModel) closeTaskWindowView(saveLayout bool) {
+	workspaceCtx, workspaceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	m.closeWorkspace(workspaceCtx)
+	workspaceCancel()
 	if m.viewerPaneID == "" && m.viewSession == "" && m.claudePaneID == "" {
 		return
 	}

@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/panel"
-	"github.com/spf13/cobra"
-	"strconv"
+	"github.com/bborn/workflow/internal/ui"
 )
 
 func newPanelCmd() *cobra.Command {
@@ -62,5 +67,24 @@ func newPanelCmd() *cobra.Command {
 		}
 		cmd.AddCommand(sub)
 	}
+	cmd.AddCommand(&cobra.Command{Use: "view <task-id>", Short: "Open the terminal workspace viewer", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			return err
+		}
+		d, err := db.Open(db.DefaultPath())
+		if err != nil {
+			return err
+		}
+		defer d.Close()
+		svc := panel.New(d)
+		if _, err = svc.List(id); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithCancel(c.Context())
+		defer cancel()
+		_, err = tea.NewProgram(ui.NewWorkspaceModel(ctx, svc, id), tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+		return err
+	}})
 	return cmd
 }

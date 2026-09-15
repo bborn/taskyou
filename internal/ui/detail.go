@@ -207,17 +207,19 @@ func isShellCommand(cmd string) bool {
 
 // DetailModel represents the task detail view.
 type DetailModel struct {
-	hostHealth db.HostHealth
-	paneWork   sync.WaitGroup
-	task       *db.Task
-	logs       []*db.TaskLog
-	database   *db.DB
-	executor   *executor.Executor
-	viewport   viewport.Model
-	width      int
-	height     int
-	ready      bool
-	prInfo     *github.PRInfo
+	workspacePaneID       string
+	workspaceRestoreShell bool
+	hostHealth            db.HostHealth
+	paneWork              sync.WaitGroup
+	task                  *db.Task
+	logs                  []*db.TaskLog
+	database              *db.DB
+	executor              *executor.Executor
+	viewport              viewport.Model
+	width                 int
+	height                int
+	ready                 bool
+	prInfo                *github.PRInfo
 
 	// Task position in column (1-indexed)
 	positionInColumn int
@@ -1227,6 +1229,9 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 // detaches the grouped view session on the host — where destroy-unattached then
 // disposes of it. The remote agent and workdir shell keep running.
 func (m *DetailModel) closeRemotePane(resizeTUI bool) {
+	workspaceCtx, workspaceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	m.closeWorkspace(workspaceCtx)
+	workspaceCancel()
 	if m.remotePaneID == "" && m.remoteShellPaneID == "" {
 		return
 	}
@@ -2214,6 +2219,13 @@ func pathInsideDir(dir, path string) bool {
 // When hidden, the shell pane is moved to the daemon window and Claude expands to full width.
 // When shown, the shell pane is rejoined from the daemon or a new one is created.
 func (m *DetailModel) ToggleShellPane() tea.Cmd {
+	if m.workspacePaneID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		m.closeWorkspace(ctx)
+		m.setViewportContent()
+		return nil
+	}
 	if loc, remote := m.remoteTaskLocation(); remote {
 		if m.paneLoading {
 			return nil
@@ -3154,6 +3166,7 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	keys = append(keys, helpKey{"e", "edit", false, true})
+	keys = append(keys, helpKey{"w", "workspace", false, true})
 
 	// Only show retry when Claude is not running
 	if !claudeRunning {

@@ -114,3 +114,20 @@ func TestTaskIsolationAndUnknownProvider(t *testing.T) {
 		t.Fatal("missing task accepted")
 	}
 }
+
+func TestConcurrentOpenIsOneTab(t *testing.T) {
+	s, task := fixture(t)
+	errors := make(chan error, 12)
+	for i := 0; i < 12; i++ {
+		go func() { _, err := s.Open(task.ID, "file", "README.md"); errors <- err }()
+	}
+	for i := 0; i < 12; i++ {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	tabs, err := s.List(task.ID)
+	if err != nil || len(tabs) != 2 {
+		t.Fatalf("concurrent opens: %v %v", tabs, err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -66,7 +67,7 @@ func (s *Service) readResource(ctx context.Context, t *db.Task, resource string,
 		return Content{}, fmt.Errorf("workspace unavailable: %w", err)
 	}
 	defer dir.Close()
-	f, err := dir.Open(resource)
+	f, err := dir.OpenFile(resource, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return Content{}, err
 	}
