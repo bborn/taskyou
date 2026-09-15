@@ -2191,6 +2191,13 @@ func (m *AppModel) renderFilterBar() string {
 }
 
 func (m *AppModel) renderHelp() string {
+	// Cap the help to the terminal. The bubbles help model renders at its
+	// natural width when Width is 0, so a keymap that outgrows the terminal
+	// would make the whole dashboard wider than the screen and re-wrap the
+	// board. Width is also set on resize; this covers the pre-resize render.
+	if m.width > 0 {
+		m.help.Width = m.width
+	}
 	return m.help.View(m.keys)
 }
 

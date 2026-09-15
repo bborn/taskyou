@@ -51,6 +51,22 @@ func seedFilterTasks(t *testing.T, m *AppModel, database *db.DB) {
 	}
 }
 
+// runFilter applies the current filter and drains the asynchronous pass when
+// there is one. applyFilter resolves inline (returning nil) whenever the query
+// is purely structural, and dispatches a command otherwise.
+func runFilter(t *testing.T, m *AppModel) {
+	t.Helper()
+	cmd := m.applyFilter()
+	if cmd == nil {
+		return
+	}
+	msg, ok := cmd().(boardFilterMsg)
+	if !ok {
+		t.Fatalf("applyFilter produced %T, want boardFilterMsg", cmd())
+	}
+	m.finishBoardFilter(msg)
+}
+
 func boardTitles(m *AppModel) []string {
 	var titles []string
 	for _, task := range m.kanban.allTasks {
@@ -66,7 +82,7 @@ func TestApplyFilterStatusTokens(t *testing.T) {
 	seedFilterTasks(t, m, database)
 
 	m.filterText = "status:in-progress status:blocked"
-	m.applyFilter()
+	runFilter(t, m)
 
 	got := boardTitles(m)
 	if len(got) != 2 {
@@ -84,7 +100,7 @@ func TestApplyFilterPinnedToken(t *testing.T) {
 	seedFilterTasks(t, m, database)
 
 	m.filterText = "is:pinned"
-	m.applyFilter()
+	runFilter(t, m)
 
 	got := boardTitles(m)
 	if len(got) != 1 || got[0] != "Backlog task" {
@@ -99,7 +115,7 @@ func TestApplyFilterCombinesTokenAndKeyword(t *testing.T) {
 	seedFilterTasks(t, m, database)
 
 	m.filterText = "status:blocked Blocked"
-	m.applyFilter()
+	runFilter(t, m)
 
 	got := boardTitles(m)
 	if len(got) != 1 || got[0] != "Blocked task" {
@@ -125,7 +141,7 @@ func TestApplyFilterStatusTokenConstrainsDBSearch(t *testing.T) {
 	m.tasks = []*db.Task{live}
 
 	m.filterText = "status:blocked Ancient"
-	m.applyFilter()
+	runFilter(t, m)
 
 	for _, title := range boardTitles(m) {
 		if title == "Ancient shipped thing" {
