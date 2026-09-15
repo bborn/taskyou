@@ -16,6 +16,9 @@ func fixture(t *testing.T) (*Service, *db.Task) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	if err := d.CreateProject(&db.Project{Name: "panel-fixture", Path: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
 	task := &db.Task{Title: "Review checkout", Status: "backlog", Project: "panel-fixture", WorktreePath: t.TempDir()}
 	if err := d.CreateTask(task); err != nil {
 		t.Fatal(err)

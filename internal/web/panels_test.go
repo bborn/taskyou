@@ -15,6 +15,9 @@ import (
 
 func TestPanelRoutes(t *testing.T) {
 	srv, d, _ := setupServer(t)
+	if err := d.CreateProject(&db.Project{Name: "panel-fixture", Path: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
 	task := createTestTask(t, d, &db.Task{Title: "Checkout accessibility", Status: "backlog", Project: "panel-fixture", WorktreePath: t.TempDir()})
 	if err := d.UpdateTask(task); err != nil {
 		t.Fatal(err)
