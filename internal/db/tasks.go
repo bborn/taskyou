@@ -352,7 +352,21 @@ func (db *DB) CreateTask(t *Task) error {
 	// Keep the legacy boolean consistent with the resolved mode.
 	t.DangerousMode = t.PermissionMode == PermissionModeDangerous
 
-	result, err := db.Exec(`
+	// The row and its genesis event are written together or not at all.
+	//
+	// This used to be three separate statements with the genesis event
+	// best-effort, and that is a hole, not a nicety: a task whose genesis insert
+	// is lost (SQLITE_BUSY under a second writer is enough) folds to "" forever
+	// while its row says "backlog", and nothing can repair it — every later
+	// transition appends, none rewrites the beginning. One transaction is the
+	// same rule applyTransition already follows, applied to the first fact.
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin task creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.Exec(`
 		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, permission_mode, remote_control, effort_level, model, claude_config_dir, env)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.PermissionMode, t.RemoteControl, t.EffortLevel, t.Model, t.ClaudeConfigDir, t.EnvJSON)
@@ -364,7 +378,6 @@ func (db *DB) CreateTask(t *Task) error {
 	if err != nil {
 		return fmt.Errorf("get last insert id: %w", err)
 	}
-	t.ID = id
 
 	// A task created straight into 'processing' gets a started_at, and this is
 	// NOT the inference the never-started gate exists to forbid.
@@ -377,10 +390,20 @@ func (db *DB) CreateTask(t *Task) error {
 	// fold. A task whose log never reaches 'processing' still has a nil
 	// started_at, and the gate still refuses to complete it.
 	if t.Status == StatusProcessing {
-		if _, err := db.Exec(`UPDATE tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL`, id); err != nil {
+		if _, err := tx.Exec(`UPDATE tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL`, id); err != nil {
 			return fmt.Errorf("stamp started_at on task created as processing: %w", err)
 		}
 	}
+
+	// Genesis event: the first fact in this task's status log, so the fold over
+	// that log equals the cached row from the moment the task exists.
+	if err := genesisEventSQL(tx, id, t.Status, ActorSystem, "task created", nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit task creation: %w", err)
+	}
+	t.ID = id
 
 	// Save the last used task type for this project
 	if t.Type != "" {
@@ -409,10 +432,6 @@ func (db *DB) CreateTask(t *Task) error {
 	// Fetch the complete task and emit created event
 	createdTask, err := db.GetTask(id)
 	if err == nil && createdTask != nil {
-		// Genesis event: the first fact in this task's status log, so the fold
-		// over that log equals the cached row from the moment the task exists.
-		// Without it every new task would fail CheckStatusConsistency.
-		db.appendGenesisEvent(id, createdTask.Status, ActorSystem, "task created", nil)
 		db.emitTaskCreated(createdTask)
 	}
 

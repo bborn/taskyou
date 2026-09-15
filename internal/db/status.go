@@ -592,28 +592,51 @@ func (db *DB) afterTransition(task *Task, from, to string) {
 	}
 }
 
-// appendGenesisEvent records a task's initial status, so every task's log folds
-// to its row from the very first event. Called by CreateTask (and by the
-// backfill for tasks that predate the log).
-func (db *DB) appendGenesisEvent(taskID int64, status string, actor Actor, reason string, at *time.Time) {
+// execer is satisfied by both *DB and *sql.Tx, so the genesis event can be
+// written inside the caller's transaction or on its own.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+// genesisEventSQL writes a task's initial status: the first fact in its log, so
+// the fold equals the cached row from the moment the task exists.
+//
+// It returns its error rather than swallowing it. A dropped genesis event is
+// not a cosmetic loss — the task's log then folds to "" forever while its row
+// says something else, so CheckStatusConsistency reports it for the rest of the
+// database's life and no later transition can repair it (every transition
+// appends, none rewrites the beginning). Under SQLITE_BUSY that is exactly what
+// a best-effort insert produces, which is how it was found: a task created
+// while a screenshot run was hammering the same file came out with no events.
+func genesisEventSQL(x execer, taskID int64, status string, actor Actor, reason string, at *time.Time) error {
 	ev := Evidence{Observed: "task created with status " + status}
 	if actor == ActorMigration {
 		ev = Evidence{Observed: "row state at migration time; no transition history existed before this point"}
 	}
 	var err error
 	if at != nil {
-		_, err = db.Exec(`
+		_, err = x.Exec(`
 			INSERT INTO task_status_events (task_id, from_status, to_status, actor, reason, evidence, outcome, gate, created_at)
 			VALUES (?, '', ?, ?, ?, ?, ?, '', ?)
 		`, taskID, status, string(actor), reason, ev.marshal(), OutcomeApplied, *at)
 	} else {
-		_, err = db.Exec(`
+		_, err = x.Exec(`
 			INSERT INTO task_status_events (task_id, from_status, to_status, actor, reason, evidence, outcome, gate)
 			VALUES (?, '', ?, ?, ?, ?, ?, '')
 		`, taskID, status, string(actor), reason, ev.marshal(), OutcomeApplied)
 	}
 	if err != nil {
-		log.Printf("append genesis status event for task %d: %v", taskID, err)
+		return fmt.Errorf("append genesis status event for task %d: %w", taskID, err)
+	}
+	return nil
+}
+
+// appendGenesisEvent writes a genesis event outside any transaction. Used by
+// the backfill, where each task is independent and a failure is reported by the
+// caller rather than aborting the rest.
+func (db *DB) appendGenesisEvent(taskID int64, status string, actor Actor, reason string, at *time.Time) {
+	if err := genesisEventSQL(db, taskID, status, actor, reason, at); err != nil {
+		log.Printf("%v", err)
 	}
 }
 

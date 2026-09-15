@@ -785,3 +785,112 @@ func TestReleasingDependentsIsItselfLogged(t *testing.T) {
 		t.Fatalf("fold %q disagrees with the row %q after a cascade", got, reloaded.Status)
 	}
 }
+
+// TestCreateTaskAndGenesisShareOneTransaction: a task and its first status
+// event are written together or not at all.
+//
+// This was found by `ty debug status-consistency` on a real database, not by
+// reading the code: a task created while a screenshot run was hammering the
+// same SQLite file came out with a row and no events. The genesis insert was
+// best-effort — a log line and carry on — and SQLITE_BUSY was enough to lose
+// it. The damage is permanent, which is what makes it worth a transaction:
+// every later transition APPENDS, so nothing can ever supply a beginning that
+// was never written, and the task fails the consistency check forever.
+func TestCreateTaskAndGenesisShareOneTransaction(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Creating many tasks concurrently is the contention that produced the
+	// original loss. Every one of them must come out with a genesis event.
+	const writers = 8
+	const each = 6
+	errs := make(chan error, writers)
+	start := make(chan struct{})
+	for w := 0; w < writers; w++ {
+		go func(w int) {
+			<-start
+			for i := 0; i < each; i++ {
+				task := &Task{
+					Title:   fmt.Sprintf("Cache the product listing API responses (%d.%d)", w, i),
+					Status:  StatusBacklog,
+					Type:    TypeCode,
+					Project: "personal",
+				}
+				if err := database.CreateTask(task); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}(w)
+	}
+	close(start)
+	for w := 0; w < writers; w++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent CreateTask: %v", err)
+		}
+	}
+
+	mismatches, err := database.CheckStatusConsistency()
+	if err != nil {
+		t.Fatalf("CheckStatusConsistency: %v", err)
+	}
+	if len(mismatches) != 0 {
+		for _, m := range mismatches {
+			t.Errorf("%s", m)
+		}
+		t.Fatalf("%d task(s) came out of concurrent creation without a usable log", len(mismatches))
+	}
+
+	// And every task really has a genesis event, not merely a fold that happens
+	// to agree: a task with zero events folds to "", which only matches a row
+	// whose status is also "" — a shape the check would catch, but say so
+	// directly rather than relying on that.
+	tasks, err := database.ListTasks(ListTasksOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != writers*each {
+		t.Fatalf("created %d tasks, found %d", writers*each, len(tasks))
+	}
+	for _, task := range tasks {
+		events, err := database.GetStatusEvents(task.ID)
+		if err != nil {
+			t.Fatalf("GetStatusEvents(%d): %v", task.ID, err)
+		}
+		if len(events) == 0 {
+			t.Fatalf("task #%d has a row but no genesis event", task.ID)
+		}
+		if events[0].From != "" || events[0].To != task.Status {
+			t.Errorf("task #%d genesis is %q→%q, want ∅→%q", task.ID, events[0].From, events[0].To, task.Status)
+		}
+	}
+}
+
+// TestFailedGenesisRollsBackTheTask: if the genesis event cannot be written,
+// the task must not exist either. A row with no beginning is the state the
+// consistency check can never be talked out of.
+func TestFailedGenesisRollsBackTheTask(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Remove the log table out from under the insert. Nothing in production
+	// does this; it is the cheapest way to make the genesis write fail for
+	// real, rather than mocking it and proving nothing.
+	if _, err := database.Exec(`DROP TABLE task_status_events`); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+
+	task := &Task{Title: "Speed up product search on large catalogs", Status: StatusBacklog, Type: TypeCode, Project: "personal"}
+	if err := database.CreateTask(task); err == nil {
+		t.Fatal("CreateTask succeeded with no status log to write to")
+	}
+
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&n); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("the task row survived a failed genesis write: %d row(s) left behind", n)
+	}
+}
