@@ -53,6 +53,13 @@ const EFFORT_LEVELS = [NONE, "low", "medium", "high"];
 const AUTOMATIC_HOST = NONE;
 const LOCAL_HOST = "local";
 
+// What the Host trigger shows: the machine's name, never its capability list.
+function hostLabel(value: string, hosts: PlacementHost[]) {
+  if (value === AUTOMATIC_HOST) return "automatic";
+  if (value === LOCAL_HOST) return "this machine";
+  return hosts.find((h) => h.target === value)?.name ?? value;
+}
+
 export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const { projects, types, executors, tasks, permissionMode } = useAppState();
   const editing = form.kind === "edit" ? tasks.find((t) => t.id === form.taskId) : null;
@@ -360,11 +367,14 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
                 </Select>
               </div>
               {hosts.length > 0 && (
-                <div className="grid gap-1.5">
+                <div className="grid min-w-0 gap-1.5">
                   <Label>Host</Label>
                   <Select value={host} onValueChange={setHost}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
+                    <SelectTrigger className="w-full min-w-0">
+                      {/* Render the trigger text ourselves: a host's capability
+                          list belongs in the open list, not stretched across a
+                          column it does not fit in. */}
+                      <SelectValue>{hostLabel(host, hosts)}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value={AUTOMATIC_HOST}>automatic</SelectItem>
@@ -372,7 +382,9 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
                       {hosts.map((h) => (
                         <SelectItem key={h.target} value={h.target}>
                           {h.name}
-                          {h.detail ? ` — ${h.detail}` : ""}
+                          {h.detail ? (
+                            <span className="text-muted-foreground"> — {h.detail}</span>
+                          ) : null}
                         </SelectItem>
                       ))}
                     </SelectContent>
