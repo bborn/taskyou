@@ -365,15 +365,13 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 	t.ID = id
 
-	// A task created directly into 'processing' has, by construction, started —
-	// nothing else could have put it there. Keep started_at faithful to that, so
-	// the never-started completion gate (see status.go) reads a true record
-	// rather than refusing a task that genuinely ran.
-	if t.Status == StatusProcessing {
-		if _, err := db.Exec(`UPDATE tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL`, id); err != nil {
-			return fmt.Errorf("stamp started_at on task created as processing: %w", err)
-		}
-	}
+	// Note: a task created straight into 'processing' does NOT get a started_at.
+	// It is tempting — "what else could have put it there?" — but that is the
+	// inference this whole change exists to forbid. started_at means a run
+	// actually began, and only MarkTaskStarted (or the processing transition in
+	// status.go) may say so. The Claude hooks read started_at to decide whether
+	// a task is live enough to park; stamping it here would revive the zombie
+	// step the never-started gate was written to catch.
 
 	// Save the last used task type for this project
 	if t.Type != "" {
