@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { SendHorizonal } from "lucide-react";
 import { api } from "../api/client";
 import type { Task } from "../api/types";
@@ -24,6 +24,18 @@ export function ReplyComposer({ task }: { task: Task }) {
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const touch = useIsCoarsePointer();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Grow with the text, the way bb's editor does, instead of scrolling a fixed
+  // region — on a phone a scrolled box hides the start of what you just typed.
+  // Height is driven imperatively so the CSS floor (68px) and ceiling
+  // (50dvh - 3rem) still clamp it, with overflow taking over past the ceiling.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [message]);
 
   const live = task.status === "processing" || task.status === "blocked";
 
@@ -78,6 +90,7 @@ export function ReplyComposer({ task }: { task: Task }) {
         {/* bb's editor scroll region: pr-14 reserves the send button's column
             so long text never runs under it. */}
         <textarea
+          ref={inputRef}
           value={message}
           disabled={sending}
           placeholder="Reply to the agent…"
