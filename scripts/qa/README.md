@@ -366,3 +366,16 @@ with `--no-execute`; the local remote keeps that side effect inside the check.
 
 Rebuild the practice archive after editing `examples/storefront`:
 `python3 scripts/package-practice-project.py`.
+
+## Workspace panels
+
+```bash
+scripts/qa/ty-qa-workspace.sh
+TERM=xterm-256color TY_QA_WORKSPACE_SHOTS=1 scripts/qa/ty-qa-workspace.sh
+```
+
+Uses seeded tasks, a fake agent, and the real TUI. Opens the workspace with `w`,
+launches PR and Markdown tabs, checks duplicate opens, and verifies a shell job
+survives tab changes and closing the detail view. The optional VHS run records
+the actual tmux layout in `/tmp/ty-qa-workspace/shots/`. Publish those files with
+`ty-qa-publish.sh`. Use an explicit terminal type for the attached-client tests.

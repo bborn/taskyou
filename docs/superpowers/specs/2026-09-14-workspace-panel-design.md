@@ -1,6 +1,14 @@
 # Task workspace panel
 
-Status: proposal for discussion; no application changes implemented.
+Status: implemented first release; see `docs/workspace-panels.md` for shipped behavior.
+
+Implementation decisions: the GUI uses independent pane mirrors with task-owned
+terminal dimensions. The TUI keeps its existing agent viewer and opens a
+workspace beside it with `w`, restoring its native shell with `\\`. Tab
+metadata is shared through SQLite; clients poll for updates and keep focus
+local. Remote file previews use a bounded Python 3 protocol with symlinks
+rejected. The remaining browser/diff providers and external plugin loader are
+future additions. The original design below records the broader contract.
 
 ## Objective
 
