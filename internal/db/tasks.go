@@ -366,13 +366,21 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 	t.ID = id
 
-	// Note: a task created straight into 'processing' does NOT get a started_at.
-	// It is tempting — "what else could have put it there?" — but that is the
-	// inference this whole change exists to forbid. started_at means a run
-	// actually began, and only MarkTaskStarted (or the processing transition in
-	// status.go) may say so. The Claude hooks read started_at to decide whether
-	// a task is live enough to park; stamping it here would revive the zombie
-	// step the never-started gate was written to catch.
+	// A task created straight into 'processing' gets a started_at, and this is
+	// NOT the inference the never-started gate exists to forbid.
+	//
+	// The distinction is the one this whole change turns on. The zombie-step bug
+	// read started_at off an ABSENCE — no tmux window, so it must have finished.
+	// Here there is a positive recorded fact: the genesis event appended below
+	// says "→ processing", in the log, with an actor and a reason. started_at is
+	// a projection of that fact, exactly as tasks.status is a projection of the
+	// fold. A task whose log never reaches 'processing' still has a nil
+	// started_at, and the gate still refuses to complete it.
+	if t.Status == StatusProcessing {
+		if _, err := db.Exec(`UPDATE tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL`, id); err != nil {
+			return fmt.Errorf("stamp started_at on task created as processing: %w", err)
+		}
+	}
 
 	// Save the last used task type for this project
 	if t.Type != "" {
