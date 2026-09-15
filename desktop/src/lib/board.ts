@@ -31,11 +31,30 @@ function referenceTime(task: Task): number {
 export interface ParsedFilter {
   taskId?: number;
   project?: string;
+  status?: TaskStatus;
   text?: string;
 }
 
+/** `is:` accepts what you'd actually type, not just the internal status names —
+ * the board calls `blocked` "Needs you" and `processing` "Running". */
+const STATUS_ALIASES: Record<string, TaskStatus> = {
+  blocked: "blocked",
+  needs: "blocked",
+  "needs-you": "blocked",
+  waiting: "blocked",
+  running: "processing",
+  processing: "processing",
+  active: "processing",
+  backlog: "backlog",
+  queued: "backlog",
+  todo: "backlog",
+  done: "done",
+  finished: "done",
+};
+
 // Filter grammar (parity with the TUI): `#123` selects a task id,
-// `[project]` fuzzy-matches a project name, remaining text matches title/body.
+// `[project]` fuzzy-matches a project name, `is:running` scopes to a status,
+// and remaining text matches title/body.
 export function parseFilter(filter: string): ParsedFilter {
   const parsed: ParsedFilter = {};
   let rest = filter.trim();
@@ -44,6 +63,13 @@ export function parseFilter(filter: string): ParsedFilter {
   if (idMatch) {
     parsed.taskId = Number(idMatch[1]);
     rest = rest.replace(idMatch[0], "").trim();
+  }
+  const statusMatch = rest.match(/\bis:([a-z-]+)/i);
+  if (statusMatch) {
+    const resolved = STATUS_ALIASES[statusMatch[1].toLowerCase()];
+    if (resolved) parsed.status = resolved;
+    // Drop the token either way, so a typo doesn't leak into the text search.
+    rest = rest.replace(statusMatch[0], "").trim();
   }
   const projectMatch = rest.match(/\[([^\]]*)\]?/);
   if (projectMatch && projectMatch[1]) {
@@ -63,6 +89,12 @@ export function applyFilter(tasks: Task[], filter: string, projectNames: string[
   if (parsed.project) {
     const matching = new Set(projectNames.filter((p) => fuzzyMatches(parsed.project!, p)));
     result = result.filter((t) => matching.has(t.project));
+  }
+  if (parsed.status) {
+    // Queued folds into backlog everywhere else on the board; keep that here.
+    result = result.filter(
+      (t) => (t.status === "queued" ? "backlog" : t.status) === parsed.status,
+    );
   }
   if (parsed.text) {
     const text = parsed.text.toLowerCase();

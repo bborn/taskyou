@@ -494,7 +494,12 @@ export default function App() {
         data-tauri-drag-region
         className={`flex shrink-0 items-center gap-1.5 border-b bg-surface-1 pr-2 ${
           inTauri() ? "pl-20" : "pl-3"
-        } ${isMobile ? "h-12 pt-[env(safe-area-inset-top)]" : "h-11"}`}
+        } ${isMobile ? // The inset has to ADD to the header's height, not eat into it: `h-12` with
+        // `pt-[env(...)]` keeps the box at 48px and simply pushes its contents
+        // under the status bar, which is what put the logo level with the clock
+        // on a home-screen launch. Headless Chrome resolves the inset to 0, so
+        // this never showed up in testing.
+        "h-[calc(3rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]" : "h-11"}`}
       >
         {/* Everything the phone can't fit in the header lives behind this:
             Routines, Settings, search, theme and permission mode. */}
