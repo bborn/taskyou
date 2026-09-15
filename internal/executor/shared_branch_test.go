@@ -73,7 +73,7 @@ func holdBranch(t *testing.T, e *Executor, database *db.DB, repo, branch, status
 	if err := database.UpdateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(task.ID, status); err != nil {
+	if err := database.SetTaskStatus(task.ID, status, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 	return task

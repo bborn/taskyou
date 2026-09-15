@@ -190,11 +190,14 @@ func TestPlaceTaskIsANoOpOnTheSameHost(t *testing.T) {
 func TestPlaceTaskMovesARunningTask(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
-	task.Status = db.StatusProcessing
-
-	if err := database.UpdateTask(task); err != nil {
+	// Status is append-only, so a test that wants a running task has to make the
+	// same transition the daemon would rather than assigning the field.
+	if err := database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorDaemon,
+		"test fixture: the task is running", db.NoEvidence); err != nil {
 		t.Fatal(err)
 	}
+	task, _ = database.GetTask(task.ID)
+
 	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false); err != nil {
 		t.Fatalf("refused to move a running task: %v", err)
 	}

@@ -219,7 +219,7 @@ func TestRouteTask_EveryNonClaudeExecutorIsUntouched(t *testing.T) {
 func TestRouteTask_HoldKeepsTaskQueued(t *testing.T) {
 	e, database := newRoutingExecutor(t, "#!/bin/sh\necho HOLD=1\necho 'REASON=every profile above 90%'\n")
 	task := newRoutingTask(t, database, db.ExecutorClaude)
-	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusQueued, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 

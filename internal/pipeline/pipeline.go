@@ -446,14 +446,16 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		if rootNames[s.Name] {
 			continue
 		}
-		if err := database.UpdateTaskStatus(byName[s.Name].ID, db.StatusBlocked); err != nil {
+		if err := database.SetTaskStatus(byName[s.Name].ID, db.StatusBlocked, db.ActorPipeline,
+			"non-root workflow step: staged behind its dependencies", db.NoEvidence); err != nil {
 			return nil, fmt.Errorf("block %s step: %w", s.Name, err)
 		}
 		byName[s.Name].Status = db.StatusBlocked
 	}
 	if opts.Execute {
 		for _, r := range roots {
-			if err := database.UpdateTaskStatus(byName[r.Name].ID, db.StatusQueued); err != nil {
+			if err := database.SetTaskStatus(byName[r.Name].ID, db.StatusQueued, db.ActorPipeline,
+				"root workflow step: nothing blocks it, so the run starts here", db.NoEvidence); err != nil {
 				return nil, fmt.Errorf("queue %s step: %w", r.Name, err)
 			}
 			byName[r.Name].Status = db.StatusQueued
@@ -523,7 +525,8 @@ func createSingleTask(database *db.DB, def Definition, opts Options) (*Result, e
 		return nil, fmt.Errorf("create %s task: %w", def.Name, err)
 	}
 	if opts.Execute {
-		if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		if err := database.SetTaskStatus(task.ID, db.StatusQueued, db.ActorPipeline,
+			"single-step workflow launched with --execute", db.NoEvidence); err != nil {
 			return nil, fmt.Errorf("queue %s task: %w", def.Name, err)
 		}
 		task.Status = db.StatusQueued

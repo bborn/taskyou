@@ -1450,6 +1450,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadTasks())
 
 	case taskClosedMsg, taskArchivedMsg, taskUnarchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+		// A status gate can refuse the move (an open PR, work that never ran).
+		// Show the gate's own words: silently reloading the board looks like the
+		// keypress was lost, which is how people learned to hit close twice.
+		if err := statusActionError(msg); err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), refusalNotice(err))
+			m.notifyUntil = time.Now().Add(10 * time.Second)
+		}
 		cmds = append(cmds, m.loadTasks())
 
 	case aiCommandMsg:
@@ -4164,7 +4171,9 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 		if existing, _ := database.GetTask(id); existing != nil {
 			oldStatus = existing.Status
 		}
-		err := database.UpdateTaskStatus(id, status)
+		err := database.SetTaskStatus(id, status, db.ActorTUI,
+			"status changed from the board",
+			db.ByHuman("moved task #%d to %s in the TUI", id, status))
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
@@ -4177,6 +4186,35 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 
 type taskStatusChangedMsg struct {
 	err error
+}
+
+// statusActionError pulls the error out of the status-changing messages that
+// share one update case, so a refusal is not swallowed by the group.
+func statusActionError(msg tea.Msg) error {
+	switch m := msg.(type) {
+	case taskClosedMsg:
+		return m.err
+	case taskArchivedMsg:
+		return m.err
+	case taskUnarchivedMsg:
+		return m.err
+	case taskRetriedMsg:
+		return m.err
+	case taskStatusChangedMsg:
+		return m.err
+	}
+	return nil
+}
+
+// refusalNotice turns a gate refusal into the one line the board has room for.
+// A refusal is a decision the user needs to act on ("merge the PR"), so it
+// keeps the gate's explanation; anything else is a plain failure.
+func refusalNotice(err error) string {
+	if !db.IsRefused(err) {
+		return err.Error()
+	}
+	r := err.(*db.RefusedError)
+	return fmt.Sprintf("Refused: %s", r.Detail)
 }
 
 func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -4853,7 +4891,9 @@ func (m *AppModel) queueTask(id int64) tea.Cmd {
 	exec := m.executor
 	return func() tea.Msg {
 		defer m.reloadWrites.Add(-1)
-		err := database.UpdateTaskStatus(id, db.StatusQueued)
+		err := database.SetTaskStatus(id, db.StatusQueued, db.ActorTUI,
+			"queued for execution from the board",
+			db.ByHuman("pressed execute on task #%d", id))
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
@@ -4874,7 +4914,9 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
 			return taskQueuedMsg{err: err}
 		}
-		err := database.UpdateTaskStatus(id, db.StatusQueued)
+		err := database.SetTaskStatus(id, db.StatusQueued, db.ActorTUI,
+			"queued for execution from the board, in dangerous mode",
+			db.ByHuman("pressed execute-dangerous on task #%d", id))
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
@@ -4890,11 +4932,17 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 	exec := m.executor
 	return func() tea.Msg {
 		defer m.reloadWrites.Add(-1)
-		err := database.UpdateTaskStatus(id, db.StatusDone)
-		if err == nil {
-			if task, _ := database.GetTask(id); task != nil {
-				exec.NotifyTaskChange("status_changed", task)
-			}
+		err := database.SetTaskStatus(id, db.StatusDone, db.ActorTUI,
+			"closed from the board",
+			db.ByHuman("pressed close on task #%d", id))
+		if err != nil {
+			// A refused close (an open PR, work that never ran) must not fall
+			// through to killing the window and generating a summary as though
+			// the task had finished. Hand the gate's own words to the notice.
+			return taskClosedMsg{err: err}
+		}
+		if task, _ := database.GetTask(id); task != nil {
+			exec.NotifyTaskChange("status_changed", task)
 		}
 
 		go func(taskID int64) {
@@ -4942,7 +4990,9 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 		}
 
 		// Update status to archived immediately for instant UI feedback
-		err = database.UpdateTaskStatus(id, db.StatusArchived)
+		err = database.SetTaskStatus(id, db.StatusArchived, db.ActorTUI,
+			"archived from the board",
+			db.ByHuman("pressed archive on task #%d", id))
 		if err != nil {
 			return taskArchivedMsg{err: err}
 		}
@@ -4992,7 +5042,9 @@ func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
 		}
 
 		// Update status back to backlog (user can then queue it if they want)
-		err = database.UpdateTaskStatus(id, db.StatusBacklog)
+		err = database.SetTaskStatus(id, db.StatusBacklog, db.ActorTUI,
+			"unarchived from the board",
+			db.ByHuman("pressed unarchive on task #%d", id))
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
@@ -5445,7 +5497,9 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 				agentTmux(context.Background(), "send-keys", "-t", sessionName, feedbackToSend, "Enter").Run()
 			}
 			// Update status to processing
-			database.UpdateTaskStatus(id, db.StatusProcessing)
+			database.SetTaskStatus(id, db.StatusProcessing, db.ActorTUI,
+				"retried into a live session that is still running",
+				db.ByHuman("pressed retry on task #%d", id))
 			return taskRetriedMsg{err: nil}
 		}
 
@@ -5738,7 +5792,9 @@ func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
 		database := m.db
 		exec := m.executor
 		return func() tea.Msg {
-			err := database.UpdateTaskStatus(cmd.TaskID, cmd.Status)
+			err := database.SetTaskStatus(cmd.TaskID, cmd.Status, db.ActorTUI,
+				"status changed by a natural-language command in the TUI",
+				db.ByHuman("asked the command palette to move task #%d to %s", cmd.TaskID, cmd.Status))
 			if err == nil {
 				if task, _ := database.GetTask(cmd.TaskID); task != nil {
 					exec.NotifyTaskChange("status_changed", task)

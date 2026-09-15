@@ -1,0 +1,11 @@
+#!/bin/sh
+# Written by ty. Tells the machine that placed this task what happened to it.
+set -u
+kind=${1:-done}
+shift 2>/dev/null || true
+id=${WORKTREE_TASK_ID:-0}
+spool=$HOME/.ty-events
+mkdir -p "$spool" 2>/dev/null || exit 1
+tmp="$spool/.$id.$$.tmp"
+printf '%s %s\n' "$kind" "$(printf '%s' "$*" | base64 | tr -d '\n')" >"$tmp" || exit 1
+mv "$tmp" "$spool/$id.$(date +%s)-$$.evt" || exit 1

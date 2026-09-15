@@ -248,7 +248,9 @@ func (db *DB) ProcessCompletedBlocker(blockerID int64) ([]*Task, error) {
 				if info.autoQueue {
 					newStatus = StatusQueued
 				}
-				if err := db.UpdateTaskStatus(info.taskID, newStatus); err != nil {
+				if err := db.SetTaskStatus(info.taskID, newStatus, ActorSystem,
+					"every blocker finished, so this dependent is released",
+					Observedf("blocker task #%d reached a terminal state; 0 open blockers remain", blockerID)); err != nil {
 					// Best-effort: a lost write (e.g. SQLITE_BUSY) leaves the task
 					// blocked; RequeueReadyTasks sweeps it up later. Surface it.
 					return unblocked, fmt.Errorf("requeue unblocked task %d: %w", info.taskID, err)
@@ -305,7 +307,9 @@ func (db *DB) RequeueReadyTasks() ([]*Task, error) {
 		if autoQueue {
 			newStatus = StatusQueued
 		}
-		if err := db.UpdateTaskStatus(id, newStatus); err != nil {
+		if err := db.SetTaskStatus(id, newStatus, ActorSweep,
+			"safety net: this task's blockers are all finished but it was still held",
+			Observedf("0 open blockers remain for task #%d", id)); err != nil {
 			continue // try again on the next sweep
 		}
 		if task, err := db.GetTask(id); err == nil && task != nil {
