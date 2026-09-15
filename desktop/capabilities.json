@@ -87,9 +87,10 @@
     },
     "New": {
       "api": [
-        "POST /api/tasks"
+        "POST /api/tasks",
+        "GET /api/placement/hosts"
       ],
-      "note": "n, \u2318N, titlebar button"
+      "note": "n, \u2318N, titlebar button; the form's Host selector (shown when a placement plugin offers machines) posts the chosen host as placement"
     },
     "OpenBrowser": {
       "note": "b \u2014 opens task branch in browser"
@@ -121,6 +122,12 @@
         "GET /api/tasks"
       ],
       "note": "R; SSE keeps board live anyway"
+    },
+    "ResumeSession": {
+      "api": [
+        "POST /api/tasks/{id}/retry"
+      ],
+      "note": "Resume a suspended task through the Reply dialog with optional feedback. The GUI requeues the saved conversation; TUI Enter reopens its session directly."
     },
     "Retry": {
       "api": [

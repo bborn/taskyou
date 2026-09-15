@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/tmuxtest"
 )
@@ -368,5 +369,34 @@ func TestStaleViewersGoButUserPanesStay(t *testing.T) {
 	if !paneAlive(userPane) {
 		dumpTmux(t)
 		t.Error("the user's own pane was killed")
+	}
+}
+
+// Resizing the split writes the width to the task that was resized, not to the
+// shared default every other task reads.
+func TestSaveLayoutStoresTheWidthOnTheResizedTask(t *testing.T) {
+	f := newViewFixture(t)
+	m := f.m
+	m.claudePaneID, m.workdirPaneID = f.agent, f.shell
+	viewTmux(t, "resize-pane", "-t", f.shell, "-x", "140")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m.saveLayout(ctx, true)
+
+	saved, _ := m.database.GetSetting(config.ShellPaneWidthKey(m.task.ID))
+	if saved == "" {
+		dumpTmux(t)
+		t.Fatalf("task %d has no saved width", m.task.ID)
+	}
+	if got, _ := m.database.GetSetting(config.SettingShellPaneWidth); got != "" {
+		t.Errorf("global width = %q, want the resize kept off the shared default", got)
+	}
+	if got := m.getShellPaneWidth(); got != saved {
+		t.Errorf("reopened at %q, want the saved %q", got, saved)
+	}
+	// 140 of the window's 200 columns, minus the divider.
+	if saved != "70%" {
+		t.Errorf("saved width = %q, want 70%%", saved)
 	}
 }

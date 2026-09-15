@@ -16,9 +16,12 @@ type Config struct {
 
 // Setting keys
 const (
-	SettingProjectsDir           = "projects_dir"
-	SettingTheme                 = "theme"
-	SettingDetailPaneHeight      = "detail_pane_height"
+	SettingProjectsDir      = "projects_dir"
+	SettingTheme            = "theme"
+	SettingDetailPaneHeight = "detail_pane_height"
+	// SettingShellPaneWidth is the fallback shell pane width, used for tasks
+	// that have never been resized. A task's own width lives under
+	// ShellPaneWidthKey; see that function.
 	SettingShellPaneWidth        = "shell_pane_width"
 	SettingShellPaneHidden       = "shell_pane_hidden"
 	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
@@ -34,7 +37,33 @@ const (
 	// SettingHTTPAPIDisabled, when "true", stops the daemon from hosting the
 	// HTTP API (for headless/security-sensitive boxes). The API is on by default.
 	SettingHTTPAPIDisabled = "http_api_disabled"
+
+	// SettingReapBlockedIdle is how long a task must show NO activity before
+	// `ty sessions cleanup` will reap the side processes (dev servers, watchers)
+	// running out of its worktree. Deliberately much longer than the done-task
+	// grace: in ty, "blocked" usually means "waiting for a human to come look",
+	// not "dead". Go duration string; "0"/"disabled" never reaps on staleness.
+	// See reaper.DefaultBlockedIdle for the default and its rationale.
+	SettingReapBlockedIdle = "reap_blocked_idle"
+
+	// SettingReapOrphanMinAge is the minimum age for the no-worktree orphan
+	// heuristic (a known dev server reparented to init with no terminal, which
+	// nothing can tie back to a task). Go duration string.
+	SettingReapOrphanMinAge = "reap_orphan_min_age"
+
+	// SettingReapOrphanDevServers, when "false", disables that no-worktree
+	// heuristic entirely, leaving the sweep to only touch processes it can map
+	// to a task worktree. Enabled by default.
+	SettingReapOrphanDevServers = "reap_orphan_dev_servers"
 )
+
+// ShellPaneWidthKey is the settings key holding one task's shell pane width.
+// Widths are per task: dragging the agent/shell split in one task must not move
+// it in every other task. SettingShellPaneWidth remains the fallback for tasks
+// with no width of their own.
+func ShellPaneWidthKey(taskID int64) string {
+	return db.TaskSettingKey(SettingShellPaneWidth, taskID)
+}
 
 // DefaultHTTPAPIPort is the port the daemon-hosted HTTP API binds by default.
 // Matches the standalone `ty serve` default so existing clients (ty-web, the

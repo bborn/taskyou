@@ -109,6 +109,7 @@ type KeyMap struct {
 	OpenPR key.Binding
 	// Rebuild a task's missing worktree (detail view recovery)
 	RecreateWorktree key.Binding
+	ResumeSession    key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -291,6 +292,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("W"),
 			key.WithHelp("W", "recreate worktree"),
 		),
+		ResumeSession: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "resume session"),
+		),
 	}
 }
 
@@ -355,6 +360,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
+	km.ResumeSession = applyBinding(km.ResumeSession, cfg.ResumeSession)
 
 	return km
 }
@@ -447,9 +453,14 @@ type AppModel struct {
 	newTaskForm        *FormModel
 	pendingTask        *db.Task
 	pendingAttachments []string
-	pendingPipeline    string // non-empty when the pending submission is a pipeline definition
-	queueConfirm       *huh.Form
-	queueValue         string
+	// The host chosen in the form, if any: "" leaves placement to the resolver,
+	// "local" pins the task here, anything else is an SSH destination. Recorded
+	// on the task the moment it is created, before it can spawn.
+	pendingPlacement    string
+	pendingPlacementDir string
+	pendingPipeline     string // non-empty when the pending submission is a pipeline definition
+	queueConfirm        *huh.Form
+	queueValue          string
 
 	// Edit task form state
 	editTaskForm *FormModel
@@ -1865,51 +1876,77 @@ func (m *AppModel) viewNewTaskConfirm() string {
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, formView))
 }
 
+// Banner colours for the dashboard header. Every banner is the same shape — a
+// full-width bar with a coloured background — so only the palette differs.
+const (
+	bannerWarnBg    = "#FFCC00" // yellow: missing executor / notifications
+	bannerWarnFg    = "#000000"
+	bannerDangerBg  = "#E06C75" // red: global dangerous mode
+	bannerDangerFg  = "#FFFFFF"
+	bannerUpgradeBg = "#61AFEF" // blue: a newer release is available
+	bannerUpgradeFg = "#FFFFFF"
+
+	// bannerPadding is the horizontal padding inside a banner, per side.
+	bannerPadding = 2
+)
+
+// renderBanner renders one dashboard banner: a single full-width row of text on
+// a coloured background.
+//
+// Staying on one row matters. Banners sit above the kanban board, so text that
+// wraps steals rows from the board, and text wider than the terminal makes the
+// whole dashboard wider than the terminal — which the terminal then re-wraps,
+// scrambling every column of the board. Notification text is user data (task
+// titles, git and gh error output), so it is neither short nor reliably single
+// line: newlines are folded to spaces and the result is truncated to fit.
+func renderBanner(text string, bg, fg lipgloss.Color, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	text = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ", "\t", " ").Replace(text)
+
+	if inner := width - 2*bannerPadding; inner > 0 {
+		text = ansi.Truncate(text, inner, "…")
+	}
+
+	return lipgloss.NewStyle().
+		Background(bg).
+		Foreground(fg).
+		Bold(true).
+		Padding(0, bannerPadding).
+		Width(width).
+		MaxHeight(1).
+		Render(text)
+}
+
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
 	// Show warning banner if no executors are available
 	if len(m.availableExecutors) == 0 {
-		warnStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#FFCC00")). // Yellow background
-			Foreground(lipgloss.Color("#000000")).
-			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		headerParts = append(headerParts, warnStyle.Render(IconBlocked()+" No AI executor installed. See: https://code.claude.com/docs/en/overview"))
+		headerParts = append(headerParts, renderBanner(
+			IconBlocked()+" No AI executor installed. See: https://code.claude.com/docs/en/overview",
+			bannerWarnBg, bannerWarnFg, m.width))
 	}
 
 	// Show global dangerous mode banner if the entire system is in dangerous mode
 	if IsGlobalDangerousMode() {
-		dangerStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#E06C75")). // Red background
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		headerParts = append(headerParts, dangerStyle.Render(IconBlocked()+" DANGEROUS MODE ENABLED"))
+		headerParts = append(headerParts, renderBanner(
+			IconBlocked()+" DANGEROUS MODE ENABLED",
+			bannerDangerBg, bannerDangerFg, m.width))
 	}
 
 	// Show version upgrade notification
 	if m.latestRelease != nil {
-		upgradeStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#61AFEF")). // Blue background
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		headerParts = append(headerParts, upgradeStyle.Render(
-			fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", m.currentVersion, m.latestRelease.Version)))
+		headerParts = append(headerParts, renderBanner(
+			fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", m.currentVersion, m.latestRelease.Version),
+			bannerUpgradeBg, bannerUpgradeFg, m.width))
 	}
 
 	// Show notification banner if active
 	if m.notification != "" && time.Now().Before(m.notifyUntil) {
-		notifyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#FFCC00")).
-			Foreground(lipgloss.Color("#000000")).
-			Bold(true).
-			Padding(0, 2)
-		headerParts = append(headerParts, notifyStyle.Render(m.notification))
+		headerParts = append(headerParts, renderBanner(m.notification, bannerWarnBg, bannerWarnFg, m.width))
 	} else {
 		m.notification = "" // Clear expired notification
 		m.notifyTaskID = 0
@@ -2087,7 +2124,7 @@ func (m *AppModel) renderFilterBar() string {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
 			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
 			// so advertise the short alias (is:wf) rather than the full token.
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf)", navHelp)))
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf: workflows only)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
@@ -2095,15 +2132,12 @@ func (m *AppModel) renderFilterBar() string {
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 
-	// Wrap in a subtle box
+	// No background: each part's styling ends in an ANSI reset, so a bar
+	// background only survived in the trailing padding, as a gray stub after
+	// the hint. The bold primary "/" already marks the filter as active.
 	filterBarStyle := lipgloss.NewStyle().
 		Padding(0, 1).
 		Width(m.width)
-
-	if m.filterActive {
-		filterBarStyle = filterBarStyle.
-			Background(lipgloss.Color("#333333"))
-	}
 
 	filterBar := filterBarStyle.Render(filterContent)
 
@@ -2995,6 +3029,21 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.Workspace) && m.detailView != nil {
 		return m, m.detailView.OpenWorkspace()
 	}
+	// Resume a session that closed under the open view (usually the idle sweep)
+	// without leaving and re-entering the task. Offered only while it is closed.
+	if key.Matches(keyMsg, m.keys.ResumeSession) && m.selectedTask != nil &&
+		m.detailView != nil && m.detailView.SessionClosed() {
+		m.notification = fmt.Sprintf("%s Resuming #%d…", IconInProgress(), m.selectedTask.ID)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		database, id := m.db, m.selectedTask.ID
+		restartClock := func() tea.Msg {
+			if err := database.RestartIdleClock(id); err != nil {
+				GetLogger().Error("resume #%d: %v", id, err)
+			}
+			return nil
+		}
+		return m, tea.Batch(restartClock, m.detailView.ResumeSession())
+	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		return m, m.detailView.ToggleShellPane()
 	}
@@ -3069,6 +3118,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
+			m.pendingPlacement, m.pendingPlacementDir = form.PlacementChoice()
 			m.pendingPipeline = form.Pipeline()
 			// Default to last queue choice for this project. Permission mode now
 			// lives on the task form, so this is just execute-now vs backlog;
@@ -3147,6 +3197,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				execute := m.queueValue == "yes"
 				m.pendingTask = nil
 				m.pendingAttachments = nil
+				m.pendingPlacement, m.pendingPlacementDir = "", ""
 				m.pendingPipeline = ""
 				m.newTaskForm = nil
 				m.queueConfirm = nil
@@ -3164,13 +3215,15 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			task := m.pendingTask
 			attachments := m.pendingAttachments
+			target, dir := m.pendingPlacement, m.pendingPlacementDir
 			m.pendingTask = nil
 			m.pendingAttachments = nil
+			m.pendingPlacement, m.pendingPlacementDir = "", ""
 			m.pendingPipeline = ""
 			m.newTaskForm = nil
 			m.queueConfirm = nil
 			m.currentView = ViewDashboard
-			return m, m.createTaskWithAttachments(task, attachments)
+			return m, m.createTaskWithAttachments(task, attachments, target, dir)
 		}
 	}
 
@@ -4740,7 +4793,11 @@ func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.C
 	}
 }
 
-func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string) tea.Cmd {
+// createTaskWithAttachments creates a task, its attachments, and — when the form
+// offered a choice of machines and one was picked — its placement. placement is
+// "" for the automatic answer, which writes nothing and leaves the resolver to
+// be asked at spawn exactly as before.
+func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string, placement, placementDir string) tea.Cmd {
 	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
@@ -4775,6 +4832,13 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 		err := database.CreateTask(t)
 		if err != nil {
 			return taskCreatedMsg{task: t, err: err}
+		}
+
+		// A hand-picked host is recorded as the task's placement decision before it
+		// can spawn, so the resolver is never asked. The task is already created:
+		// a placement that cannot be recorded is said out loud, not rolled back.
+		if err := executor.ChoosePlacement(context.Background(), database, t, placement, placementDir); err != nil {
+			database.AppendTaskLog(t.ID, "error", "Could not set this task's host: "+err.Error())
 		}
 
 		// Mark onboarding as complete when first task is created
@@ -5702,7 +5766,7 @@ func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
 		}
 		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
 		m.notifyUntil = time.Now().Add(5 * time.Second)
-		return m.createTaskWithAttachments(newTask, nil)
+		return m.createTaskWithAttachments(newTask, nil, "", "")
 
 	case ai.CommandUpdateStatus:
 		if cmd.TaskID == 0 {

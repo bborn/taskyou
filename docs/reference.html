@@ -36,6 +36,29 @@
 <h3 id="new-task-form">New Task Form</h3>
 <p><a href="screenshots/new-task-form.png"><img src="screenshots/new-task-form.png" alt="New Task Form"></a>
 <em>Creating a new task with project selection, type, executor, effort, permissions, and attachments</em></p>
+<h3 id="show-the-focused-task-in-your-tab-title">Show the focused task in your tab title</h3>
+<p>The TUI publishes the task you are looking at (the open task in the detail view, otherwise the highlighted card) as iTerm2 user variables:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>user.taskyouTask</code></td>
+<td><code>#5202 Fix login</code></td>
+</tr>
+<tr>
+<td><code>user.taskyouTaskId</code></td>
+<td><code>5202</code></td>
+</tr>
+<tr>
+<td><code>user.taskyouTaskTitle</code></td>
+<td><code>Fix login</code></td>
+</tr>
+</tbody></table>
+<p>They are session variables. Badges and status bar components can use <code>\(user.taskyouTask)</code> directly. Tab titles are evaluated in tab scope, so reach the session through <code>currentSession</code>: to keep your own tab name and append the task, choose <strong>Edit Tab Title</strong> and enter <code>ty \(currentSession.user.taskyouTask)</code>. Other terminals ignore the variables, so nothing changes unless you reference them.</p>
 <h2 id="the-cli">The CLI</h2>
 <p>Everything the TUI can do, the CLI can do too — create, execute, retry, and inspect tasks, read executor output, even send keystrokes to a running executor. That makes TaskYou trivial to drive from scripts, cron jobs, and AI agents.</p>
 <p><a href="screenshots/cli-board.png"><img src="screenshots/cli-board.png" alt="CLI"></a>
@@ -271,6 +294,10 @@ TaskYou: &quot;Project context saved. Future tasks will use this.&quot;
 <p>You can also specify a custom install directory:</p>
 <pre><code class="language-bash">curl -fsSL https://taskyou.dev/install.sh | INSTALL_DIR=~/.local/bin bash
 </code></pre>
+<h3 id="upgrading">Upgrading</h3>
+<p><code>ty upgrade</code> runs the same install script. If a ty daemon is running, the script then runs <code>ty restart</code>. The daemon restarts and open TUIs reload the new binary in place, with agents left running. To install without restarting:</p>
+<pre><code class="language-bash">curl -fsSL https://taskyou.dev/install.sh | bash -s -- --no-restart
+</code></pre>
 <h3 id="build-from-source">Build from source</h3>
 <pre><code class="language-bash">git clone https://github.com/bborn/taskyou
 cd taskyou
@@ -279,7 +306,15 @@ make build
 <h2 id="usage">Usage</h2>
 <pre><code class="language-bash"># Launch the TUI (auto-starts background daemon)
 ./bin/ty
+
+# Launch straight into a task. An ID, #ID, task branch or GitHub PR URL opens
+# its detail view (esc goes back to the board); other text opens the board
+# with the go-to-task palette searching for it.
+./bin/ty open 123
+./bin/ty open https://github.com/org/repo/pull/456
+./bin/ty open draft offers
 </code></pre>
+<p>In zsh with <code>interactivecomments</code> set, quote a leading <code>#</code> (<code>ty open &#39;#123&#39;</code>), or the shell drops it as a comment.</p>
 <h3 id="daemon-management">Daemon management</h3>
 <pre><code class="language-bash">./bin/ty daemon         # Start daemon manually
 ./bin/ty daemon stop    # Stop the daemon
@@ -295,6 +330,8 @@ reopen those once with the updated build to enable future automatic reloads.
 <code>POST /api/tui/reload</code> requests the same cooperative TUI reload through the HTTP API.
 <code>ty daemon restart</code> only restarts the daemon. <code>ty restart --hard</code> remains an explicit
 destructive reset that kills TaskYou tmux sessions.</p>
+<p>Upgrading does this for you: when a ty daemon is running, <code>ty upgrade</code> (and the
+install script it runs) finishes with <code>ty restart</code>.</p>
 <h3 id="maintenance-commands">Maintenance commands</h3>
 <pre><code class="language-bash">./bin/ty purge-claude-config            # Remove stale ~/.claude.json entries
 ./bin/ty purge-claude-config --dry-run  # Preview what would be removed
@@ -464,6 +501,10 @@ destructive reset that kills TaskYou tmux sessions.</p>
 <td>Back to kanban</td>
 </tr>
 </tbody></table>
+<p>The agent/shell split is remembered per task: drag the divider in one task and
+only that task reopens at the new width. A task you have never resized opens at
+the even 50/50 split (or at the width you had set before widths became
+per-task).</p>
 <h3 id="task-form-autocomplete">Task Form (Autocomplete)</h3>
 <table>
 <thead>
@@ -620,6 +661,52 @@ openclaw onboard  # Run setup wizard
 <li>Spawns the configured executor (Claude or Codex) with environment variables and the task prompt</li>
 <li>Creates a shell pane for manual intervention</li>
 </ol>
+<p>Each pane is tagged with its task and role (<code>@ty_task</code>, and <code>@ty_role</code> set to <code>agent</code> or <code>shell</code>), so ty finds a task&#39;s panes by asking tmux instead of trusting a pane ID it stored earlier. Sessions nobody is looking at are sized 200×50, and <code>ty</code> sizes its own session to your terminal before attaching, so nothing reflows when you open it.</p>
+<p><strong>Opening a task never moves its panes.</strong> The detail view splits the TUI&#39;s own pane and runs a nested tmux client in it, attached to a throwaway session that is grouped with the daemon session and pointed at the task&#39;s window. The agent and shell stay in the daemon session the whole time. Quitting, reloading or crashing the TUI cannot take them with it, and several TUIs can show the same task at once. In the view:</p>
+<ul>
+<li><strong>Shift+↓ / Shift+→</strong> go to the next pane and <strong>Shift+↑ / Shift+←</strong> to the previous one, round task details → agent → shell → task details, the same cycle as before the view existed. Clicking works too.</li>
+<li>Every key goes to the agent or the shell: the view has no prefix key of its own. Scroll with the mouse wheel.</li>
+<li><code>\</code> hides the shell. A hidden shell keeps running in a <code>_hidden_shell_&lt;id&gt;</code> window in the daemon session.</li>
+<li>If the task&#39;s window closes (its agent was killed, it was suspended, or the tmux server went away), the view closes with it rather than show another task. What happens next depends on the task&#39;s status at that moment:<ul>
+<li>A queued or running task: ty waits up to a minute for the daemon&#39;s executor, then starts the agent itself and shows it again.</li>
+<li>A blocked task is not restarted. The idle sweep suspends parked tasks to free their memory, and restarting one would undo that. The view says the session closed; open the task again to resume it.</li>
+<li>A finished task is left alone.</li>
+</ul>
+</li>
+<li>If the TUI crashes or is killed, its view pane closes within a second. The agent keeps running.</li>
+</ul>
+<h4 id="which-tmux-server">Which tmux server</h4>
+<p>New installs run their agents on a private tmux server, <code>tmux -L taskyou</code>, so ty&#39;s sessions, options and key bindings never mix with your own tmux. An install whose agents were already on tmux&#39;s default server when it first ran this version keeps using the default server, so no running agent drops out of sight. The choice is recorded in <code>tmux-socket</code> next to the database (<code>~/.local/share/task/tmux-socket</code>). The desktop app reads the same file.</p>
+<table>
+<thead>
+<tr>
+<th>To</th>
+<th>Do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Attach to the agents by hand</td>
+<td><code>tmux -L taskyou attach -t task-daemon-&lt;id&gt;</code> (on the default server, plain <code>tmux attach</code>)</td>
+</tr>
+<tr>
+<td>Override the choice</td>
+<td>Set <code>TASKYOU_TMUX_SOCKET=taskyou</code> (or <code>default</code>) for every ty process</td>
+</tr>
+<tr>
+<td>Move an existing install to the private server</td>
+<td>See below</td>
+</tr>
+</tbody></table>
+<p>To move an existing install to the private server, first stop ty&#39;s agents on the default server; otherwise they keep running there, out of ty&#39;s sight. Then record the choice while nothing of ty&#39;s is running:</p>
+<ol>
+<li>Quit every open <code>ty</code>.</li>
+<li><code>ty daemon stop</code></li>
+<li><code>tmux ls -F &#39;#{session_name}&#39; | grep -E &#39;^task-(daemon|ui)-&#39; | xargs -n1 tmux kill-session -t</code>. This stops ty&#39;s sessions on the default server and leaves your own alone.</li>
+<li><code>echo taskyou &gt; ~/.local/share/task/tmux-socket</code></li>
+<li><code>ty</code></li>
+</ol>
+<p>Opening a task afterwards resumes its Claude session. <code>ty restart --hard</code> cannot stand in for steps 1–3: it relaunches <code>ty</code> at once, and that reads the old choice before step 4 can change it.</p>
+<p><code>ty</code> still works inside your own tmux: the TUI stays in your session, and the task view attaches across to the agent server.</p>
 <h4 id="session-tracking">Session Tracking</h4>
 <p>Each task tracks its executor state in the database:</p>
 <table>
@@ -640,6 +727,10 @@ openclaw onboard  # Run setup wizard
 <tr>
 <td><code>daemon_session</code></td>
 <td>Which <code>task-daemon-*</code> owns this task</td>
+</tr>
+<tr>
+<td><code>ClaudePaneID</code>, <code>ShellPaneID</code></td>
+<td>The task&#39;s pane IDs, kept as a cache; the pane tags win when they disagree</td>
 </tr>
 <tr>
 <td><code>Port</code></td>

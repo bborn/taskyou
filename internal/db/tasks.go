@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -717,6 +718,20 @@ func (db *DB) MarkTaskStarted(id int64) error {
 }
 
 // UpdateTaskStatus updates a task's status.
+// RestartIdleClock stamps a blocked task's completed_at with now. The idle
+// sweep measures a parked task's idle time from completed_at, so a session the
+// user resumes by hand, without typing into it, would otherwise be suspended
+// again on the sweep's next pass, a minute later. Only a task that actually ran
+// (completed_at already set) is touched; a staged pipeline step stays unstamped.
+func (db *DB) RestartIdleClock(id int64) error {
+	_, err := db.Exec(`UPDATE tasks SET completed_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ? AND completed_at IS NOT NULL`, id, StatusBlocked)
+	if err != nil {
+		return fmt.Errorf("restart idle clock: %w", err)
+	}
+	return nil
+}
+
 func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	// Get old task to track status change
 	oldTask, _ := db.GetTask(id)
@@ -1158,6 +1173,10 @@ func (db *DB) DeleteTask(id int64) error {
 	if err != nil {
 		return fmt.Errorf("delete task: %w", err)
 	}
+
+	// Per-task settings are keyed by task ID, so they would otherwise outlive the
+	// row and be inherited by whatever task reuses the ID.
+	db.DeleteTaskSettings(id)
 
 	// Emit delete event
 	db.emitTaskDeleted(id, title)
@@ -2096,6 +2115,27 @@ func (db *DB) SetProjectContext(projectName string, context string) error {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		return fmt.Errorf("project '%s' not found", projectName)
+	}
+	return nil
+}
+
+// TaskSettingKey namespaces a setting to a single task. Per-task preferences
+// live in the settings table under "<base>:<taskID>", beside the global default
+// stored under "<base>" alone.
+func TaskSettingKey(base string, taskID int64) string {
+	return base + ":" + strconv.FormatInt(taskID, 10)
+}
+
+// perTaskSettingBases lists the settings that have per-task values, so deleting
+// a task can clear them. Keep in sync with internal/config.
+var perTaskSettingBases = []string{"shell_pane_width"}
+
+// DeleteTaskSettings removes every per-task setting belonging to a task.
+func (db *DB) DeleteTaskSettings(taskID int64) error {
+	for _, base := range perTaskSettingBases {
+		if _, err := db.Exec("DELETE FROM settings WHERE key = ?", TaskSettingKey(base, taskID)); err != nil {
+			return fmt.Errorf("delete task settings: %w", err)
+		}
 	}
 	return nil
 }

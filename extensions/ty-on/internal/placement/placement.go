@@ -102,21 +102,7 @@ func (r Resolver) Resolve(ctx context.Context, req Request) (answer Response) {
 		return Local("%s", err)
 	}
 
-	var candidates []Candidate
-	for _, c := range inv.Serving(project) {
-		// Explicit executor capabilities restrict eligibility; legacy generic agent
-		// hosts retain their existing behavior and are checked before launch.
-		explicit, matches := false, false
-		for _, capability := range c.Host.Capabilities {
-			if strings.HasPrefix(capability, "executor:") {
-				explicit = true
-				matches = matches || capability == "executor:"+executor
-			}
-		}
-		if !explicit || matches {
-			candidates = append(candidates, c)
-		}
-	}
+	candidates := eligible(inv, project, executor)
 	switch len(candidates) {
 	case 0:
 		return Local("no host in %s serves %s (%s)", path, project, hostSummary(inv))
@@ -207,6 +193,29 @@ func (r Resolver) rank(ctx context.Context, project, path string, candidates []C
 
 	best := reachable[0]
 	return Response{Target: best.Destination(), Workdir: best.Checkout, Reason: reason}
+}
+
+// eligible returns the hosts that may run this task: they have a checkout of
+// the project, and their executor capabilities allow this executor. It is the
+// first rule of Resolve, shared with Hosts so the choices ty offers a user and
+// the choice it makes for them cannot drift apart.
+func eligible(inv *Inventory, project, executor string) []Candidate {
+	var candidates []Candidate
+	for _, c := range inv.Serving(project) {
+		// Explicit executor capabilities restrict eligibility; legacy generic agent
+		// hosts retain their existing behavior and are checked before launch.
+		explicit, matches := false, false
+		for _, capability := range c.Host.Capabilities {
+			if strings.HasPrefix(capability, "executor:") {
+				explicit = true
+				matches = matches || capability == "executor:"+executor
+			}
+		}
+		if !explicit || matches {
+			candidates = append(candidates, c)
+		}
+	}
+	return candidates
 }
 
 func names(candidates []Candidate) string {

@@ -9,6 +9,7 @@ import (
 	"github.com/bborn/workflow/internal/textutil"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
@@ -129,6 +130,12 @@ type createTaskRequest struct {
 	Tags           string `json:"tags"`
 	Pinned         bool   `json:"pinned"`
 	PermissionMode string `json:"permission_mode"`
+	// Placement is a host chosen by hand instead of by the resolver: "" or
+	// "auto" leaves the choice to it, "local" pins the task here, anything else
+	// is an SSH destination from GET /api/placement/hosts. PlacementWorkDir is
+	// that project's directory on that host; it is looked up when omitted.
+	Placement        string `json:"placement"`
+	PlacementWorkDir string `json:"placement_workdir"`
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +186,15 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.db.CreateTask(task); err != nil {
 		jsonErr(w, "failed to create task: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// A hand-picked host is recorded as the task's placement decision, which the
+	// executor prefers over asking the resolver. The task exists either way: a
+	// placement that cannot be recorded is reported, not a reason to lose what
+	// the user just wrote.
+	if err := executor.ChoosePlacement(r.Context(), s.db, task, req.Placement, req.PlacementWorkDir); err != nil {
+		jsonErr(w, "task created, but its host could not be set: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 

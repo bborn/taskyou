@@ -2,6 +2,7 @@ import type {
   PanelInstance, PanelProvider, PanelContent,
   Attachment,
   Placement,
+  PlacementHost,
   Routine,
   RoutineRun,
   Dependencies,
@@ -68,6 +69,14 @@ export const api = {
   panelContent: (id: number, panelId: string) => request<PanelContent>("GET", `/api/tasks/${id}/panels/${panelId}/content`),
  placement: (id: number) => request<Placement>("GET", `/api/tasks/${id}/placement`),
  placeTask: (id: number, target: string, workdir: string) => request<{messages: string[]}>("POST", `/api/tasks/${id}/placement`, {target, workdir}),
+  // The machines a new task in this project could be placed on. An empty list
+  // means nothing is offering a choice, and the form falls back to automatic
+  // placement without showing a picker.
+  placementHosts: (project: string, executor?: string) => {
+    const params = new URLSearchParams({ project });
+    if (executor) params.set("executor", executor);
+    return request<{ hosts: PlacementHost[] }>("GET", `/api/placement/hosts?${params}`);
+  },
   // Tasks
   listTasks: (opts?: { all?: boolean; project?: string; limit?: number }) => {
     const params = new URLSearchParams();
@@ -89,6 +98,11 @@ export const api = {
     pinned?: boolean;
     permission_mode?: string;
     tags?: string;
+    // A host chosen by hand instead of by the resolver: "" leaves the choice to
+    // it, "local" pins the task to this machine, anything else is a destination
+    // from placementHosts().
+    placement?: string;
+    placement_workdir?: string;
   }) => request<Task>("POST", "/api/tasks", task),
   updateTask: (
     id: number,

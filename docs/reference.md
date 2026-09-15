@@ -461,6 +461,11 @@ The skill works with Claude Code, Codex, Gemini, or any agent that can execute s
 | `d` | Delete task |
 | `Esc` | Back to kanban |
 
+The agent/shell split is remembered per task: drag the divider in one task and
+only that task reopens at the new width. A task you have never resized opens at
+the even 50/50 split (or at the width you had set before widths became
+per-task).
+
 ### Task Form (Autocomplete)
 
 | Key | Action |
@@ -617,9 +622,37 @@ Each task tracks its executor state in the database:
 # List all running executor processes
 ./bin/ty sessions list
 
-# Kill orphaned executor processes
+# Kill orphaned executor processes (and the side processes that outlived them)
 ./bin/ty sessions cleanup
+
+# See exactly what would be killed, and why, without killing anything
+./bin/ty sessions cleanup --dry-run
 ```
+
+**Orphaned side processes.** Killing a task's tmux window only SIGHUPs the pane's
+foreground process group. A dev server that was backgrounded, disowned, or
+`setsid`'d has left that group, so once its parent shell dies it is reparented to
+`launchd`/`init` and survives every teardown, leaking gigabytes of swap over
+days. `ty sessions cleanup` therefore runs a second pass that finds those by the
+task worktree path on their command line and SIGTERMs (then SIGKILLs) them.
+`ty sessions suspend` does the same for the tasks it suspends.
+
+The sweep is deliberately conservative:
+
+- **Blocked tasks are live work.** In ty, `blocked` usually means "waiting for a
+  human". Their side processes are only reaped after a long stretch of *no
+  activity at all*, measured from the last status change, log line, or UI visit.
+  Their agent process is never reaped on staleness.
+- **Absent is not deleted.** A task that is not in this machine's database may
+  have been placed here from another machine, so its processes are left alone.
+- **Processing and queued tasks are never touched**, nor is anything still
+  running inside a live tmux pane.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `reap_blocked_idle` | `24h` | Idle time before a blocked or backlog task's side processes are reaped. `0`/`disabled` turns staleness reaping off. |
+| `reap_orphan_min_age` | `24h` | Minimum age for the no-worktree heuristic: a known JS dev server reparented to init with no terminal. |
+| `reap_orphan_dev_servers` | `true` | Set to `false` to disable that heuristic entirely. |
 
 **Direct executor interaction:**
 
@@ -809,7 +842,12 @@ ty plugins list
 Queue tasks as usual. ty-on selects a host configured for the task's project and
 executor. With one eligible host, it selects that host directly. With several,
 it uses `on ls` to pick the reachable host with the most free memory. Task detail
-shows the selected host and the reason. You can also choose a host yourself with
+shows the selected host and the reason.
+
+To choose the machine yourself, pick one in the **Host** selector the new-task
+form shows once hosts are configured (TUI advanced fields, GUI **Advanced**, or
+`ty create --host <destination|local>`); that overrides the automatic placement
+for that task. To move a task that already exists — which carries its work — use
 **Change host** in the desktop/browser, `@` in the TUI, or `ty place` in the CLI.
 
 Tasks fall back to local execution when no remote placement is available. To
