@@ -89,6 +89,7 @@ type KeyMap struct {
 	Filter             key.Binding
 	OpenWorktree       key.Binding
 	ToggleShellPane    key.Binding
+	Workspace          key.Binding
 	JumpToNotification key.Binding
 	Actions            key.Binding
 	// Column focus shortcuts
@@ -234,6 +235,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in editor"),
 		),
+		Workspace: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "workspace")),
 		ToggleShellPane: key.NewBinding(
 			key.WithKeys("\\"),
 			key.WithHelp("\\", "toggle shell"),
@@ -3023,6 +3025,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notification = fmt.Sprintf("%s Recreating worktree for #%d…", IconInProgress(), m.selectedTask.ID)
 		m.notifyUntil = time.Now().Add(5 * time.Second)
 		return m, m.recreateWorktree(m.selectedTask.ID)
+	}
+	if key.Matches(keyMsg, m.keys.Workspace) && m.detailView != nil {
+		return m, m.detailView.OpenWorkspace()
 	}
 	// Resume a session that closed under the open view (usually the idle sweep)
 	// without leaving and re-entering the task. Offered only while it is closed.

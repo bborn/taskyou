@@ -10,7 +10,8 @@ import { AttachmentsPanel } from "./AttachmentsPanel";
 import { LogList } from "./LogList";
 import { mergeRecentLogs } from "../lib/logs";
 import { Markdown } from "./Markdown";
-import { TerminalPane } from "./TerminalPane";
+import { PaneMirror } from "./PaneMirror";
+import { WorkspacePanel } from "./WorkspacePanel";
 import { ReplyComposer } from "./ReplyComposer";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Badge } from "@/components/ui/badge";
@@ -94,6 +95,16 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [deps, setDeps] = useState<Dependencies | null>(null);
   const isMobile = useIsMobile();
+  const [workspaceVisible, setWorkspaceVisible] = useState(true);
+  const [mobileWorkspace, setMobileWorkspace] = useState(false);
+  const [workspacePercent, setWorkspacePercent] = useState(() => {
+    const saved = Number(localStorage.getItem("ty-workspace-width"));
+    return saved >= 25 && saved <= 65 ? saved : 45;
+  });
+  const saveWorkspaceWidth = (value: number) => {
+    const width = Math.max(25, Math.min(65, value));
+    setWorkspacePercent(width); localStorage.setItem("ty-workspace-width", String(width));
+  };
   // A phone has no terminal, so the execution log is how you see what the
   // agent is doing: start it open there.
   const [showLogs, setShowLogs] = useState(isMobile);
@@ -307,7 +318,14 @@ export function DetailView({ taskId }: { taskId: number }) {
         </div>
       )}
 
-      <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between border-b px-4 py-1.5 text-xs text-muted-foreground">
+        <span>Conversation</span>
+        <Button variant="ghost" size="sm" aria-expanded={isMobile ? mobileWorkspace : workspaceVisible} onClick={() => isMobile ? setMobileWorkspace(!mobileWorkspace) : setWorkspaceVisible(!workspaceVisible)}>
+          {isMobile ? (mobileWorkspace ? "Show conversation" : "Show workspace") : (workspaceVisible ? "Hide workspace" : "Show workspace")}
+        </Button>
+      </div>
+      <div className="flex min-h-0 flex-1">
+      <div ref={splitRef} className={`min-h-0 min-w-0 flex-1 flex-col ${isMobile && mobileWorkspace ? "hidden" : "flex"}`}>
         <div className="min-h-[140px] min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-3.5 break-words select-text md:px-5">
           {task.body ? (
             <Markdown source={task.body} />
@@ -410,10 +428,21 @@ export function DetailView({ taskId }: { taskId: number }) {
               className="flex min-h-[140px] flex-col"
               style={{ height: terminalHeight, maxHeight: "calc(100% - 140px)" }}
             >
-              <TerminalPane task={task} />
+              <PaneMirror task={task} pane="agent" />
             </div>
           </>
         )}
+      </div>
+      {!isMobile && workspaceVisible && <div role="separator" tabIndex={0} aria-label="Resize workspace" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={65} aria-valuenow={Math.round(workspacePercent)}
+        className="w-1 shrink-0 cursor-col-resize touch-none bg-border hover:bg-status-backlog focus:bg-status-backlog"
+        onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)}
+        onPointerMove={(e) => { if (!e.currentTarget.hasPointerCapture(e.pointerId)) return; const rect = e.currentTarget.parentElement!.getBoundingClientRect(); saveWorkspaceWidth((rect.right - e.clientX) / rect.width * 100); }}
+        onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)}
+        onDoubleClick={() => saveWorkspaceWidth(45)}
+        onKeyDown={(e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); saveWorkspaceWidth(workspacePercent + (e.key === "ArrowLeft" ? 2 : -2)); } }} />}
+      {(isMobile ? mobileWorkspace : workspaceVisible) && <div className={isMobile ? "min-w-0 flex-1" : "min-w-[280px]"} style={isMobile ? undefined : { width: `${workspacePercent}%` }}>
+        <WorkspacePanel key={task.id} task={task} />
+      </div>}
       </div>
     </div>
   );

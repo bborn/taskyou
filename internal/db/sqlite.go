@@ -161,6 +161,18 @@ func (db *DB) migrate() error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 
+		`CREATE TABLE IF NOT EXISTS task_workspaces (
+            task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE
+        )`,
+		`CREATE TABLE IF NOT EXISTS task_panels (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            provider_id TEXT NOT NULL,
+            resource TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            UNIQUE(task_id, id)
+        )`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL

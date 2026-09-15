@@ -17,6 +17,7 @@ import (
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // SessionManager is the subset of executor functionality the API needs to
@@ -533,6 +534,16 @@ func (s *Server) handleEnsureShellPane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A TUI workspace parks the shell in a separate daemon window. Reuse
+	// that durable pane without moving it or replacing its running jobs.
+	if task.ShellPaneID != "" {
+		out, err := s.runner.Output("tmux", "display-message", "-t", task.ShellPaneID, "-p", "#{pane_id}\t#{"+tmuxctl.PaneTaskOption+"}\t#{"+tmuxctl.PaneRoleOption+"}")
+		if err == nil && strings.TrimSpace(string(out)) == task.ShellPaneID+"\t"+strconv.FormatInt(task.ID, 10)+"\t"+tmuxctl.RoleShell {
+			jsonOK(w, s.terminalInfo(task))
+			return
+		}
+	}
+
 	// Live panes in the task window, in order.
 	out, err := s.runner.Output("tmux", "list-panes", "-t", target, "-F", "#{pane_id}")
 	if err != nil {
@@ -587,6 +598,8 @@ func (s *Server) handleEnsureShellPane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.runner.Run("tmux", "select-pane", "-t", shellPaneID, "-T", "Shell")
+	_ = s.runner.Run("tmux", "set-option", "-p", "-t", shellPaneID, tmuxctl.PaneTaskOption, strconv.FormatInt(task.ID, 10))
+	_ = s.runner.Run("tmux", "set-option", "-p", "-t", shellPaneID, tmuxctl.PaneRoleOption, tmuxctl.RoleShell)
 
 	// Task context env vars, matching what the TUI exports in its shell pane.
 	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", task.ID, task.Port, task.WorktreePath)

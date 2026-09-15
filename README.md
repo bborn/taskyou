@@ -81,7 +81,7 @@ Queue it with `ty execute 123`, then open `ty` to watch it. The TUI starts the b
 | Desktop | [Download macOS or Linux bundles](https://github.com/bborn/taskyou/releases/latest). |
 | Browser | Run `ty serve` with a build containing the web UI; open `http://localhost:8080`. |
 
-[Desktop installation details](docs/reference.md#the-gui) · [SSH access](docs/reference.md#ssh-access--deployment) · [Agent orchestration](docs/orchestrator.md) · [Plugins](docs/plugins.md)
+[Desktop installation details](docs/reference.md#the-gui) · [SSH access](docs/reference.md#ssh-access--deployment) · [Agent orchestration](docs/orchestrator.md) · [Plugins](docs/plugins.md) · [Workspace panels](docs/workspace-panels.md)
 
 ## Development
 
