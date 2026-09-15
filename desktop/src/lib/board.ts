@@ -14,7 +14,10 @@ export const COLUMN_DEFS: { status: TaskStatus; label: string }[] = [
   { status: "done", label: "Done" },
 ];
 
-function referenceTime(task: Task): number {
+/** When this task last mattered: start time while running, completion once
+ * done, creation in the backlog. Exported so an unfiltered, mixed-status list
+ * can order itself the same way the columns do. */
+export function referenceTime(task: Task): number {
   const t = (s?: string) => (s ? Date.parse(s) : 0);
   switch (task.status) {
     case "processing":

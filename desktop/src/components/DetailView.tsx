@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
+import { ChevronDown, ChevronRight, GitPullRequest, MoreVertical, Pin, Code2 } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
 import type { ChatMessage, Dependencies, LogLine, Task } from "../api/types";
@@ -59,6 +66,17 @@ function SectionTitle({ children, onClick }: { children: React.ReactNode; onClic
   );
 }
 
+function ActionRow({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="-mx-1 flex h-11 items-center rounded-lg px-3 text-left text-[15px] text-foreground active:bg-surface-2"
+    >
+      {label}
+    </button>
+  );
+}
+
 function AddBlockerInput({ taskId, onAdded }: { taskId: number; onAdded: () => void }) {
   const [value, setValue] = useState("");
 
@@ -100,6 +118,7 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [showLogs, setShowLogs] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [showChat, setShowChat] = useState(true);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -248,6 +267,38 @@ export function DetailView({ taskId }: { taskId: number }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* Phone: one line. The old header stacked four rows — title, then
+          status/id/pin/mode/executor, then Edit/PR/Status, then the stand line
+          — and cost 230px of an 844px screen (27%) before a word of the
+          conversation. Everything moves behind the ⋮ sheet. */}
+      {isMobile ? (
+        <div className="flex shrink-0 items-center gap-2 border-b bg-surface-1 px-3 py-2">
+          <span
+            className={cn(
+              "size-2 shrink-0 rounded-full",
+              task.status === "blocked"
+                ? "bg-status-blocked"
+                : task.status === "processing"
+                  ? "bg-status-processing"
+                  : task.status === "backlog" || task.status === "queued"
+                    ? "bg-status-backlog"
+                    : "bg-muted-foreground",
+            )}
+            title={task.status}
+          />
+          <span className="min-w-0 flex-1 truncate text-[15px] font-semibold" title={task.title}>
+            {task.title}
+          </span>
+          {task.pinned && <Pin className="size-3.5 shrink-0 text-amber-300" />}
+          <button
+            onClick={() => setActionsOpen(true)}
+            aria-label="Task actions"
+            className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground active:bg-surface-2"
+          >
+            <MoreVertical className="size-5" />
+          </button>
+        </div>
+      ) : (
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-3 py-2.5 md:px-4">
         <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
           {task.status}
@@ -348,6 +399,79 @@ export function DetailView({ taskId }: { taskId: number }) {
           Status
         </Button>
       </div>
+      )}
+
+      {/* The ⋮ sheet. Built on Dialog, which already renders as a bottom sheet
+          on a phone, rather than adding a second overlay idiom for one menu. */}
+      <Dialog open={actionsOpen} onOpenChange={setActionsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="truncate">{task.title}</DialogTitle>
+          </DialogHeader>
+
+          <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-muted-foreground">
+            <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
+              {task.status}
+            </Badge>
+            <span className="font-mono text-[11px]">#{task.id}</span>
+            {task.permission_mode && task.permission_mode !== "default" && (
+              <Badge variant={task.permission_mode === "dangerous" ? "destructive" : "outline"}>
+                {task.permission_mode}
+              </Badge>
+            )}
+          </div>
+
+          <ActionRow
+            label="Change status"
+            onClick={() => {
+              setActionsOpen(false);
+              store.setDialog({ kind: "status", taskId: task.id });
+            }}
+          />
+          <ActionRow
+            label="Edit task"
+            onClick={() => {
+              setActionsOpen(false);
+              store.setForm({ kind: "edit", taskId: task.id });
+            }}
+          />
+          {task.pr_url && (
+            <ActionRow
+              label={task.pr_number ? `Open PR #${task.pr_number}` : "Open PR"}
+              onClick={() => {
+                setActionsOpen(false);
+                void openExternal(task.pr_url);
+              }}
+            />
+          )}
+
+          <div className="mt-1 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
+            Executor
+          </div>
+          <Select
+            value={task.executor || "claude"}
+            onValueChange={async (v) => {
+              await api.updateTask(task.id, { executor: v }).catch(() => {});
+              void store.refreshTasks();
+            }}
+          >
+            <SelectTrigger className="h-11 w-full" title="Executor">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+                (ex) => (
+                  <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                    {ex.name}
+                    {ex.available ? "" : " (not installed)"}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+        </DialogContent>
+      </Dialog>
+
       {task.stand && (
         <div
           className={`shrink-0 truncate border-b bg-surface-1 px-4 py-1.5 text-[12.5px] ${

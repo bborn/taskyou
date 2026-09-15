@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check, ListFilter, X } from "lucide-react";
 import type { Column } from "../lib/board";
-import { parseFilter } from "../lib/board";
+import { parseFilter, referenceTime } from "../lib/board";
 import { store, useAppSelector } from "../store";
 import { CardSlot } from "./Board";
 import { cn } from "@/lib/utils";
@@ -14,8 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-/** "Needs you" comes first: the point of the phone is unblocking work you
- * can't see, not browsing the backlog. */
 const FILTERS = [
   { key: "blocked", label: "Needs you", token: "blocked" },
   { key: "processing", label: "Running", token: "running" },
@@ -24,10 +22,6 @@ const FILTERS = [
 ] as const;
 
 type FilterKey = (typeof FILTERS)[number]["key"];
-
-/** With no `is:` token the board opens on what is waiting on you, rather than
- * mixing several hundred finished tasks into the list. */
-const DEFAULT_STATUS: FilterKey = "blocked";
 
 const ACCENT: Record<FilterKey, string> = {
   blocked: "text-status-blocked",
@@ -68,6 +62,9 @@ function textOf(filter: string): string {
  * every arrangement sliced a chip. They are all the same filter string
  * underneath (`is:running [offerlab] text`), so they are now one field that
  * opens a sheet.
+ *
+ * No filter means no filter: with no `is:` token the list is every task,
+ * newest first, not a status picked on your behalf.
  */
 export function MobileBoard({ columns }: { columns: Column[] }) {
   const projects = useAppSelector((s) => s.projects);
@@ -78,30 +75,44 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
   const [showAll, setShowAll] = useState(false);
 
   const parsed = parseFilter(filter);
-  const active: FilterKey = (parsed.status as FilterKey) ?? DEFAULT_STATUS;
+  const activeStatus: FilterKey | null = (parsed.status as FilterKey | undefined) ?? null;
   const activeProject = parsed.project ?? null;
   const searchText = textOf(filter);
 
-  const columnTasks = columns.find((c) => c.status === active)?.tasks ?? [];
-  const visible = showAll ? columnTasks : columnTasks.slice(0, RENDER_CAP);
+  // Unfiltered: every column flattened and ordered by the same rule the columns
+  // use internally, so a mixed list still reads newest-first with pins on top.
+  const listTasks = useMemo(() => {
+    if (activeStatus) return columns.find((c) => c.status === activeStatus)?.tasks ?? [];
+    return columns
+      .flatMap((c) => c.tasks)
+      .sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return referenceTime(b) - referenceTime(a);
+      });
+  }, [columns, activeStatus]);
 
-  // Counts ignore the dimension they describe: status counts are computed
-  // across every status, project counts within the chosen one. Reading either
-  // off `columns` would report 0 for whatever is currently filtered out.
-  const { statusCounts, projectChips } = useMemo(() => {
+  const visible = showAll ? listTasks : listTasks.slice(0, RENDER_CAP);
+
+  // Counts ignore the dimension they describe: status counts span every status,
+  // project counts sit within the chosen one (or all of them when none is set).
+  const { statusCounts, projectChips, grandTotal } = useMemo(() => {
     const text = searchText.toLowerCase();
     const matchesText = (t: (typeof tasks)[number]) =>
       !text || t.title.toLowerCase().includes(text) || t.body.toLowerCase().includes(text);
 
     const byStatus = new Map<string, number>();
     const byProject = new Map<string, number>();
+    let total = 0;
     for (const t of tasks) {
       if (t.status === "archived" || !matchesText(t)) continue;
       const status = t.status === "queued" ? "backlog" : t.status;
       if (!activeProject || t.project === activeProject) {
         byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+        total++;
       }
-      if (status === active) byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
+      if (!activeStatus || status === activeStatus) {
+        byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
+      }
     }
 
     const chips = projects
@@ -109,19 +120,18 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
       .filter((c) => c.count > 0 || c.project.name === activeProject)
       .sort((a, b) => b.count - a.count || a.project.name.localeCompare(b.project.name));
 
-    return { statusCounts: byStatus, projectChips: chips };
-  }, [tasks, projects, active, activeProject, searchText]);
+    return { statusCounts: byStatus, projectChips: chips, grandTotal: total };
+  }, [tasks, projects, activeStatus, activeProject, searchText]);
 
-  // "All projects" sits above rows counted WITHIN the chosen status, so it has
-  // to be that status's total. Summing statusCounts instead totalled every
-  // status and showed 964 above children adding up to 97.
-  const totalForStatus = statusCounts.get(active) ?? 0;
+  // "All projects" sits above rows counted within the chosen status, so it has
+  // to be that status's total — or everything when no status is chosen.
+  const totalForProjects = activeStatus ? (statusCounts.get(activeStatus) ?? 0) : grandTotal;
 
   // Picking a status or a project is a decision; close the sheet so you land
   // back on the list. Typing is not, so the text field leaves it open.
-  function setStatus(key: FilterKey) {
-    const token = FILTERS.find((f) => f.key === key)!.token;
-    store.setFilter(withToken(filter, STATUS_TOKEN, `is:${token}`));
+  function setStatus(key: FilterKey | null) {
+    const token = key ? `is:${FILTERS.find((f) => f.key === key)!.token}` : null;
+    store.setFilter(withToken(filter, STATUS_TOKEN, token));
     setShowAll(false);
     setSheetOpen(false);
   }
@@ -131,9 +141,9 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
     setSheetOpen(false);
   }
   function setText(next: string) {
-    const keep = filter.match(STATUS_TOKEN)?.[0];
+    const status = filter.match(STATUS_TOKEN)?.[0];
     const project = filter.match(PROJECT_TOKEN)?.[0];
-    store.setFilter([keep, project, next.trim()].filter(Boolean).join(" "));
+    store.setFilter([status, project, next.trim()].filter(Boolean).join(" "));
     setShowAll(false);
   }
   function clearAll() {
@@ -141,8 +151,8 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
     setShowAll(false);
   }
 
-  const activeLabel = FILTERS.find((f) => f.key === active)!.label;
-  const narrowed = activeProject !== null || searchText !== "";
+  const statusLabel = activeStatus ? FILTERS.find((f) => f.key === activeStatus)!.label : "All tasks";
+  const filtered = activeStatus !== null || activeProject !== null || searchText !== "";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -153,16 +163,23 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
           className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border bg-surface-1 px-3 text-left text-[13px]"
         >
           <ListFilter className="size-4 shrink-0 text-muted-foreground" />
-          <span className={cn("shrink-0 font-medium", ACCENT[active])}>{activeLabel}</span>
+          <span
+            className={cn(
+              "shrink-0 font-medium",
+              activeStatus ? ACCENT[activeStatus] : "text-foreground",
+            )}
+          >
+            {statusLabel}
+          </span>
           <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-            {columnTasks.length}
+            {listTasks.length}
           </span>
           {activeProject && (
             <span className="min-w-0 truncate text-muted-foreground">· {activeProject}</span>
           )}
           {searchText && <span className="min-w-0 truncate text-muted-foreground">· {searchText}</span>}
         </button>
-        {narrowed && (
+        {filtered && (
           <button
             onClick={clearAll}
             aria-label="Clear filter"
@@ -174,9 +191,13 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain px-3 pt-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
-        {columnTasks.length === 0 ? (
+        {listTasks.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-            {narrowed ? "No tasks match that filter." : EMPTY[active]}
+            {filtered
+              ? activeStatus && !activeProject && !searchText
+                ? EMPTY[activeStatus]
+                : "No tasks match that filter."
+              : "No tasks yet."}
           </div>
         ) : (
           <AnimatePresence initial={false}>
@@ -192,12 +213,12 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
             ))}
           </AnimatePresence>
         )}
-        {columnTasks.length > visible.length && (
+        {listTasks.length > visible.length && (
           <button
             className="rounded-lg py-3 text-center text-[13px] text-muted-foreground active:bg-surface-2"
             onClick={() => setShowAll(true)}
           >
-            {columnTasks.length - visible.length} more…
+            {listTasks.length - visible.length} more…
           </button>
         )}
       </div>
@@ -217,12 +238,18 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
           />
 
           <Section title="Status" />
+          <Row
+            label="All statuses"
+            count={grandTotal}
+            selected={activeStatus === null}
+            onClick={() => setStatus(null)}
+          />
           {FILTERS.map((f) => (
             <Row
               key={f.key}
               label={f.label}
               count={statusCounts.get(f.key) ?? 0}
-              selected={active === f.key}
+              selected={activeStatus === f.key}
               onClick={() => setStatus(f.key)}
             />
           ))}
@@ -230,7 +257,7 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
           <Section title="Project" />
           <Row
             label="All projects"
-            count={totalForStatus}
+            count={totalForProjects}
             selected={activeProject === null}
             onClick={() => setProject(null)}
           />
