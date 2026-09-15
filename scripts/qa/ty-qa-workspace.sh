@@ -39,16 +39,18 @@ check wait_for shows "$PANEL" Shell
 SHELL_PANE=$(sqlite3 "$WORKTREE_DB_PATH" 'select shell_pane_id from tasks where id=1')
 AGENT_PANE=$(sqlite3 "$WORKTREE_DB_PATH" 'select claude_pane_id from tasks where id=1')
 SHELL_PID=$(tmux display-message -p -t "$SHELL_PANE" '#{pane_pid}')
-tmux send-keys -t "$PANEL" -l 'sleep 120 & echo workspace-shell-ready'
+tmux send-keys -t "$PANEL" -l 'sleep 300 & echo workspace-shell-ready'
 tmux send-keys -t "$PANEL" Enter
 check wait_for shows "$SHELL_PANE" workspace-shell-ready
 tmux send-keys -t "$PANEL" M-t
 check wait_for shows "$PANEL" 'Your workspace'
-if [ "${TY_QA_WORKSPACE_SHOTS:-}" = 1 ]; then
+capture_workspace() {
+  [ "${TY_QA_WORKSPACE_SHOTS:-}" = 1 ] || return 0
+  local name="$1"
   mkdir -p "$TY_QA_ROOT/shots"
   tmux set-window-option -t "$TY_UI_SESSION:tui" window-size smallest
   cat > "$TY_QA_ROOT/workspace.tape" <<TAPE
-Output "$TY_QA_ROOT/shots/tui-workspace.gif"
+Output "$TY_QA_ROOT/shots/$name.gif"
 Set Width 1600
 Set Height 1200
 Set FontSize 17
@@ -59,18 +61,20 @@ Type "env -u TMUX TMUX_TMPDIR='$TMUX_TMPDIR' tmux -L '$TASKYOU_TMUX_SOCKET' atta
 Enter
 Sleep 2s
 Show
-Sleep 2s
-Screenshot "$TY_QA_ROOT/shots/tui-launcher.png"
-Down
-Enter
-Sleep 2s
-Screenshot "$TY_QA_ROOT/shots/tui-pr.png"
+Sleep 1s
+Screenshot "$TY_QA_ROOT/shots/$name.png"
 TAPE
   vhs "$TY_QA_ROOT/workspace.tape" >/dev/null
-else
-  tmux send-keys -t "$PANEL" Down Enter
-fi
+}
+capture_workspace tui-launcher
+# VHS's Alt shortcut does not encode Meta in all terminals; send through tmux.
+tmux send-keys -t "$PANEL" M-h
+check wait_for shows "$PANEL" 'previous tab'
+capture_workspace tui-help
+tmux send-keys -t "$PANEL" M-h
+tmux send-keys -t "$PANEL" Down Enter
 check wait_for shows "$PANEL" SUCCESS
+capture_workspace tui-pr
 # Open a file by keyboard and ensure canonical reopens don't duplicate it.
 tmux send-keys -t "$PANEL" M-t
 tmux send-keys -t "$PANEL" -l README.md
@@ -78,6 +82,21 @@ tmux send-keys -t "$PANEL" Enter
 check wait_for shows "$PANEL" 'Review checklist'
 "$TY_BIN" panel open 1 file README.md >/dev/null
 check test "$(sqlite3 "$WORKTREE_DB_PATH" "select count(*) from task_panels where task_id=1 and provider_id='file';")" = 1
+# Exercise the component's file filter: first Enter applies it, second opens.
+tmux send-keys -t "$PANEL" M-t
+tmux send-keys -t "$PANEL" -l Files
+tmux send-keys -t "$PANEL" Enter
+check wait_for shows "$PANEL" README.md
+tmux send-keys -t "$PANEL" /
+check wait_for shows "$PANEL" Filter
+tmux send-keys -t "$PANEL" -l README
+tmux send-keys -t "$PANEL" Enter
+check wait_for shows "$PANEL" README.md
+tmux send-keys -t "$PANEL" Enter
+check wait_for shows "$PANEL" 'Review checklist'
+tmux send-keys -t "$PANEL" M-h
+check wait_for shows "$PANEL" 'close tab'
+tmux send-keys -t "$PANEL" M-h
 check test "$(tmux display-message -p -t "$SHELL_PANE" '#{pane_pid}')" = "$SHELL_PID"
 check pgrep -P "$SHELL_PID" sleep
 check test "$(tmux display-message -p -t "$AGENT_PANE" '#{window_name}')" = task-1

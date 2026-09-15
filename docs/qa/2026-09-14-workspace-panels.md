@@ -26,6 +26,21 @@ The machine's preinstalled linter was built with Go 1.25 and could not check thi
 
 The GUI was exercised through `ty serve`; the native Tauri wrapper was not launched. Remote file protocol tests execute the same bounded Python script locally; no live SSH host was used. Browser embedding and runtime third-party plugins are outside this initial provider set. Terminal mirrors retain task-owned dimensions; the native TUI shell remains available for tmux scrollback.
 
+## Bubbles component follow-up — 2026-09-15
+
+The TUI now uses `bubbles/help` with `key.Binding` for its compact and expanded
+shortcut views (`Alt+h`), and `bubbles/list` for both launcher selection and
+workspace file navigation. The launcher uses Bubbles fuzzy matching; files use
+the list's built-in `/` filter and pagination. Existing `textinput` and
+`viewport` components remain in use. No dependencies were added.
+
+Verification: UI, parity and CLI tests passed; golangci-lint reported 0 issues.
+New regressions cover fuzzy action selection, visible selection after paging,
+filter acceptance, context-aware help sizing, and shell input isolation. The
+real workspace harness passed again with file filtering, expanded help, PR and
+Markdown, duplicate opens, shell job survival and helper cleanup. Updated TUI
+screenshots below were captured after this refactor.
+
 ## Screenshots
 
 Captured from the QA harness fixtures and uploaded with `scripts/qa/ty-qa-publish.sh`.
@@ -36,5 +51,9 @@ Captured from the QA harness fixtures and uploaded with `scripts/qa/ty-qa-publis
 ![gui-pr](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-14/workspace-panel-gui-pr.png)
 ![gui-markdown](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-14/workspace-panel-gui-markdown.png)
 ![gui-mobile](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-14/workspace-panel-gui-mobile.png)
-![tui-launcher](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-14/workspace-panel-tui-launcher.png)
-![tui-pr](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-14/workspace-panel-tui-pr.png)
+
+
+<!-- QA evidence (paste into the PR comment) -->
+![tui-launcher](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-15/workspace-panel-bubbles-tui-launcher.png)
+![tui-help](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-15/workspace-panel-bubbles-tui-help.png)
+![tui-pr](https://pub-e209f789a78e432384c9a13a5d956e7c.r2.dev/taskyou-qa/2026-09-15/workspace-panel-bubbles-tui-pr.png)

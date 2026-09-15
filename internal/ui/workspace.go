@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,7 +46,10 @@ type WorkspaceModel struct {
 	active        string
 	launcher      bool
 	query         textinput.Model
-	cursor        int
+	actions       list.Model
+	files         list.Model
+	help          help.Model
+	keys          workspaceKeys
 	width, height int
 	viewport      viewport.Model
 	content       panel.Content
@@ -58,6 +64,10 @@ func NewWorkspaceModel(ctx context.Context, service *panel.Service, taskID int64
 	input.Prompt = "› "
 	input.CharLimit = 4096
 	m := &WorkspaceModel{ctx: ctx, service: service, taskID: taskID, query: input, viewport: viewport.New(60, 20), width: 64, height: 24, inputs: make(chan workspaceInput, 128), inputErrors: make(chan error, 1)}
+	m.actions, m.files = newWorkspaceList(false), newWorkspaceList(true)
+	m.help, m.keys = help.New(), newWorkspaceKeys()
+	m.updateActions()
+	m.layout()
 	go func() {
 		for {
 			select {
@@ -126,27 +136,17 @@ func (m *WorkspaceModel) open(provider, resource string) tea.Cmd {
 	m.active = p.ID
 	m.launcher = false
 	m.query.Blur()
-	m.cursor = 0
+	m.files.ResetFilter()
+	m.files.ResetSelected()
 	m.viewport.GotoTop()
+	m.layout()
 	return m.load()
-}
-func (m *WorkspaceModel) choices() []panel.Provider {
-	out := []panel.Provider{}
-	q := strings.ToLower(m.query.Value())
-	for _, p := range m.service.Providers() {
-		if p.ID != "file" && (q == "" || strings.Contains(strings.ToLower(p.Title), q)) {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 func (m *WorkspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.viewport.Width = max(1, msg.Width-4)
-		m.viewport.Height = max(1, msg.Height-5)
-		m.query.Width = max(1, msg.Width-6)
+		m.layout()
 		m.renderContent()
 		return m, nil
 	case workspaceTick:
@@ -173,19 +173,34 @@ func (m *WorkspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err.Error()
 		}
+		var cmd tea.Cmd
+		if len(m.tabs) == 0 && !m.launcher {
+			m.launcher = true
+			cmd = m.query.Focus()
+			m.updateActions()
+			m.layout()
+		}
 		if changed {
+			if m.content.Kind == "files" {
+				cmd = m.updateFiles()
+			}
+			m.layout()
 			m.renderContent()
 		}
-		return m, nil
+		return m, cmd
 	case tea.KeyMsg:
-		key := msg.String()
-		switch key {
-		case "alt+t":
+		switch {
+		case key.Matches(msg, m.keys.Help):
+			m.help.ShowAll = !m.help.ShowAll
+			m.layout()
+			return m, nil
+		case key.Matches(msg, m.keys.New):
 			m.launcher = true
-			m.cursor = 0
 			m.query.SetValue("")
+			m.updateActions()
+			m.layout()
 			return m, m.query.Focus()
-		case "alt+left", "alt+right":
+		case key.Matches(msg, m.keys.Previous, m.keys.Next):
 			if len(m.tabs) == 0 {
 				return m, nil
 			}
@@ -195,16 +210,19 @@ func (m *WorkspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					index = i
 				}
 			}
-			if key == "alt+right" {
+			if key.Matches(msg, m.keys.Next) {
 				index++
 			} else {
 				index--
 			}
 			m.active = m.tabs[(index+len(m.tabs))%len(m.tabs)].ID
 			m.launcher = false
-			m.cursor = 0
+			m.files.ResetFilter()
+			m.files.ResetSelected()
+			m.query.Blur()
+			m.layout()
 			return m, m.load()
-		case "alt+w":
+		case key.Matches(msg, m.keys.Close):
 			if err := m.service.Close(m.taskID, m.active); err != nil {
 				m.err = err.Error()
 				return m, nil
@@ -212,35 +230,33 @@ func (m *WorkspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.active = ""
 			m.launcher = false
 			return m, m.load()
-		case "alt+r":
+		case key.Matches(msg, m.keys.Refresh):
 			return m, m.load()
 		}
 		if m.launcher || len(m.tabs) == 0 {
 			m.launcher = true
-			switch key {
-			case "esc":
+			switch {
+			case key.Matches(msg, m.keys.Cancel):
 				m.launcher = false
 				m.query.Blur()
+				m.layout()
 				return m, nil
-			case "up":
-				m.cursor = max(0, m.cursor-1)
-				return m, nil
-			case "down":
-				m.cursor = min(len(m.choices()), m.cursor+1)
-				return m, nil
-			case "enter":
-				choices := m.choices()
-				if m.cursor < len(choices) {
-					return m, m.open(choices[m.cursor].ID, "")
-				}
-				if m.query.Value() != "" {
-					return m, m.open("file", m.query.Value())
+			case key.Matches(msg, m.keys.Open):
+				if item, ok := m.actions.SelectedItem().(workspaceItem); ok {
+					return m, m.open(item.provider, item.resource)
 				}
 				return m, nil
+			case key.Matches(msg, m.actions.KeyMap.CursorUp, m.actions.KeyMap.CursorDown, m.actions.KeyMap.PrevPage, m.actions.KeyMap.NextPage):
+				var cmd tea.Cmd
+				m.actions, cmd = m.actions.Update(msg)
+				return m, cmd
 			}
+			before := m.query.Value()
 			var cmd tea.Cmd
 			m.query, cmd = m.query.Update(msg)
-			m.cursor = 0
+			if before != m.query.Value() {
+				m.updateActions()
+			}
 			return m, cmd
 		}
 		if m.content.Kind == "shell" {
@@ -255,34 +271,36 @@ func (m *WorkspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.content.Kind == "files" {
-			switch key {
-			case "up", "k":
-				m.cursor = max(0, m.cursor-1)
-				m.renderContent()
-				return m, nil
-			case "down", "j":
-				m.cursor = min(max(0, len(m.content.Entries)-1), m.cursor+1)
-				m.renderContent()
-				return m, nil
-			case "backspace":
-				for _, t := range m.tabs {
-					if t.ID == m.active {
-						return m, m.open("files", path.Dir(t.Resource))
+			if m.files.FilterState() != list.Filtering {
+				switch {
+				case key.Matches(msg, m.keys.Parent):
+					for _, t := range m.tabs {
+						if t.ID == m.active {
+							return m, m.open("files", path.Dir(t.Resource))
+						}
 					}
-				}
-			case "enter":
-				if m.cursor < len(m.content.Entries) {
-					e := m.content.Entries[m.cursor]
-					provider := "file"
-					if e.Directory {
-						provider = "files"
+				case key.Matches(msg, m.keys.Open):
+					if item, ok := m.files.SelectedItem().(workspaceItem); ok {
+						return m, m.open(item.provider, item.resource)
 					}
-					return m, m.open(provider, e.Path)
+					return m, nil
 				}
 			}
+			var cmd tea.Cmd
+			m.files, cmd = m.files.Update(msg)
+			m.layout()
+			return m, cmd
 		}
 	}
 	var cmd tea.Cmd
+	if m.launcher || len(m.tabs) == 0 {
+		m.query, cmd = m.query.Update(msg)
+		return m, cmd
+	}
+	if m.content.Kind == "files" {
+		m.files, cmd = m.files.Update(msg)
+		return m, cmd
+	}
 	m.viewport, cmd = m.viewport.Update(msg)
 	return m, cmd
 }
@@ -335,35 +353,7 @@ func (m *WorkspaceModel) renderContent() {
 	if m.content.URL != "" {
 		text += "\n\n" + ansi.Strip(m.content.URL)
 	}
-	if m.err == "" && m.content.Kind == "files" {
-		var b strings.Builder
-		for i, e := range m.content.Entries {
-			icon := "  "
-			if e.Directory {
-				icon = "▸ "
-			}
-			line := icon + ansi.Strip(e.Name)
-			if i == m.cursor {
-				line = lipgloss.NewStyle().Foreground(lipgloss.Color("#8bd5ca")).Bold(true).Render("› " + line)
-			} else {
-				line = "  " + line
-			}
-			b.WriteString(line + "\n")
-		}
-		text = b.String()
-		if text == "" {
-			text = "This directory is empty."
-		}
-	}
 	m.viewport.SetContent(text)
-	if m.content.Kind == "files" {
-		if m.cursor < m.viewport.YOffset {
-			m.viewport.SetYOffset(m.cursor)
-		}
-		if m.cursor >= m.viewport.YOffset+m.viewport.Height {
-			m.viewport.SetYOffset(m.cursor - m.viewport.Height + 1)
-		}
-	}
 	if m.content.Kind == "shell" {
 		m.viewport.GotoBottom()
 	}
@@ -381,26 +371,10 @@ func (m *WorkspaceModel) View() string {
 	header := ansi.Truncate(strings.Join(tabs, "  ")+"  +", m.width-2, "…")
 	body := m.viewport.View()
 	if m.launcher || len(m.tabs) == 0 {
-		lines := []string{"", accent.Render("Your workspace"), "Keep tools and files beside the conversation.", "", m.query.View(), "", "Actions"}
-		for i, p := range m.choices() {
-			label := "  " + p.Title
-			if i == m.cursor {
-				label = accent.Render("› " + p.Title)
-			}
-			lines = append(lines, label)
-		}
-		if m.query.Value() != "" {
-			label := "  Open file: " + m.query.Value()
-			if m.cursor >= len(m.choices()) {
-				label = accent.Render("› Open file: " + m.query.Value())
-			}
-			lines = append(lines, label)
-		}
-		if m.err != "" {
-			lines = append(lines, "", m.err)
-		}
-		body = lipgloss.NewStyle().Width(max(1, m.width-4)).Height(max(1, m.height-5)).MaxHeight(max(1, m.height-5)).Render(strings.Join(lines, "\n"))
+		body = m.launcherView()
+	} else if m.content.Kind == "files" && m.err == "" {
+		body = m.files.View()
 	}
-	footer := "Alt+t new · Alt+←/→ tabs · Alt+w close · Alt+r refresh"
-	return lipgloss.NewStyle().Padding(0, 1).Render(header + "\n" + strings.Repeat("─", max(1, m.width-2)) + "\n" + body + "\n" + ansi.Truncate(footer, m.width-2, "…"))
+	body = lipgloss.NewStyle().Height(m.viewport.Height).MaxHeight(m.viewport.Height).Width(max(1, m.width-2)).Render(body)
+	return lipgloss.NewStyle().Padding(0, 1).Render(header + "\n" + strings.Repeat("─", max(1, m.width-2)) + "\n" + body + "\n" + m.help.View(m))
 }

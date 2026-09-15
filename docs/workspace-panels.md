@@ -24,8 +24,16 @@ The agent and shell processes stay in their daemon session.
 | Alt+Left / Alt+Right | Switch tabs |
 | Alt+w | Close the active tab |
 | Alt+r | Refresh content |
+| Alt+h | Toggle context-aware shortcut help |
+| Page Up / Page Down | Page through launcher actions or files |
+| / in Files | Fuzzy-filter filenames; Enter applies, Enter again opens |
+| Esc in Files | Cancel or clear the filter |
 | Backspace in Files | Open the parent directory |
 | Shift+arrows | Move between the surrounding tmux panes |
+
+The launcher and file browser use Bubbles lists for selection and pagination.
+Launcher search fuzzy-matches actions while retaining an explicit file-path
+option. Shortcut help is generated from the same bindings that handle input.
 
 When Shell is selected, typing goes to the shell, including Ctrl+C. Use Alt+t
 to leave the shell for the launcher. File paths are relative to the task's
