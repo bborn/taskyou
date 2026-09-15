@@ -8,6 +8,8 @@ import { applyFilter, buildColumns } from "./lib/board";
 import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
+import { MobileBoard } from "./components/MobileBoard";
+import { useIsMobile } from "./hooks/use-mobile";
 import { SetupCheck } from "./components/SetupCheck";
 import { RoutinesView } from "./components/RoutinesView";
 import { DetailView } from "./components/DetailView";
@@ -35,6 +37,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 export default function App() {
   const state = useAppState();
+  const isMobile = useIsMobile();
   const [bootPhase, setBootPhase] = useState<"starting" | "setup" | "ready" | "error">("starting");
   const [bootMessage, setBootMessage] = useState("Starting TaskYou…");
   const [envReport, setEnvReport] = useState<import("./api/types").EnvironmentReport | null>(null);
@@ -68,6 +71,12 @@ export default function App() {
       setBootMessage("Loading board…");
       await store.boot();
       setBootPhase("ready");
+      // Deep link (a bookmark or a notification tap): /?task=123
+      const deepLink = Number(new URLSearchParams(window.location.search).get("task"));
+      if (Number.isInteger(deepLink) && deepLink > 0) {
+        store.openDetail(deepLink);
+        window.history.replaceState({}, "", window.location.pathname);
+      }
     } catch (e) {
       setBootMessage(e instanceof Error ? e.message : String(e));
       setBootPhase("error");
@@ -378,54 +387,69 @@ export default function App() {
           whole bar is a drag region. */}
       <header
         data-tauri-drag-region
-        className={`flex h-11 shrink-0 items-center gap-1.5 border-b bg-surface-1 pr-2 ${
+        className={`flex shrink-0 items-center gap-1.5 border-b bg-surface-1 pr-2 ${
           inTauri() ? "pl-20" : "pl-3"
-        }`}
+        } ${isMobile ? "h-12 pt-[env(safe-area-inset-top)]" : "h-11"}`}
       >
-        <img src={logoUrl} alt="" data-tauri-drag-region className="size-5 rounded" />
-        <span
-          data-tauri-drag-region
-          className="text-[13px] font-semibold tracking-tight text-foreground/90"
-          onDoubleClick={() => store.openBoard()}
-        >
-          TaskYou
-        </span>
+        {/* On a phone the back button replaces the wordmark; there is no room for both. */}
+        {!(isMobile && state.view.kind !== "board") && (
+          <>
+            <img src={logoUrl} alt="" data-tauri-drag-region className="size-5 rounded" />
+            <span
+              data-tauri-drag-region
+              className="text-[13px] font-semibold tracking-tight text-foreground/90"
+              onDoubleClick={() => store.openBoard()}
+            >
+              TaskYou
+            </span>
+          </>
+        )}
         {state.view.kind !== "board" && (
-          <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => store.openBoard()}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className={isMobile ? "h-9 px-2 text-sm" : "h-7 px-2"}
+            onClick={() => store.openBoard()}
+          >
             <ChevronLeft data-no-drag /> Board
           </Button>
         )}
         <div data-tauri-drag-region className="flex-1" />
-        <Badge
-          variant={state.permissionMode === "dangerous" ? "destructive" : "outline"}
-          className={state.permissionMode === "auto" ? "border-status-processing/50 text-status-processing" : ""}
-          title="Permission mode for new executions (press !)"
-          onClick={() => store.cyclePermissionMode()}
-        >
-          {permLabel}
-        </Badge>
+        {!isMobile && (
+          <Badge
+            variant={state.permissionMode === "dangerous" ? "destructive" : "outline"}
+            className={state.permissionMode === "auto" ? "border-status-processing/50 text-status-processing" : ""}
+            title="Permission mode for new executions (press !)"
+            onClick={() => store.cyclePermissionMode()}
+          >
+            {permLabel}
+          </Badge>
+        )}
         <Button
           variant="ghost"
           size="sm"
-          className="h-7"
+          className={isMobile ? "h-9 text-sm" : "h-7"}
           title="New task (n / ⌘N)"
           onClick={() => store.setForm({ kind: "new" })}
         >
           <Plus className="size-4" /> New
         </Button>
+        {/* The phone board has its own search field. */}
+        {!isMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            title="Search (⌘P)"
+            onClick={() => store.setPalette(true)}
+          >
+            <Search className="size-4" />
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon"
-          className="size-7"
-          title="Search (⌘P)"
-          onClick={() => store.setPalette(true)}
-        >
-          <Search className="size-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
+          className={isMobile ? "hidden" : "size-7"}
           title={`Theme: ${state.theme} (click to cycle)`}
           onClick={() => {
             const order = ["system", "light", "dark"] as const;
@@ -443,7 +467,7 @@ export default function App() {
         <Button
           variant="ghost"
           size="icon"
-          className="size-7"
+          className={isMobile ? "size-9" : "size-7"}
           title="Settings (⌘,)"
           onClick={() => store.openSettings()}
         >
@@ -460,12 +484,15 @@ export default function App() {
         animate={{ opacity: 1 }}
         transition={{ duration: 0.09, ease: "easeOut" }}
       >
-          {state.view.kind === "board" && (
-            <div className="flex min-h-0 flex-1 flex-col">
-              {(state.filterOpen || state.filter !== "") && <FilterBar />}
-              <Board columns={columns} collapsed={state.collapsed} />
-            </div>
-          )}
+          {state.view.kind === "board" &&
+            (isMobile ? (
+              <MobileBoard columns={columns} />
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col">
+                {(state.filterOpen || state.filter !== "") && <FilterBar />}
+                <Board columns={columns} collapsed={state.collapsed} />
+              </div>
+            ))}
           {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} />}
           {state.view.kind === "settings" && <SettingsView />}
           {state.view.kind === "routines" && <RoutinesView />}
@@ -475,7 +502,7 @@ export default function App() {
       {state.form && <TaskForm form={state.form} />}
       <Dialogs />
       <Toaster
-        position="bottom-right"
+        position={isMobile ? "top-center" : "bottom-right"}
         richColors
         closeButton
         theme={
