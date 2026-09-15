@@ -718,6 +718,20 @@ func (db *DB) MarkTaskStarted(id int64) error {
 }
 
 // UpdateTaskStatus updates a task's status.
+// RestartIdleClock stamps a blocked task's completed_at with now. The idle
+// sweep measures a parked task's idle time from completed_at, so a session the
+// user resumes by hand, without typing into it, would otherwise be suspended
+// again on the sweep's next pass, a minute later. Only a task that actually ran
+// (completed_at already set) is touched; a staged pipeline step stays unstamped.
+func (db *DB) RestartIdleClock(id int64) error {
+	_, err := db.Exec(`UPDATE tasks SET completed_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ? AND completed_at IS NOT NULL`, id, StatusBlocked)
+	if err != nil {
+		return fmt.Errorf("restart idle clock: %w", err)
+	}
+	return nil
+}
+
 func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	// Get old task to track status change
 	oldTask, _ := db.GetTask(id)

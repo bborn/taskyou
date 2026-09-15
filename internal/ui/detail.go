@@ -1645,6 +1645,24 @@ func (m *DetailModel) ClearPaneState() {
 // "" when the view is operating normally.
 func (m *DetailModel) PaneSetupHalted() string { return m.paneSetupHalted }
 
+// SessionClosed reports whether a blocked task's session closed while this view
+// was open — usually the idle sweep — which is when enter resumes it.
+func (m *DetailModel) SessionClosed() bool {
+	return m.paneNotice == sessionClosedNotice && m.task != nil && m.task.Status == db.StatusBlocked
+}
+
+// ResumeSession relaunches the closed session (with --resume) and joins its
+// panes, as reopening the task would. The caller restarts the idle clock so the
+// sweep does not suspend it again a minute later.
+func (m *DetailModel) ResumeSession() tea.Cmd {
+	m.paneNotice = ""
+	m.ClearPaneState()
+	m.paneLoading, m.waitingForExecutor = true, false
+	m.paneLoadingStart = time.Now()
+	m.setViewportContent()
+	return m.startPanesAsync()
+}
+
 // WorktreeMissing reports whether this view is halted because the task's
 // recorded worktree is gone — the one halt with a one-key recovery.
 func (m *DetailModel) WorktreeMissing() bool {
@@ -1940,7 +1958,7 @@ func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
 
 // sessionClosedNotice is what a blocked task's view says once its session has
 // closed under it.
-const sessionClosedNotice = "Session closed (suspended or ended). Reopen the task to resume it."
+const sessionClosedNotice = "Session closed (suspended or ended). Press enter to resume it."
 
 // afterWindowClosed decides what the view does once the task's window has
 // closed under it, from the task's current status.
@@ -3156,6 +3174,24 @@ func (m *DetailModel) renderHelp() string {
 	// Check if navigation is available (more than 1 task in column)
 	hasNavigation := m.totalInColumn > 1
 
+	// With the executor or shell pane focused, keystrokes go to that pane, not
+	// to us: only the root-table tmux bindings from bindPaneNavigation still
+	// reach the TUI, so list those instead of keys that would type into Claude.
+	if !m.focused {
+		dimmedKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+		dimmedDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
+		render := func(k, desc string, disabled bool) string {
+			if disabled {
+				return dimmedKeyStyle.Render(k) + " " + dimmedDescStyle.Render(desc)
+			}
+			return HelpKey.Render(k) + " " + HelpDesc.Render(desc)
+		}
+		arrows := IconArrowUp() + IconArrowDown()
+		return HelpBar.Render(
+			render("alt+shift+"+arrows, "prev/next task", !hasNavigation) + "  " +
+				render("shift+"+arrows, "switch pane", false))
+	}
+
 	// Primary keys are the handful of high-frequency actions kept visible when
 	// the row is collapsed; everything else is tucked behind '?'.
 	keys := []helpKey{
@@ -3181,6 +3217,9 @@ func (m *DetailModel) renderHelp() string {
 	// a tripped spawn breaker alike.
 	if m.paneSetupHalted != "" {
 		keys = append(keys, helpKey{"W", "recreate worktree", false, true})
+	}
+	if m.SessionClosed() {
+		keys = append(keys, helpKey{"enter", "resume session", false, true})
 	}
 
 	keys = append(keys, helpKey{"e", "edit", false, true})

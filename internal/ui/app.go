@@ -108,6 +108,7 @@ type KeyMap struct {
 	OpenPR key.Binding
 	// Rebuild a task's missing worktree (detail view recovery)
 	RecreateWorktree key.Binding
+	ResumeSession    key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -289,6 +290,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("W"),
 			key.WithHelp("W", "recreate worktree"),
 		),
+		ResumeSession: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "resume session"),
+		),
 	}
 }
 
@@ -353,6 +358,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
+	km.ResumeSession = applyBinding(km.ResumeSession, cfg.ResumeSession)
 
 	return km
 }
@@ -2116,7 +2122,7 @@ func (m *AppModel) renderFilterBar() string {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
 			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
 			// so advertise the short alias (is:wf) rather than the full token.
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf)", navHelp)))
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf: workflows only)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
@@ -2124,15 +2130,12 @@ func (m *AppModel) renderFilterBar() string {
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 
-	// Wrap in a subtle box
+	// No background: each part's styling ends in an ANSI reset, so a bar
+	// background only survived in the trailing padding, as a gray stub after
+	// the hint. The bold primary "/" already marks the filter as active.
 	filterBarStyle := lipgloss.NewStyle().
 		Padding(0, 1).
 		Width(m.width)
-
-	if m.filterActive {
-		filterBarStyle = filterBarStyle.
-			Background(lipgloss.Color("#333333"))
-	}
 
 	filterBar := filterBarStyle.Render(filterContent)
 
@@ -3020,6 +3023,21 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notification = fmt.Sprintf("%s Recreating worktree for #%d…", IconInProgress(), m.selectedTask.ID)
 		m.notifyUntil = time.Now().Add(5 * time.Second)
 		return m, m.recreateWorktree(m.selectedTask.ID)
+	}
+	// Resume a session that closed under the open view (usually the idle sweep)
+	// without leaving and re-entering the task. Offered only while it is closed.
+	if key.Matches(keyMsg, m.keys.ResumeSession) && m.selectedTask != nil &&
+		m.detailView != nil && m.detailView.SessionClosed() {
+		m.notification = fmt.Sprintf("%s Resuming #%d…", IconInProgress(), m.selectedTask.ID)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		database, id := m.db, m.selectedTask.ID
+		restartClock := func() tea.Msg {
+			if err := database.RestartIdleClock(id); err != nil {
+				GetLogger().Error("resume #%d: %v", id, err)
+			}
+			return nil
+		}
+		return m, tea.Batch(restartClock, m.detailView.ResumeSession())
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		return m, m.detailView.ToggleShellPane()
