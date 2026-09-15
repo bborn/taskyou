@@ -4,4 +4,4 @@
 - [x] GUI split, launcher, resource renderers and terminal transport
 - [x] TUI viewer, navigation, lifecycle and parity
 - [x] Full verification and QA harness screenshots
-- [ ] Publish evidence and submit PR
+- [x] Publish evidence and submit PR — https://github.com/bborn/taskyou/pull/730
