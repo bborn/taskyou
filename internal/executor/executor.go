@@ -43,12 +43,14 @@ type TaskEvent struct {
 
 // Executor manages background task execution.
 type Executor struct {
-	db      *db.DB
-	config  *config.Config
-	logger  *log.Logger
-	hooks   *hooks.Runner
-	events  *events.Emitter
-	prCache *github.PRCache
+	db     *db.DB
+	config *config.Config
+	logger *log.Logger
+	hooks  *hooks.Runner
+	events *events.Emitter
+
+	// prPoller is the single background owner of PR status; see refreshPRStatus.
+	prPoller *github.PRPoller
 
 	// Executor factory for pluggable backends
 	executorFactory *ExecutorFactory
@@ -187,7 +189,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		logger:          log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
 		hooks:           hooks.NewSilent(hooks.DefaultHooksDir()),
 		events:          eventsEmitter,
-		prCache:         github.NewPRCache(),
+		prPoller:        github.NewPRPoller(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
 		wakeupCh:        make(chan struct{}, 1),
@@ -218,7 +220,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		logger:          log.NewWithOptions(w, log.Options{Prefix: "executor"}),
 		hooks:           hooks.New(hooks.DefaultHooksDir()),
 		events:          eventsEmitter,
-		prCache:         github.NewPRCache(),
+		prPoller:        github.NewPRPoller(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
 		wakeupCh:        make(chan struct{}, 1),
@@ -1455,13 +1457,12 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for stale worktrees to archive every 10 minutes (300 ticks)
 	tickCount := 0
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150     // 5 minutes at 2 second ticks
-	const staleWorktreeInterval = 300   // 10 minutes at 2 second ticks
-	const authCheckInterval = 15        // 30 seconds at 2 second ticks
-	const reviewReconcileInterval = 30  // 60 seconds at 2 second ticks
-	const prDisplayRefreshInterval = 45 // 90 seconds at 2 second ticks
-	const readyTasksInterval = 8        // 16 seconds at 2 second ticks
-	const orphanReconcileInterval = 30  // 60 seconds at 2 second ticks
+	const doneCleanupInterval = 150    // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 300  // 10 minutes at 2 second ticks
+	const authCheckInterval = 15       // 30 seconds at 2 second ticks
+	const prStatusInterval = 5         // 10 seconds; the poller decides which PRs are actually due
+	const readyTasksInterval = 8       // 16 seconds at 2 second ticks
+	const orphanReconcileInterval = 30 // 60 seconds at 2 second ticks
 
 	for {
 		select {
@@ -1488,10 +1489,10 @@ func (e *Executor) worker(ctx context.Context) {
 				e.checkAuthStuckTasks()
 			}
 
-			// Periodically promote blocked "PR ready for review" tasks to done
-			// once their PR has merged or closed.
-			if tickCount%reviewReconcileInterval == 0 {
-				e.reconcileReviewTasks()
+			// Keep PR badges current on every surface and promote blocked
+			// "PR ready for review" tasks to done once their PR merges or closes.
+			if tickCount%prStatusInterval == 0 {
+				e.refreshPRStatus(ctx)
 			}
 
 			// Safety net for executors that die mid-run while the daemon stays up:
@@ -1513,12 +1514,6 @@ func (e *Executor) worker(ctx context.Context) {
 			// hook miss): complete them so the DAG advances instead of stalling.
 			if tickCount%readyTasksInterval == 0 {
 				e.reconcileFinishedWorkflowSteps()
-			}
-
-			// Periodically refresh cached PR state for actively-watched tasks so
-			// the board's live PR badge stays current without a TUI open.
-			if tickCount%prDisplayRefreshInterval == 0 {
-				e.refreshActivePRInfo()
 			}
 
 			// Periodically cleanup Claude processes for inactive done tasks
@@ -1547,155 +1542,107 @@ func shouldPromoteReviewTask(info *github.PRInfo) bool {
 	return info != nil && (info.State == github.PRStateMerged || info.State == github.PRStateClosed)
 }
 
-// reconcileReviewTasks promotes blocked "PR ready for review" tasks to 'done' once
-// a human has merged or closed their PR. This is the other half of the completion
-// flow: taskyou_complete parks PR-bearing tasks in 'blocked' (see internal/mcp),
-// and this loop watches those PRs and finishes the task when the PR reaches a
-// terminal state. It runs daemon-side so it works whether or not the TUI is open
-// (the TUI only ever refreshed PR state for display, never the task status).
+// refreshPRStatus is the one background loop that keeps PR status current. The
+// TUI, web and desktop all read what it stores in pr_info_json, so they agree
+// with each other and a TUI left open doesn't spend GitHub budget of its own.
 //
-// Idempotency: each promotion is recorded against the PR number via
-// MarkPRAutoCompleted. If a human reopens an already-completed task to keep working
-// against the same merged/closed PR, this loop will not bounce it straight back to
-// 'done' — only a genuinely new PR (different number) can auto-complete it again.
-func (e *Executor) reconcileReviewTasks() {
-	if e.prCache == nil {
+// Which tasks it watches: processing and blocked tasks with a branch, plus done
+// tasks whose PR is still open (a human can finish a task before merging). The
+// poller decides which of those are due — fast while checks run, slow once
+// settled, never after merge or close — and asks GitHub about all of a repo's
+// due branches in one query. A lookup that fails stores nothing, so a flaky
+// network or an exhausted rate limit leaves the last good badge in place
+// instead of blanking it.
+//
+// It also finishes the completion flow: taskyou_complete parks PR-bearing tasks
+// in 'blocked', and once their PR merges or closes this promotes them to 'done'.
+func (e *Executor) refreshPRStatus(ctx context.Context) {
+	if e.prPoller == nil {
 		return
 	}
-
-	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 200})
-	if err != nil {
-		return
-	}
-
-	// Group candidate tasks by project so each repo's open PRs are fetched once.
-	byProject := make(map[string][]*db.Task)
-	for _, task := range tasks {
-		if task.PRNumber > 0 && task.BranchName != "" {
-			byProject[task.Project] = append(byProject[task.Project], task)
-		}
-	}
-
-	for project, ptasks := range byProject {
-		projectDir := e.getProjectDir(project)
-		if projectDir == "" {
+	targets, tasks := e.prTargets()
+	for _, r := range e.prPoller.Poll(ctx, targets) {
+		if r.Info == nil {
+			// The branch has no PR (yet). Keep whatever was stored: a PR doesn't
+			// vanish, and a stored one came from a real lookup.
 			continue
 		}
-
-		// One API call lists the repo's OPEN PRs. A task whose PR is absent here has
-		// left the open set (merged or closed) — the only case worth a targeted fetch.
-		openPRs := github.FetchAllPRsForRepo(projectDir)
-
-		for _, task := range ptasks {
-			// Skip PRs that have already auto-completed this task (reopen-after-merge).
-			if done, _ := e.db.WasPRAutoCompleted(task.ID, task.PRNumber); done {
-				continue
-			}
-			// Still in the open set → the human hasn't merged/closed it yet.
-			if !github.NeedsReconcile(openPRs, task.BranchName, task.PRNumber) {
-				continue
-			}
-
-			// Fetch the terminal state, bypassing any stale OPEN cache entry.
-			e.prCache.InvalidateCache(projectDir, task.BranchName)
-			info := e.prCache.GetPRForBranch(projectDir, task.BranchName)
-			if !shouldPromoteReviewTask(info) {
-				continue
-			}
-
-			verb := "merged"
-			if info.State == github.PRStateClosed {
-				verb = "closed"
-			}
-
-			e.db.UpdateTaskPRInfo(task.ID, info.URL, info.Number, github.MarshalPRInfo(info))
-			if err := e.db.MarkPRAutoCompleted(task.ID, task.PRNumber); err != nil {
-				e.logger.Warn("reconcileReviewTasks: failed to record auto-done marker", "task", task.ID, "error", err)
-			}
-			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("PR #%d %s — task auto-completed.", info.Number, verb))
-			if err := e.db.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
-				e.logger.Error("reconcileReviewTasks: failed to mark task done", "task", task.ID, "error", err)
-				continue
-			}
-			e.logger.Info("Auto-completed reviewed task", "task", task.ID, "pr", info.Number, "state", verb)
+		task := tasks[r.Target.TaskID]
+		if err := e.db.UpdateTaskPRInfo(task.ID, r.Info.URL, r.Info.Number, github.MarshalPRInfo(r.Info)); err != nil {
+			e.logger.Warn("refreshPRStatus: failed to persist PR info", "task", task.ID, "error", err)
+			continue
 		}
+		e.promoteReviewTask(task, r.Info)
 	}
 }
 
-// refreshActivePRInfo keeps the cached PR badge fresh for tasks the human is
-// actively watching — those processing or blocked with a branch — so the board
-// (TUI and web) shows live PR state without waiting for completion. It runs
-// daemon-side so the web/desktop stays current even when no TUI is open.
-//
-// It uses the batch open-PR listing (one rate-limited API call per repo), which
-// carries PR state but not the CI rollup. To avoid wiping a CheckState a detail
-// fetch previously learned, the prior CheckState is carried forward while the PR
-// is still open. Merged/closed promotion stays the job of reconcileReviewTasks.
-func (e *Executor) refreshActivePRInfo() {
-	if e.prCache == nil {
-		return
-	}
-
-	// Collect actively-watched tasks across the processing and blocked columns.
-	var candidates []*db.Task
-	for _, status := range []string{db.StatusProcessing, db.StatusBlocked} {
-		tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: status, Limit: 200})
+// prTargets lists the tasks whose PR status is worth tracking.
+func (e *Executor) prTargets() ([]github.PRTarget, map[int64]*db.Task) {
+	var targets []github.PRTarget
+	tasks := make(map[int64]*db.Task)
+	for _, status := range []string{db.StatusProcessing, db.StatusBlocked, db.StatusDone} {
+		list, err := e.db.ListTasks(db.ListTasksOptions{Status: status, Limit: 200})
 		if err != nil {
 			continue
 		}
-		candidates = append(candidates, tasks...)
-	}
-
-	// Group by project so each repo's open PRs are fetched once.
-	byProject := make(map[string][]*db.Task)
-	for _, task := range candidates {
-		if task.BranchName == "" {
-			continue
-		}
-		// Skip terminal PRs — their state won't change and reconcile owns promotion.
-		if cached := github.UnmarshalPRInfo(task.PRInfoJSON); cached != nil {
-			if cached.State == github.PRStateMerged || cached.State == github.PRStateClosed {
+		for _, task := range list {
+			known := github.UnmarshalPRInfo(task.PRInfoJSON)
+			terminal := known != nil && github.PollInterval(known) == 0
+			if terminal {
+				// Nothing left to ask GitHub, but a blocked task may still be
+				// waiting on a merge that was stored by someone else (or before a
+				// restart) and never promoted.
+				e.promoteReviewTask(task, known)
 				continue
 			}
-		}
-		byProject[task.Project] = append(byProject[task.Project], task)
-	}
-
-	for project, ptasks := range byProject {
-		projectDir := e.getProjectDir(project)
-		if projectDir == "" {
-			continue
-		}
-
-		// One rate-limited API call lists the repo's OPEN PRs. nil means gh is
-		// unavailable or the rate-limit guard tripped — keep cached state.
-		openPRs := github.FetchAllPRsForRepo(projectDir)
-		if openPRs == nil {
-			continue
-		}
-		e.prCache.UpdateCacheForRepo(projectDir, openPRs)
-
-		for _, task := range ptasks {
-			info := openPRs[task.BranchName]
-			if info == nil {
-				// Absent from the open set → merged/closed; reconcileReviewTasks
-				// handles the terminal transition for blocked review tasks.
+			if status == db.StatusDone && known == nil {
 				continue
 			}
-
-			// The batch path doesn't fetch the CI rollup; carry forward the last
-			// known CheckState for this same PR so the badge doesn't lose its checks.
-			merged := *info
-			if merged.CheckState == github.CheckStateNone {
-				if prev := github.UnmarshalPRInfo(task.PRInfoJSON); prev != nil && prev.Number == merged.Number {
-					merged.CheckState = prev.CheckState
-				}
+			branch := task.BranchName
+			if branch == "" {
+				// A remotely placed task keeps its branch in remote_branch; it was
+				// pushed to the shared origin, so this checkout can answer for it.
+				_, branch, _ = e.db.GetTaskRemoteWorktree(task.ID)
 			}
-			if err := e.db.UpdateTaskPRInfo(task.ID, merged.URL, merged.Number, github.MarshalPRInfo(&merged)); err != nil {
-				e.logger.Warn("refreshActivePRInfo: failed to persist PR info", "task", task.ID, "error", err)
+			repoDir := e.getProjectDir(task.Project)
+			if branch == "" || repoDir == "" {
+				continue
 			}
+			tasks[task.ID] = task
+			targets = append(targets, github.PRTarget{TaskID: task.ID, RepoDir: repoDir, Branch: branch, Known: known})
 		}
 	}
+	return targets, tasks
+}
+
+// promoteReviewTask moves a blocked "PR ready for review" task to 'done' once its
+// PR has merged or closed.
+//
+// Idempotency: each promotion is recorded against the PR number via
+// MarkPRAutoCompleted. If a human reopens an already-completed task to keep working
+// against the same merged/closed PR, it will not bounce straight back to 'done' —
+// only a genuinely new PR (different number) can auto-complete it again.
+func (e *Executor) promoteReviewTask(task *db.Task, info *github.PRInfo) {
+	if task.Status != db.StatusBlocked || task.PRNumber <= 0 || !shouldPromoteReviewTask(info) {
+		return
+	}
+	if done, _ := e.db.WasPRAutoCompleted(task.ID, info.Number); done {
+		return
+	}
+
+	verb := "merged"
+	if info.State == github.PRStateClosed {
+		verb = "closed"
+	}
+	if err := e.db.MarkPRAutoCompleted(task.ID, info.Number); err != nil {
+		e.logger.Warn("promoteReviewTask: failed to record auto-done marker", "task", task.ID, "error", err)
+	}
+	e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("PR #%d %s — task auto-completed.", info.Number, verb))
+	if err := e.db.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
+		e.logger.Error("promoteReviewTask: failed to mark task done", "task", task.ID, "error", err)
+		return
+	}
+	e.logger.Info("Auto-completed reviewed task", "task", task.ID, "pr", info.Number, "state", verb)
 }
 
 // suspendIdleBlockedTasks finds blocked tasks that have been idle and suspends their Claude processes.
@@ -6474,13 +6421,13 @@ func (e *Executor) getDefaultBranch(projectDir string) string {
 
 // updateTaskPRInfo fetches and updates PR information for a task if a PR exists for the branch.
 func (e *Executor) updateTaskPRInfo(task *db.Task, projectDir string) {
-	if task.BranchName == "" || e.prCache == nil {
+	if task.BranchName == "" {
 		return
 	}
 
-	// Fetch PR info for the branch
-	prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
-	if prInfo != nil {
+	// A failed lookup leaves the stored PR info alone.
+	prInfo, err := github.LookupPR(context.Background(), projectDir, task.BranchName)
+	if err == nil && prInfo != nil {
 		task.PRURL = prInfo.URL
 		task.PRNumber = prInfo.Number
 		task.PRInfoJSON = github.MarshalPRInfo(prInfo)

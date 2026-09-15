@@ -23,7 +23,7 @@ func refreshTestModel(t *testing.T) (*AppModel, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
-	return &AppModel{db: database, currentView: ViewDashboard, kanban: NewKanbanBoard(100, 40), keys: DefaultKeyMap(), prevStatuses: map[int64]string{}, tasksNeedingInput: map[int64]bool{}, questionPrompts: map[int64]bool{}, executorPrompts: map[int64]string{}, initialPRRefreshDone: true}, marker
+	return &AppModel{db: database, currentView: ViewDashboard, kanban: NewKanbanBoard(100, 40), keys: DefaultKeyMap(), prevStatuses: map[int64]string{}, tasksNeedingInput: map[int64]bool{}, questionPrompts: map[int64]bool{}, executorPrompts: map[int64]string{}}, marker
 }
 
 func TestDashboardRefreshRunsProcessChecksInCommand(t *testing.T) {
