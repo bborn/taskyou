@@ -376,6 +376,12 @@ export function DetailView({ taskId }: { taskId: number }) {
               <span className="text-xs text-muted-foreground">No description</span>
             ))}
 
+          {/* Everything below is desktop-only. On a phone the detail view is
+              the thread and nothing else: scrolling past the conversation used
+              to land you in Placement / Dependencies / Attachments — config
+              panels and diagnostics — instead of ending at the composer. */}
+          {!isMobile && (
+            <>
           {task.summary && !task.stand && (
             <>
               <SectionTitle>Summary</SectionTitle>
@@ -427,7 +433,7 @@ export function DetailView({ taskId }: { taskId: number }) {
           <AttachmentsPanel taskId={task.id} />
 
           {/* Desktop keeps it in place; the phone hoists it to the top. */}
-          {!isMobile && conversationSection}
+          {conversationSection}
 
           <SectionTitle onClick={() => setShowLogs(!showLogs)}>
             {showLogs ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
@@ -442,6 +448,8 @@ export function DetailView({ taskId }: { taskId: number }) {
             </div>
             <LogList logs={displayedLogs} follow={history === null} />
           </>}
+            </>
+          )}
         </div>
 
         {/* A phone gets a reply box where the desktop gets the live terminal:
