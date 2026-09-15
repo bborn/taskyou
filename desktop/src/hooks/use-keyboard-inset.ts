@@ -174,6 +174,11 @@ export function useVisualViewportShell(
   }, [shellRef, enabled]);
 }
 
+/** Set on the sheet panel itself, and read by its max-height. Mirrors bb's
+ * `--bb-drawer-keyboard-inset`: the element that moves also declares how much
+ * shorter it has to be. */
+export const SHEET_KEYBOARD_INSET_PROPERTY = "--ty-sheet-keyboard-inset";
+
 /** bb's second layer: a bottom sheet sets its OWN `bottom` to the measured
  * overlap. The shell resize handles the page; this handles a panel that is
  * fixed to the viewport bottom and would otherwise sit under the keys. */
@@ -198,10 +203,14 @@ export function useSheetKeyboardInset(
     if (!panel || !open || !visualViewport) return;
 
     let frame: number | null = null;
+    function reset() {
+      panel!.style.bottom = "";
+      panel!.style.removeProperty(SHEET_KEYBOARD_INSET_PROPERTY);
+    }
     function apply() {
       frame = null;
       if (visualViewport!.scale !== 1) {
-        panel!.style.bottom = "";
+        reset();
         return;
       }
       const overlap = measureKeyboardOverlap(
@@ -209,7 +218,16 @@ export function useSheetKeyboardInset(
         visualViewport!.height,
         visualViewport!.offsetTop,
       );
-      panel!.style.bottom = overlap === 0 ? "" : `${overlap}px`;
+      if (overlap === 0) {
+        reset();
+        return;
+      }
+      // Both, as bb does. `bottom` lifts the panel clear of the keys; the
+      // property shrinks its max-height by the same amount. Lifting alone just
+      // pushes the panel's own content off the top of the screen — which is
+      // what was cutting the project list off mid-row.
+      panel!.style.bottom = `${overlap}px`;
+      panel!.style.setProperty(SHEET_KEYBOARD_INSET_PROPERTY, `${overlap}px`);
     }
     function schedule() {
       if (frame !== null) window.cancelAnimationFrame(frame);
@@ -223,7 +241,7 @@ export function useSheetKeyboardInset(
       visualViewport.removeEventListener("resize", schedule);
       visualViewport.removeEventListener("scroll", schedule);
       if (frame !== null) window.cancelAnimationFrame(frame);
-      panel.style.bottom = "";
+      reset();
     };
   }, [panelRef, open]);
 }
