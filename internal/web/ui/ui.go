@@ -24,8 +24,14 @@ func Available() bool {
 	return available
 }
 
-const placeholder = `<!doctype html><html><head><title>TaskYou</title></head>
-<body style="font-family: system-ui; background:#16161e; color:#c0caf5; display:flex; align-items:center; justify-content:center; height:100vh; margin:0">
+// The viewport meta and dvh height keep this readable on a phone, which is
+// where an unconfigured `ty serve` is most often first opened.
+const placeholder = `<!doctype html><html><head><title>TaskYou</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+</head>
+<body style="font-family: system-ui; background:#16161e; color:#c0caf5; display:flex; align-items:center; justify-content:center; min-height:100dvh; margin:0; padding:1.5rem; box-sizing:border-box; line-height:1.5">
 <div style="max-width:32rem">
 <h1>TaskYou API</h1>
 <p>This build of <code>ty</code> doesn't include the web UI.</p>

@@ -136,7 +136,7 @@ function RetryDialog({ taskId }: { taskId: number }) {
             Cancel
           </Button>
           <Button onClick={() => void submit()}>
-            Send & resume <span className="kbd ml-1">⌘↩</span>
+            Send & resume <span className="kbd ml-1 hidden sm:inline">⌘↩</span>
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -219,7 +219,7 @@ function HelpDialog() {
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
         </DialogHeader>
-        <div className="grid grid-cols-[auto_1fr_auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+        <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px] sm:grid-cols-[auto_1fr_auto_1fr]">
           {HELP.map(([key, desc]) => (
             <KeyRow key={key} k={key} desc={desc} />
           ))}

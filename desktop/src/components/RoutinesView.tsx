@@ -83,8 +83,8 @@ export function RoutinesView() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-5">
-      <div className="mb-3 flex items-center gap-2">
+    <div className="flex-1 overflow-y-auto px-4 py-5 md:px-6">
+      <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1">
         <h2 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
           Routines
         </h2>
@@ -92,7 +92,13 @@ export function RoutinesView() {
           unattended agent runs · defined in ~/.config/task/routines
         </span>
         <div className="flex-1" />
-        <Button variant="ghost" size="icon" className="size-7" title="Refresh" onClick={() => void reload()}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-9 md:size-7"
+          title="Refresh"
+          onClick={() => void reload()}
+        >
           <RefreshCw className="size-4" />
         </Button>
       </div>
@@ -100,15 +106,20 @@ export function RoutinesView() {
       {error && <div className="text-sm text-destructive">{error}</div>}
       {routines && routines.length === 0 && (
         <div className="rounded-lg border px-4 py-8 text-center text-sm text-muted-foreground">
-          No routines yet — create one with{" "}
-          <code className="kbd">ty routines new &lt;name&gt;</code>
+          No routines yet — create one with
+          {/* Own line: the command is wider than a phone's content column, so
+              inlining it pushed half of it past the card's edge. */}
+          <code className="kbd mt-2 block w-fit mx-auto">ty routines new &lt;name&gt;</code>
         </div>
       )}
 
       {routines && routines.length > 0 && (
         <div className="divide-y rounded-lg border">
           {routines.map((routine) => (
-            <div key={routine.name} className="flex items-center gap-3 px-3 py-2.5 text-[12.5px]">
+            <div
+              key={routine.name}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5 text-[12.5px]"
+            >
               <span className="font-medium">{routine.name}</span>
               {routine.disabled && (
                 <Badge variant="outline" className="h-4.5 px-1.5 text-[10px] text-muted-foreground">
@@ -138,13 +149,13 @@ export function RoutinesView() {
                   {routine.last_run.status}
                 </Badge>
               )}
-              <span className="w-32 text-right text-[11px] tabular-nums text-muted-foreground">
+              <span className="text-[11px] tabular-nums text-muted-foreground md:w-32 md:text-right">
                 {lastRunSummary(routine)}
               </span>
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-6"
+                className="size-8 md:size-6"
                 title="View latest run log"
                 disabled={!routine.last_run}
                 onClick={() => void viewLog(routine)}
@@ -154,7 +165,7 @@ export function RoutinesView() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-6"
+                className="size-8 md:size-6"
                 title={routine.disabled ? "Routine is disabled" : "Run now"}
                 disabled={routine.disabled || routine.last_run?.status === "running"}
                 onClick={() => void runNow(routine.name)}
@@ -171,7 +182,7 @@ export function RoutinesView() {
           <DialogHeader>
             <DialogTitle className="text-sm">{log?.title}</DialogTitle>
           </DialogHeader>
-          <pre className="max-h-[60vh] select-text overflow-auto rounded-md border bg-surface-2 p-3 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap">
+          <pre className="max-h-[60dvh] select-text overflow-auto rounded-md border bg-surface-2 p-3 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap">
             {log?.text}
           </pre>
         </DialogContent>

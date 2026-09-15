@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
+import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2, SquareTerminal } from "lucide-react";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
 import type { Dependencies, LogLine, Task } from "../api/types";
 import { openExternal, openInEditor } from "../tauri";
 import { store, useAppState } from "../store";
+import { useIsMobile } from "../lib/responsive";
 import { PlacementPanel } from "./PlacementPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { LogList } from "./LogList";
@@ -77,7 +78,7 @@ function AddBlockerInput({ taskId, onAdded }: { taskId: number; onAdded: () => v
 
   return (
     <Input
-      className="mt-1 h-6 w-28 text-xs"
+      className="mt-1 h-9 w-36 md:h-6 md:w-28 md:text-xs"
       value={value}
       placeholder="block on #id"
       onChange={(e) => setValue(e.target.value)}
@@ -104,6 +105,12 @@ export function DetailView({ taskId }: { taskId: number }) {
   const splitRef = useRef<HTMLDivElement>(null);
   const [terminalHeight, setTerminalHeight] = useState(storedTerminalHeight);
   const [resizing, setResizing] = useState(false);
+
+  // A phone has no room to keep a terminal permanently open — the default
+  // 320px split left a sliver of task body above it — so on mobile the pane
+  // collapses behind a toggle and unmounts, dropping its socket with it.
+  const isMobile = useIsMobile();
+  const [terminalOpen, setTerminalOpen] = useState(false);
 
   const onDividerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -191,97 +198,125 @@ export function DetailView({ taskId }: { taskId: number }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-4 py-2.5">
-        <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
-          {task.status}
-        </Badge>
-        <span className="font-mono text-[11px] text-muted-foreground">#{task.id}</span>
-        <span className="max-w-[44ch] truncate text-sm font-semibold" title={task.title}>
-          {task.title}
-        </span>
-        {task.pinned && <Pin className="size-3.5 text-amber-300" />}
-        {task.permission_mode && task.permission_mode !== "default" && (
-          <Badge
-            variant={task.permission_mode === "dangerous" ? "destructive" : "outline"}
-            title="Permission mode"
-          >
-            {task.permission_mode}
+      {/* Header. On a phone the identity line and the action row each take a
+          full row — wrapping them together dropped Status off the screen — and
+          the actions scroll sideways rather than stacking into a wall. */}
+      <div className="flex shrink-0 flex-col gap-2 border-b bg-surface-1 px-3 py-2.5 md:flex-row md:flex-wrap md:items-center md:px-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
+            {task.status}
           </Badge>
-        )}
-
-        <div className="flex-1" />
-
-        <Select
-          value={task.executor || "claude"}
-          onValueChange={async (v) => {
-            await api.updateTask(task.id, { executor: v }).catch(() => {});
-            void store.refreshTasks();
-          }}
-        >
-          <SelectTrigger size="sm" className="w-32" title="Executor">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
-              (ex) => (
-                <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
-                  {ex.name}
-                  {ex.available ? "" : " (not installed)"}
-                </SelectItem>
-              ),
-            )}
-          </SelectContent>
-        </Select>
-
-        {blocked ? (
-          <Button size="sm" onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}>
-            Reply
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            disabled={task.status === "processing" || task.status === "queued"}
-            onClick={() => void store.executeTask(task.id)}
+          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">#{task.id}</span>
+          <span
+            className="min-w-0 flex-1 truncate text-sm font-semibold md:max-w-[44ch] md:flex-none"
+            title={task.title}
           >
-            Execute
-          </Button>
-        )}
-        <Button variant="outline" size="sm" onClick={() => store.setForm({ kind: "edit", taskId: task.id })}>
-          Edit
-        </Button>
-        {task.worktree_path && (
+            {task.title}
+          </span>
+          {task.pinned && <Pin className="size-3.5 shrink-0 text-amber-300" />}
+          {task.permission_mode && task.permission_mode !== "default" && (
+            <Badge
+              variant={task.permission_mode === "dangerous" ? "destructive" : "outline"}
+              title="Permission mode"
+            >
+              {task.permission_mode}
+            </Badge>
+          )}
+        </div>
+
+        <div className="hidden flex-1 md:block" />
+
+        <div className="scroll-strip -mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-0.5 md:mx-0 md:overflow-visible md:px-0 md:pb-0 md:contents">
+          {/* Executor is an occasional, typo-prone choice; on a phone it lives in
+              the edit form instead of the action row. */}
+          <Select
+            value={task.executor || "claude"}
+            onValueChange={async (v) => {
+              await api.updateTask(task.id, { executor: v }).catch(() => {});
+              void store.refreshTasks();
+            }}
+          >
+            <SelectTrigger size="sm" className="hidden w-32 md:flex" title="Executor">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+                (ex) => (
+                  <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                    {ex.name}
+                    {ex.available ? "" : " (not installed)"}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+
+          {blocked ? (
+            <Button
+              size="sm"
+              className="shrink-0"
+              onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}
+            >
+              Reply
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              className="shrink-0"
+              disabled={task.status === "processing" || task.status === "queued"}
+              onClick={() => void store.executeTask(task.id)}
+            >
+              Execute
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
-            title="Open worktree in editor (o)"
-            onClick={() => void openInEditor(task.worktree_path!)}
+            className="shrink-0"
+            onClick={() => store.setForm({ kind: "edit", taskId: task.id })}
           >
-            <Code2 className="size-3.5" /> Editor
+            Edit
           </Button>
-        )}
-        {task.pr_url && (
+          {task.worktree_path && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              title="Open worktree in editor (o)"
+              onClick={() => void openInEditor(task.worktree_path!)}
+            >
+              <Code2 className="size-3.5" /> Editor
+            </Button>
+          )}
+          {task.pr_url && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              title="Open PR (G)"
+              onClick={() => void openExternal(task.pr_url)}
+            >
+              <GitPullRequest className="size-3.5" />
+              {task.pr_number ? `#${task.pr_number}` : "PR"}
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
-            title="Open PR (G)"
-            onClick={() => void openExternal(task.pr_url)}
+            className="shrink-0"
+            title="Change status (S)"
+            onClick={() => store.setDialog({ kind: "status", taskId: task.id })}
           >
-            <GitPullRequest className="size-3.5" />
-            {task.pr_number ? `#${task.pr_number}` : "PR"}
+            Status
           </Button>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          title="Change status (S)"
-          onClick={() => store.setDialog({ kind: "status", taskId: task.id })}
-        >
-          Status
-        </Button>
+        </div>
       </div>
+      {/* The agent's current stand. A phone gets two lines of it: the one-line
+          truncation that fits a wide window cuts this off mid-question, and the
+          question is usually why the task was opened at all. */}
       {task.stand && (
         <div
-          className={`shrink-0 truncate border-b bg-surface-1 px-4 py-1.5 text-[12.5px] ${
+          className={`line-clamp-2 shrink-0 border-b bg-surface-1 px-3 py-1.5 text-[12.5px] md:line-clamp-none md:truncate md:px-4 ${
             blocked ? "text-status-blocked" : "text-muted-foreground"
           }`}
           title={task.stand}
@@ -291,7 +326,7 @@ export function DetailView({ taskId }: { taskId: number }) {
       )}
 
       <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-        <div className="min-h-[140px] flex-1 overflow-y-auto px-5 py-3.5 select-text">
+        <div className="min-h-[140px] flex-1 overflow-y-auto overscroll-contain px-4 py-3.5 select-text md:px-5">
           {task.body ? (
             <Markdown source={task.body} />
           ) : (
@@ -363,32 +398,58 @@ export function DetailView({ taskId }: { taskId: number }) {
           </>}
         </div>
 
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          title="Drag to resize · double-click to reset"
-          className="group relative z-10 -my-1 h-2.5 shrink-0 cursor-row-resize touch-none"
-          onPointerDown={onDividerPointerDown}
-          onPointerMove={onDividerPointerMove}
-          onPointerUp={onDividerPointerUp}
-          onPointerCancel={onDividerPointerUp}
-          onDoubleClick={resetTerminalHeight}
-        >
-          <div
-            className={`pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-[background-color,height] ${
-              resizing
-                ? "h-[3px] bg-status-backlog"
-                : "h-px bg-border group-hover:h-[3px] group-hover:bg-status-backlog/60"
-            }`}
-          />
-        </div>
+        {isMobile ? (
+          <>
+            <button
+              type="button"
+              className="flex shrink-0 items-center gap-1.5 border-t bg-surface-1 px-4 py-3 text-left text-[12px] font-medium text-muted-foreground"
+              aria-expanded={terminalOpen}
+              onClick={() => setTerminalOpen((open) => !open)}
+            >
+              {terminalOpen ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+              <SquareTerminal className="size-3.5" />
+              Terminal
+            </button>
+            {terminalOpen && (
+              <div className="flex h-[55dvh] min-h-[180px] shrink-0 flex-col border-t">
+                <TerminalPane task={task} />
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              title="Drag to resize · double-click to reset"
+              className="group relative z-10 -my-1 h-2.5 shrink-0 cursor-row-resize touch-none"
+              onPointerDown={onDividerPointerDown}
+              onPointerMove={onDividerPointerMove}
+              onPointerUp={onDividerPointerUp}
+              onPointerCancel={onDividerPointerUp}
+              onDoubleClick={resetTerminalHeight}
+            >
+              <div
+                className={`pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-[background-color,height] ${
+                  resizing
+                    ? "h-[3px] bg-status-backlog"
+                    : "h-px bg-border group-hover:h-[3px] group-hover:bg-status-backlog/60"
+                }`}
+              />
+            </div>
 
-        <div
-          className="flex min-h-[140px] flex-col"
-          style={{ height: terminalHeight, maxHeight: "calc(100% - 140px)" }}
-        >
-          <TerminalPane task={task} />
-        </div>
+            <div
+              className="flex min-h-[140px] flex-col"
+              style={{ height: terminalHeight, maxHeight: "calc(100% - 140px)" }}
+            >
+              <TerminalPane task={task} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

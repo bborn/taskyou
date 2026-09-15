@@ -1,17 +1,19 @@
 import type { Task, TaskStatus } from "../api/types";
-import { fuzzyMatches } from "./fuzzy";
+import { fuzzyMatches } from "./fuzzy.ts";
 
 export interface Column {
   status: TaskStatus;
   label: string;
+  /** Label for narrow (phone) chrome, where four tabs share one row. */
+  shortLabel: string;
   tasks: Task[];
 }
 
-export const COLUMN_DEFS: { status: TaskStatus; label: string }[] = [
-  { status: "backlog", label: "Backlog" },
-  { status: "processing", label: "In Progress" },
-  { status: "blocked", label: "Blocked" },
-  { status: "done", label: "Done" },
+export const COLUMN_DEFS: { status: TaskStatus; label: string; shortLabel: string }[] = [
+  { status: "backlog", label: "Backlog", shortLabel: "Backlog" },
+  { status: "processing", label: "In Progress", shortLabel: "Running" },
+  { status: "blocked", label: "Blocked", shortLabel: "Blocked" },
+  { status: "done", label: "Done", shortLabel: "Done" },
 ];
 
 function referenceTime(task: Task): number {
@@ -84,14 +86,30 @@ export function buildColumns(tasks: Task[]): Column[] {
     grouped.set(status, list);
   }
 
-  return COLUMN_DEFS.map(({ status, label }) => {
+  return COLUMN_DEFS.map(({ status, label, shortLabel }) => {
     const columnTasks = (grouped.get(status) ?? []).slice();
     columnTasks.sort((a, b) => {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       return referenceTime(b) - referenceTime(a);
     });
-    return { status, label, tasks: columnTasks };
+    return { status, label, shortLabel, tasks: columnTasks };
   });
+}
+
+export interface TaskPosition {
+  col: number;
+  row: number;
+}
+
+/** Where a task sits on the board, or null when it is filtered out. Shared by
+ * keyboard navigation (desktop) and the phone board's active tab. */
+export function findTaskPosition(columns: Column[], taskId: number | null): TaskPosition | null {
+  if (taskId === null) return null;
+  for (let col = 0; col < columns.length; col++) {
+    const row = columns[col].tasks.findIndex((t) => t.id === taskId);
+    if (row >= 0) return { col, row };
+  }
+  return null;
 }
 
 export function ageHint(task: Task): string {

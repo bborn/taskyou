@@ -124,7 +124,10 @@
   html,
   body,
   #root {
-    height: 100%;
+    /* dvh over vh/%: mobile browsers shrink the visual viewport as the URL bar
+       collapses, and a percentage height would leave the shell taller than the
+       screen with its bottom row permanently out of reach. */
+    height: 100dvh;
   }
   html {
     /* Opaque by default (browser, Linux); the macOS desktop shell clears
@@ -134,6 +137,9 @@
   body {
     background: transparent;
     @apply text-foreground font-sans text-[13px] antialiased select-none overflow-hidden overscroll-none;
+    /* No grey flash on tap, and no 300ms click delay on touch. */
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
   }
   input,
   textarea {
@@ -146,6 +152,29 @@
      (dialogs, popovers, toasts) uses opaque tokens and stays readable. */
   .app-shell {
     background: color-mix(in oklab, var(--background) 86%, transparent);
+  }
+
+  /* --- Safe areas. With viewport-fit=cover the shell paints edge to edge, so
+     the chrome that sits against an edge re-adds the inset itself. All four
+     resolve to 0 on desktop, where they are inert. --- */
+  .safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .safe-x {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+
+  /* Horizontal strips (board tabs, detail actions) that scroll on a phone and
+     sit still on a desktop. The scrollbar would cover a row this short. */
+  .scroll-strip {
+    scrollbar-width: none;
+  }
+  .scroll-strip::-webkit-scrollbar {
+    display: none;
   }
 
   /* --- Markdown --- */
@@ -216,6 +245,17 @@
 [data-slot="alert-dialog-overlay"],
 [data-slot="select-content"] {
   animation-duration: 120ms !important;
+}
+
+/* iOS zooms the whole page when a focused field renders under 16px. Unlayered
+   so it also wins over the `text-xs`/`text-sm` utilities individual fields set;
+   the `md:` variants take back over on a desktop width. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 ::-webkit-scrollbar {

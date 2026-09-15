@@ -174,7 +174,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           <DialogTitle>{form.kind === "new" ? "New task" : `Edit #${editing?.id}`}</DialogTitle>
         </DialogHeader>
 
-        <div className="flex max-h-[62vh] flex-col gap-3.5 overflow-y-auto pr-1">
+        <div className="flex max-h-[60dvh] flex-col gap-3.5 overflow-y-auto pr-1">
           <div className="grid gap-1.5">
             <Label>Project</Label>
             <Select value={project || NONE} onValueChange={(v) => setProject(fromSelect(v))}>
@@ -252,7 +252,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label>Type</Label>
               <Select value={type || NONE} onValueChange={(v) => setType(fromSelect(v))}>
@@ -295,7 +295,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
             {showAdvanced ? "▾" : "▸"} Advanced
           </button>
           {showAdvanced && (
-            <div className="grid grid-cols-2 gap-3.5">
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <Label>Effort</Label>
                 <Select value={toSelect(effort)} onValueChange={(v) => setEffort(fromSelect(v))}>
@@ -330,9 +330,12 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           )}
         </div>
 
-        <DialogFooter className="items-center">
+        {/* Stacked on a phone: the checkbox reads as a setting above the
+            buttons rather than a stray row underneath them, and each button is
+            a full-width thumb target. */}
+        <DialogFooter className="flex-col sm:flex-row sm:items-center">
           {form.kind === "new" && (
-            <div className="mr-auto flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:mr-auto">
               <Checkbox
                 id="execute-now"
                 checked={executeNow}
@@ -343,12 +346,12 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
               </Label>
             </div>
           )}
-          <Button variant="outline" onClick={close}>
+          <Button variant="outline" className="w-full sm:w-auto" onClick={close}>
             Cancel
           </Button>
-          <Button disabled={saving} onClick={() => void submit()}>
+          <Button disabled={saving} className="w-full sm:w-auto" onClick={() => void submit()}>
             {saving ? "Saving…" : form.kind === "new" ? "Create" : "Save"}
-            <span className="kbd ml-1">⌘S</span>
+            <span className="kbd ml-1 hidden sm:inline">⌘S</span>
           </Button>
         </DialogFooter>
       </DialogContent>

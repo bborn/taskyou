@@ -26,7 +26,7 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 
 export function SettingsView() {
   return (
-    <div className="max-w-3xl flex-1 overflow-y-auto px-6 py-5">
+    <div className="max-w-3xl flex-1 overflow-y-auto px-4 py-5 md:px-6">
       <ConnectionSettings />
       <ProjectSettings />
       <TypeSettings />
@@ -57,7 +57,7 @@ function ConnectionSettings() {
   return (
     <>
       <SectionHeading>Connection</SectionHeading>
-      <div className="grid grid-cols-2 gap-3.5">
+      <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
         <div className="grid gap-1.5">
           <Label>API port</Label>
           <Input value={port} onChange={(e) => setPort(e.target.value)} />
@@ -126,18 +126,20 @@ function ProjectSettings() {
       <SectionHeading>Projects</SectionHeading>
       <div className="divide-y rounded-lg border">
         {projects.map((p) => (
-          <div key={p.name} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+          <div key={p.name} className="flex items-center gap-2 px-3 py-2 text-[12.5px] md:gap-3">
             <span
               className="inline-block size-2 shrink-0 rounded-full"
               style={{ background: p.color || "var(--muted-foreground)" }}
             />
-            <span className="font-medium">{p.name}</span>
-            <span className="truncate text-muted-foreground">{p.path}</span>
+            <span className="shrink-0 font-medium">{p.name}</span>
+            {/* The path is the first thing to go on a narrow row: the name
+                identifies the project and the row's controls must stay hit-able. */}
+            <span className="hidden truncate text-muted-foreground sm:block">{p.path}</span>
             <span className="ml-auto shrink-0 text-muted-foreground">{p.task_count} tasks</span>
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 px-2"
+              className="h-8 shrink-0 px-2.5 md:h-6 md:px-2"
               onClick={() => {
                 setEditing({ ...p });
                 setIsNew(false);
@@ -148,7 +150,7 @@ function ProjectSettings() {
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 px-2 text-destructive"
+              className="h-8 shrink-0 px-2.5 text-destructive md:h-6 md:px-2"
               onClick={() =>
                 store.setDialog({
                   kind: "confirm",
@@ -191,7 +193,7 @@ function ProjectSettings() {
           </DialogHeader>
           {editing && (
             <>
-          <div className="grid grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label>Name</Label>
               <Input
@@ -297,14 +299,14 @@ function TypeSettings() {
       <SectionHeading>Task types</SectionHeading>
       <div className="divide-y rounded-lg border">
         {types.map((t) => (
-          <div key={t.name} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+          <div key={t.name} className="flex items-center gap-2 px-3 py-2 text-[12.5px] md:gap-3">
             <span className="font-medium">{t.name}</span>
             <span className="text-muted-foreground">{t.label}</span>
             <div className="ml-auto" />
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 px-2"
+              className="h-8 shrink-0 px-2.5 md:h-6 md:px-2"
               onClick={() => {
                 setEditing({ ...t });
                 setIsNew(false);
@@ -316,7 +318,7 @@ function TypeSettings() {
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-6 px-2 text-destructive"
+                className="h-8 shrink-0 px-2.5 text-destructive md:h-6 md:px-2"
                 onClick={() =>
                   store.setDialog({
                     kind: "confirm",
@@ -357,7 +359,7 @@ function TypeSettings() {
           </DialogHeader>
           {editing && (
             <>
-          <div className="grid grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label>Name</Label>
               <Input

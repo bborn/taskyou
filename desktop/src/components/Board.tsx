@@ -3,7 +3,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check, Clock, GitMerge, GitPullRequest, GitPullRequestClosed, Pin, X } from "lucide-react";
 import { api } from "../api/client";
 import type { LogLine, PRStatus, Task } from "../api/types";
-import { ageHint, type Column } from "../lib/board";
+import { ageHint, findTaskPosition, type Column } from "../lib/board";
+import { useIsMobile } from "../lib/responsive";
 import { store, useAppSelector } from "../store";
 import { checkEnvironment, inTauri } from "../tauri";
 import { cn } from "@/lib/utils";
@@ -135,6 +136,9 @@ interface CardProps {
   selected: boolean;
   projectColor: string;
   latest: LogLine | undefined;
+  /** Phone layout: one tap opens the task (there is no double-tap-to-open and
+   * no drag-and-drop), and the card gets thumb-sized padding. */
+  touch: boolean;
 }
 
 /** Field-level equality: API refreshes return fresh objects every time, so
@@ -144,6 +148,7 @@ function cardPropsEqual(prev: CardProps, next: CardProps): boolean {
   const b = next.task;
   return (
     prev.selected === next.selected &&
+    prev.touch === next.touch &&
     prev.projectColor === next.projectColor &&
     prev.latest?.id === next.latest?.id &&
     a.id === b.id &&
@@ -195,7 +200,13 @@ function cardSubLine(task: Task, latest?: LogLine): { text: string; title?: stri
   return { text: ageHint(task) };
 }
 
-const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }: CardProps) {
+const CardSlot = memo(function CardSlot({
+  task,
+  selected,
+  projectColor,
+  latest,
+  touch,
+}: CardProps) {
   const ref = useRef<HTMLDivElement>(null);
   const spinner = useSpinner(task.status === "processing");
 
@@ -218,27 +229,37 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
     >
       <div
         ref={ref}
-        draggable
+        role={touch ? "button" : undefined}
+        tabIndex={touch ? 0 : undefined}
+        draggable={!touch}
         onDragStart={(e) => {
           e.dataTransfer.setData("text/x-task-id", String(task.id));
           e.dataTransfer.effectAllowed = "move";
           store.selectTask(task.id);
         }}
         className={cn(
-          "group flex flex-col gap-1 rounded-lg border bg-card px-2.5 py-2 shadow-xs transition-[box-shadow,border-color,background-color] duration-100",
+          "group flex flex-col gap-1 rounded-lg border bg-card shadow-xs transition-[box-shadow,border-color,background-color] duration-100",
           "hover:shadow-md hover:border-foreground/15",
-          "active:cursor-grabbing",
+          touch ? "px-3 py-2.5 active:bg-surface-2" : "px-2.5 py-2 active:cursor-grabbing",
           selected && "border-ring ring-1 ring-ring",
         )}
-        onClick={() => store.selectTask(task.id)}
+        onClick={() => (touch ? store.openDetail(task.id) : store.selectTask(task.id))}
         onDoubleClick={() => store.openDetail(task.id)}
+        onKeyDown={(e) => {
+          // The card is only focusable in the touch layout; there, board-level
+          // arrow-key navigation is off, so it answers for itself.
+          if (touch && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            store.openDetail(task.id);
+          }
+        }}
       >
         <div className="flex items-baseline gap-1.5">
           {task.status === "processing" && (
             <span className="w-3 shrink-0 font-mono text-status-processing">{spinner}</span>
           )}
           <span className="shrink-0 font-mono text-[11px] text-muted-foreground">#{task.id}</span>
-          <span className="line-clamp-2 text-[12.5px] leading-snug">
+          <span className={cn("line-clamp-2 leading-snug", touch ? "text-[13.5px]" : "text-[12.5px]")}>
             {task.title || "(untitled)"}
           </span>
         </div>
@@ -246,6 +267,20 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
           <span title={subLine.title}>{subLine.text}</span>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* Answering a waiting agent is why you open this on a phone; the
+              card offers it directly rather than through the detail view. */}
+          {touch && needsInput && (
+            <button
+              type="button"
+              className="mr-0.5 rounded-md border border-status-blocked/60 px-2 py-1 text-[11px] font-medium text-status-blocked active:bg-status-blocked/10"
+              onClick={(e) => {
+                e.stopPropagation();
+                store.setDialog({ kind: "retry", taskId: task.id });
+              }}
+            >
+              Reply
+            </button>
+          )}
           {task.pinned && <Pin className="size-3 text-amber-500 dark:text-amber-300" />}
           {task.project && (
             <span className="text-[10px] font-medium" style={{ color: projectColor }}>
@@ -257,7 +292,7 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
               queued
             </Badge>
           )}
-          {needsInput && (
+          {needsInput && !touch && (
             <Badge
               variant="outline"
               className="h-4 border-status-blocked/60 px-1.5 text-[10px] text-status-blocked"
@@ -277,7 +312,15 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
   );
 }, cardPropsEqual);
 
-function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean }) {
+function BoardColumn({
+  column,
+  collapsed,
+  touch = false,
+}: {
+  column: Column;
+  collapsed: boolean;
+  touch?: boolean;
+}) {
   const selectedTaskId = useAppSelector((s) => s.selectedTaskId);
   const projects = useAppSelector((s) => s.projects);
   const latestLogs = useAppSelector((s) => s.latestLogs);
@@ -314,7 +357,12 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
   return (
     <div
       className={cn(
-        "flex min-w-[230px] flex-1 flex-col rounded-xl border bg-surface-1 transition-colors duration-100",
+        "flex min-h-0 flex-1 flex-col transition-colors duration-100",
+        // The phone board shows one column at a time, so it drops the framing
+        // border entirely. On the desktop board the 230px floor now applies
+        // only from `lg` up: below that the four columns share a tablet's
+        // width rather than forcing the whole board to scroll sideways.
+        touch ? "min-w-0" : "min-w-0 rounded-xl border bg-surface-1 lg:min-w-[230px]",
         dragOver && "border-ring/60 bg-surface-2 ring-1 ring-ring/40",
       )}
       onDragOver={(e) => {
@@ -332,21 +380,29 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
         if (id) store.moveTaskToColumn(id, column.status);
       }}
     >
-      <div className="flex items-center gap-2 border-b px-3 py-2.5">
-        <span className={cn("size-1.5 rounded-full", COLUMN_DOT[column.status])} />
-        <span
-          className={cn(
-            "text-[11px] font-semibold uppercase tracking-wider",
-            COLUMN_ACCENT[column.status],
-          )}
-        >
-          {column.label}
-        </span>
-        <span className="rounded-full bg-surface-3 px-1.5 text-[10px] tabular-nums text-muted-foreground">
-          {column.tasks.length}
-        </span>
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
+      {/* The phone layout names the column in its tab strip instead. */}
+      {!touch && (
+        <div className="flex items-center gap-2 border-b px-3 py-2.5">
+          <span className={cn("size-1.5 rounded-full", COLUMN_DOT[column.status])} />
+          <span
+            className={cn(
+              "text-[11px] font-semibold uppercase tracking-wider",
+              COLUMN_ACCENT[column.status],
+            )}
+          >
+            {column.label}
+          </span>
+          <span className="rounded-full bg-surface-3 px-1.5 text-[10px] tabular-nums text-muted-foreground">
+            {column.tasks.length}
+          </span>
+        </div>
+      )}
+      <div
+        className={cn(
+          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain",
+          touch ? "safe-x px-3 pb-6 pt-3" : "p-2",
+        )}
+      >
         {column.tasks.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-muted-foreground">
             {emptyMessage(column.status)}
@@ -357,7 +413,8 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
               <CardSlot
                 key={task.id}
                 task={task}
-                selected={task.id === selectedTaskId}
+                touch={touch}
+                selected={!touch && task.id === selectedTaskId}
                 projectColor={
                   projects.find((p) => p.name === task.project)?.color || "var(--muted-foreground)"
                 }
@@ -375,6 +432,68 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Phone board: the four columns become one tab strip over a single full-width
+ * list. Horizontally scrolling a four-column kanban on a 390px screen hid three
+ * quarters of the board — including, usually, the tasks waiting on a reply. */
+function MobileBoard({ columns }: { columns: Column[] }) {
+  const selectedTaskId = useAppSelector((s) => s.selectedTaskId);
+  const [active, setActive] = useState(0);
+  const followed = useRef<number | null>(null);
+
+  // Follow the selection in: opening a task from search, or coming back from a
+  // detail view, should land on the tab that task actually lives in. Only when
+  // the selection itself changes, though — `columns` is a fresh array on every
+  // SSE tick, and re-running on that would drag the user off whatever tab they
+  // just picked a second or two after they picked it.
+  useEffect(() => {
+    if (selectedTaskId === followed.current) return;
+    followed.current = selectedTaskId;
+    const pos = findTaskPosition(columns, selectedTaskId);
+    if (pos) setActive(pos.col);
+  }, [columns, selectedTaskId]);
+
+  const current = columns[Math.min(active, columns.length - 1)];
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        role="tablist"
+        aria-label="Board columns"
+        className="scroll-strip flex shrink-0 gap-1 overflow-x-auto border-b bg-surface-1 px-2 py-1.5"
+      >
+        {columns.map((column, i) => (
+          <button
+            key={column.status}
+            role="tab"
+            aria-selected={i === active}
+            className={cn(
+              "flex shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-[12px] font-medium transition-colors",
+              i === active ? "bg-surface-3 text-foreground" : "text-muted-foreground",
+            )}
+            onClick={() => setActive(i)}
+          >
+            <span className={cn("size-1.5 rounded-full", COLUMN_DOT[column.status])} />
+            {column.shortLabel}
+            <span
+              className={cn(
+                "tabular-nums",
+                // A waiting task is the reason to pick the phone up, so its
+                // count stays lit even when the tab is not selected.
+                column.status === "blocked" && column.tasks.length > 0
+                  ? "font-semibold text-status-blocked"
+                  : "text-muted-foreground",
+              )}
+            >
+              {column.tasks.length}
+            </span>
+          </button>
+        ))}
+      </div>
+      <BoardColumn key={current.status} column={current} collapsed={false} touch />
     </div>
   );
 }
@@ -422,6 +541,16 @@ export function Board({
   collapsed: { backlog: boolean; done: boolean };
 }) {
   const noTasks = useAppSelector((s) => s.tasks.length === 0);
+  const isMobile = useIsMobile();
+
+  if (isMobile) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <MobileBoard columns={columns} />
+        {noTasks && <DetectedAgents />}
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

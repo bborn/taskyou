@@ -4,7 +4,7 @@ import { motion } from "motion/react";
 import { Plus, Search, Settings2, ChevronLeft, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
-import { applyFilter, buildColumns } from "./lib/board";
+import { applyFilter, buildColumns, findTaskPosition } from "./lib/board";
 import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
@@ -131,13 +131,10 @@ export default function App() {
   const columns = useMemo(() => buildColumns(filteredTasks), [filteredTasks]);
 
   // --- Selection helpers (shared by keyboard + board) ---
-  const selectionPos = useMemo(() => {
-    for (let c = 0; c < columns.length; c++) {
-      const r = columns[c].tasks.findIndex((t) => t.id === state.selectedTaskId);
-      if (r >= 0) return { col: c, row: r };
-    }
-    return null;
-  }, [columns, state.selectedTaskId]);
+  const selectionPos = useMemo(
+    () => findTaskPosition(columns, state.selectedTaskId),
+    [columns, state.selectedTaskId],
+  );
 
   function moveSelection(dCol: number, dRow: number) {
     const nonEmpty = (start: number, dir: number) => {
@@ -373,32 +370,66 @@ export default function App() {
   const permLabel = state.permissionMode === "" ? "default" : state.permissionMode;
 
   return (
-    <div className="app-shell flex h-full flex-col">
+    <div className="app-shell safe-bottom flex h-full flex-col">
       {/* Titlebar: overlay style — traffic lights sit in the left inset; the
           whole bar is a drag region. */}
       <header
         data-tauri-drag-region
-        className={`flex h-11 shrink-0 items-center gap-1.5 border-b bg-surface-1 pr-2 ${
-          inTauri() ? "pl-20" : "pl-3"
+        className={`safe-top safe-x flex shrink-0 items-center gap-1 border-b bg-surface-1 pr-1.5 md:gap-1.5 md:pr-2 ${
+          inTauri() ? "pl-20" : "pl-2 md:pl-3"
         }`}
       >
-        <img src={logoUrl} alt="" data-tauri-drag-region className="size-5 rounded" />
-        <span
-          data-tauri-drag-region
-          className="text-[13px] font-semibold tracking-tight text-foreground/90"
-          onDoubleClick={() => store.openBoard()}
-        >
-          TaskYou
-        </span>
-        {state.view.kind !== "board" && (
-          <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => store.openBoard()}>
-            <ChevronLeft data-no-drag /> Board
-          </Button>
-        )}
-        <div data-tauri-drag-region className="flex-1" />
+        <div className="flex h-12 flex-1 items-center gap-1 md:h-11 md:gap-1.5">
+          {state.view.kind === "board" ? (
+            <>
+              <img src={logoUrl} alt="" data-tauri-drag-region className="size-5 rounded" />
+              <span
+                data-tauri-drag-region
+                className="text-[13px] font-semibold tracking-tight text-foreground/90"
+                onDoubleClick={() => store.openBoard()}
+              >
+                TaskYou
+              </span>
+            </>
+          ) : (
+            // Off the board, the wordmark gives way to Back: on a phone every
+            // pixel of the bar is spoken for, and Back is the one control a
+            // touch user cannot reach any other way (there is no Esc key).
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-9 gap-1 px-2 md:h-7"
+                title="Back to board (Esc)"
+                onClick={() => store.openBoard()}
+              >
+                <ChevronLeft data-no-drag className="size-4" />
+                <span className="hidden sm:inline">Board</span>
+              </Button>
+              {/* The detail view prints its own title; these two otherwise
+                  arrive with nothing but a back arrow to say where you are. */}
+              {state.view.kind !== "detail" && (
+                <span className="truncate text-[13px] font-semibold tracking-tight text-foreground/90">
+                  {state.view.kind === "settings" ? "Settings" : "Routines"}
+                </span>
+              )}
+            </>
+          )}
+          <div data-tauri-drag-region className="flex-1" />
+        </div>
+        {/* On a phone the bar has room for icons only, so the default mode —
+            the one that carries no warning — steps aside. `auto` and
+            `dangerous` stay visible everywhere: they change what an execution
+            is allowed to do without asking. */}
         <Badge
           variant={state.permissionMode === "dangerous" ? "destructive" : "outline"}
-          className={state.permissionMode === "auto" ? "border-status-processing/50 text-status-processing" : ""}
+          className={
+            state.permissionMode === "auto"
+              ? "border-status-processing/50 text-status-processing"
+              : state.permissionMode === ""
+                ? "hidden sm:inline-flex"
+                : ""
+          }
           title="Permission mode for new executions (press !)"
           onClick={() => store.cyclePermissionMode()}
         >
@@ -407,17 +438,19 @@ export default function App() {
         <Button
           variant="ghost"
           size="sm"
-          className="h-7"
+          className="size-9 px-0 md:h-7 md:w-auto md:px-2.5"
           title="New task (n / ⌘N)"
+          aria-label="New task"
           onClick={() => store.setForm({ kind: "new" })}
         >
-          <Plus className="size-4" /> New
+          <Plus className="size-4" /> <span className="hidden md:inline">New</span>
         </Button>
         <Button
           variant="ghost"
           size="icon"
-          className="size-7"
+          className="size-9 md:size-7"
           title="Search (⌘P)"
+          aria-label="Search tasks"
           onClick={() => store.setPalette(true)}
         >
           <Search className="size-4" />
@@ -425,8 +458,9 @@ export default function App() {
         <Button
           variant="ghost"
           size="icon"
-          className="size-7"
+          className="size-9 md:size-7"
           title={`Theme: ${state.theme} (click to cycle)`}
+          aria-label={`Theme: ${state.theme}`}
           onClick={() => {
             const order = ["system", "light", "dark"] as const;
             store.setTheme(order[(order.indexOf(state.theme) + 1) % order.length]);
@@ -443,8 +477,9 @@ export default function App() {
         <Button
           variant="ghost"
           size="icon"
-          className="size-7"
+          className="size-9 md:size-7"
           title="Settings (⌘,)"
+          aria-label="Settings"
           onClick={() => store.openSettings()}
         >
           <Settings2 className="size-4" />
