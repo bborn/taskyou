@@ -953,15 +953,26 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 	defer database.Close()
 	defer os.Remove(dbPath)
 
-	// Test 1: NotificationHook should NOT change status for task without StartedAt
+	// Test 1: NotificationHook should NOT change status for a task that never started.
+	//
+	// The fixture is a QUEUED task, not a processing one. Since status became
+	// log-first, "the row says processing but the task never started" is a state
+	// that can no longer be constructed: reaching processing means an appended
+	// transition (or a genesis event) said so, and started_at is projected from
+	// that. A queued task is the real never-started case — an executor hook
+	// firing against a task the daemon has not launched — and the hook must
+	// leave it exactly where it is.
 	t.Run("NotificationHook ignores unstarted task", func(t *testing.T) {
 		task := &db.Task{
 			Title:  "Unstarted task",
-			Status: db.StatusProcessing, // Even if processing status, no StartedAt
+			Status: db.StatusQueued, // never reached processing, so no StartedAt
 			Type:   db.TypeCode,
 		}
 		if err := database.CreateTask(task); err != nil {
 			t.Fatalf("failed to create task: %v", err)
+		}
+		if fetched, _ := database.GetTask(task.ID); fetched.StartedAt != nil {
+			t.Fatalf("fixture is wrong: a queued task must not have a started_at")
 		}
 
 		// Simulate idle_prompt notification
@@ -976,8 +987,8 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask() error = %v", err)
 		}
-		if fetched.Status != db.StatusProcessing {
-			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusProcessing)
+		if fetched.Status != db.StatusQueued {
+			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusQueued)
 		}
 	})
 
@@ -1018,11 +1029,14 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 	t.Run("StopHook ignores unstarted task", func(t *testing.T) {
 		task := &db.Task{
 			Title:  "Unstarted task for stop",
-			Status: db.StatusProcessing,
+			Status: db.StatusQueued, // never reached processing, so no StartedAt
 			Type:   db.TypeCode,
 		}
 		if err := database.CreateTask(task); err != nil {
 			t.Fatalf("failed to create task: %v", err)
+		}
+		if fetched, _ := database.GetTask(task.ID); fetched.StartedAt != nil {
+			t.Fatalf("fixture is wrong: a queued task must not have a started_at")
 		}
 
 		// Simulate end_turn stop
@@ -1037,8 +1051,8 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask() error = %v", err)
 		}
-		if fetched.Status != db.StatusProcessing {
-			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusProcessing)
+		if fetched.Status != db.StatusQueued {
+			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusQueued)
 		}
 	})
 
