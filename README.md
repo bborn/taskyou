@@ -41,7 +41,7 @@ Need tmux, a desktop download, or help with setup? Follow the [first-task guide]
 ## What it does
 
 - **Run tasks in parallel.** Git projects can give each task its own worktree, keeping changes separate while agents work.
-- **See what needs you.** Open live output, answer a blocked agent, or retry a task with feedback.
+- **See what needs you.** Open live output, answer a blocked agent, or retry a task with feedback. Press `v` for a flat list instead of columns, and `V` to save the filter you keep retyping — "in progress and blocked", "just pinned", "just `[offerlab]`" — as a named view that survives restarts.
 - **Choose the agent per task.** Claude Code, Codex, Gemini, Grok, Cursor, Pi, OpenCode, and OpenClaw are supported. Use your existing agent setup; capabilities vary by executor.
 - **Repeat a useful process.** YAML workflows connect planning, implementation, and review. Add a `verify:` command to require passing checks before a step advances.
 - **Drive the same queue from anywhere you work.** A terminal UI, scriptable CLI, desktop app, and browser interface share one Go core and SQLite database.
