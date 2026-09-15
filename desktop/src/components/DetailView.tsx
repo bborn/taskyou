@@ -226,13 +226,23 @@ export function DetailView({ taskId }: { taskId: number }) {
   //
   // `follow` on a phone: 135 turns deep, opening at the oldest message means
   // scrolling the whole history to find what the agent is waiting on.
+  // A task placed on another host keeps its transcript over there, and its
+  // local worktree_path is empty — so there is genuinely nothing to read here.
+  // Saying "hasn't started yet" about a running task would be a lie.
+  const remoteHost =
+    task.placement_target && task.placement_target !== "local" ? task.placement_target : "";
+  const chatEmptyHint =
+    remoteHost && !task.worktree_path
+      ? `This task runs on ${remoteHost}, and its transcript lives on that host — nothing to read locally.`
+      : undefined;
+
   const conversationSection = (
     <>
       <SectionTitle onClick={() => setShowChat(!showChat)}>
         {showChat ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         Conversation <span className="font-normal">({messages.length})</span>
       </SectionTitle>
-      {showChat && <ChatList messages={messages} follow={isMobile} />}
+      {showChat && <ChatList messages={messages} follow={isMobile} emptyHint={chatEmptyHint} />}
     </>
   );
 
@@ -355,11 +365,16 @@ export function DetailView({ taskId }: { taskId: number }) {
               the ticket body, placement, dependencies and attachments. */}
           {isMobile && conversationSection}
 
-          {task.body ? (
-            <Markdown source={task.body} />
-          ) : (
-            <span className="text-xs text-muted-foreground">No description</span>
-          )}
+          {/* The conversation's opening turn IS the ticket, so on a phone
+              repeating the body below the whole thread showed the description
+              twice — the second copy wedged against the composer. Keep it only
+              when there is no conversation to read instead. */}
+          {(!isMobile || messages.length === 0) &&
+            (task.body ? (
+              <Markdown source={task.body} />
+            ) : (
+              <span className="text-xs text-muted-foreground">No description</span>
+            ))}
 
           {task.summary && !task.stand && (
             <>

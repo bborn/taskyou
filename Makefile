@@ -89,7 +89,7 @@ restart-daemon:
 			pgrep -f "ty daemon" > /dev/null && break; \
 		done; \
 		if pgrep -f "ty daemon" > /dev/null; then \
-			echo "Daemon restarted (PID $$(pgrep -f 'ty daemon' | head -1))"; \
+			bin/ty daemon status; \
 		else \
 			echo "WARNING: daemon did NOT come back -- see /tmp/ty-daemon.log"; \
 			tail -3 /tmp/ty-daemon.log 2>/dev/null || true; \

@@ -8,7 +8,16 @@ import { cn } from "@/lib/utils";
  * ticket — hundreds of lines — but a normal reply is shown in full. */
 const CLAMP_CHARS = 1400;
 
-export function ChatList({ messages, follow = true }: { messages: ChatMessage[]; follow?: boolean }) {
+export function ChatList({
+  messages,
+  follow = true,
+  emptyHint,
+}: {
+  messages: ChatMessage[];
+  follow?: boolean;
+  /** Why there is nothing to show, when "hasn't started yet" would be a lie. */
+  emptyHint?: string;
+}) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -18,7 +27,7 @@ export function ChatList({ messages, follow = true }: { messages: ChatMessage[];
   if (messages.length === 0) {
     return (
       <div className="px-1 py-6 text-center text-xs text-muted-foreground">
-        No conversation yet. The executor writes its transcript once it starts.
+        {emptyHint ?? "No conversation yet. The executor writes its transcript once it starts."}
       </div>
     );
   }
