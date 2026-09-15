@@ -95,4 +95,7 @@ make lint
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for conventions and [AGENTS.md](AGENTS.md) for the architecture. The core lives in `internal/`; CLI entry points live in `cmd/`; the desktop and browser UI lives in `desktop/`.
 
+Already use bb? The optional [TaskYou bb plugin](bb-plugin-taskyou/README.md) adds
+your TaskYou board to its sidebar, backed by the same Go API and executor.
+
 TaskYou is [MIT licensed](LICENSE). Your coding agent's own pricing and authentication still apply.

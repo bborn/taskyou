@@ -1,0 +1,30 @@
+name: bb plugin
+
+on:
+  pull_request:
+    paths: ['bb-plugin-taskyou/**', '.github/workflows/bb-plugin.yml']
+  push:
+    branches: [main]
+    paths: ['bb-plugin-taskyou/**', '.github/workflows/bb-plugin.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bb-plugin-taskyou
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bb-plugin-taskyou/package-lock.json
+      - run: npm ci --include=dev
+      - run: npm run typecheck
+      - run: npm test
+      - name: Build against the supported bb release
+        run: npx --yes --package=bb-app@0.43.1 bb plugin build
