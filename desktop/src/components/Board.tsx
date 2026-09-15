@@ -244,12 +244,40 @@ export const CardSlot = memo(function CardSlot({
         onClick={() => (tapToOpen ? store.openDetail(task.id) : store.selectTask(task.id))}
         onDoubleClick={() => store.openDetail(task.id)}
       >
+        {/* A phone card carried seven things — id, a two-line title, the stand
+            note, pin, project, a status pill and a PR chip with diff counts —
+            and fitted about five per screen. Every one of them is on the task
+            when you open it, so here it is the title and one line saying where
+            it stands. The spinner stays: it is the only live state a static
+            line cannot convey. */}
+        {tapToOpen ? (
+          <>
+            <div className="flex items-baseline gap-1.5">
+              {task.status === "processing" && (
+                <span className="w-3 shrink-0 font-mono text-status-processing">{spinner}</span>
+              )}
+              <span className="min-w-0 truncate text-[15px] leading-snug">
+                {task.title || "(untitled)"}
+              </span>
+            </div>
+            <div className="truncate text-[12px] text-muted-foreground">
+              {task.project && (
+                <span className="font-medium" style={{ color: projectColor }}>
+                  {task.project}
+                </span>
+              )}
+              {task.project && subLine.text && " · "}
+              <span title={subLine.title}>{subLine.text}</span>
+            </div>
+          </>
+        ) : (
+          <>
         <div className="flex items-baseline gap-1.5">
           {task.status === "processing" && (
             <span className="w-3 shrink-0 font-mono text-status-processing">{spinner}</span>
           )}
           <span className="shrink-0 font-mono text-[11px] text-muted-foreground">#{task.id}</span>
-          <span className={cn("line-clamp-2 leading-snug", tapToOpen ? "text-[15px]" : "text-[12.5px]")}>
+          <span className="line-clamp-2 text-[12.5px] leading-snug">
             {task.title || "(untitled)"}
           </span>
         </div>
@@ -283,6 +311,8 @@ export const CardSlot = memo(function CardSlot({
             </Badge>
           )}
         </div>
+          </>
+        )}
       </div>
     </motion.div>
   );
