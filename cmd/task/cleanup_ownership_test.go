@@ -42,7 +42,7 @@ func TestCleanupOrphanedSessions_SparesAnotherMachinesSession(t *testing.T) {
 		t.Fatalf("tag foreign session: %v", err)
 	}
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if !windowExists(session, window) {
 		t.Fatal("cleanup killed a live window belonging to another machine's daemon")
@@ -58,7 +58,7 @@ func TestCleanupOrphanedSessions_StillKillsOurOwnOrphan(t *testing.T) {
 		t.Fatalf("tag own session: %v", err)
 	}
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if windowExists(session, fmt.Sprintf("task-%d", orphanID)) {
 		t.Error("our own orphan window survived cleanup")
@@ -76,7 +76,7 @@ func TestCleanupOrphanedSessions_SparesAnUntaggedSession(t *testing.T) {
 	makeDaemonSessionWithName(t, session, foreignTaskID)
 	// Deliberately NO @ty_owner option set.
 
-	cleanupOrphanedSessions(false)
+	cleanupOrphanedSessions(false, false)
 
 	if !windowExists(session, fmt.Sprintf("task-%d", foreignTaskID)) {
 		t.Fatal("cleanup killed a window in an untagged session; untagged means unknown, not ours")

@@ -36,6 +36,7 @@ import (
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/pipeline"
+	"github.com/bborn/workflow/internal/reaper"
 	"github.com/bborn/workflow/internal/routine"
 	"github.com/bborn/workflow/internal/taskref"
 	"github.com/bborn/workflow/internal/tmuxctl"
@@ -543,13 +544,29 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 
 	sessionsCleanupCmd := &cobra.Command{
 		Use:   "cleanup",
-		Short: "Kill orphaned agent processes not tied to active task windows",
+		Short: "Kill orphaned agent windows and the side processes that outlived them",
+		Long: `Kill tmux windows for deleted and long-done tasks, then reap the side
+processes (dev servers, watchers, build daemons) that survived the teardown.
+
+Killing a tmux window only SIGHUPs the pane's foreground process group, so
+anything that was backgrounded, disowned, or setsid'd escapes it and is
+reparented to launchd/init, where it can live for days. The second pass finds
+those by the task worktree path on their command line.
+
+Blocked tasks are treated as live work, not corpses: their side processes are
+only reaped after a long stretch of no activity at all (default 24h, settable
+via the reap_blocked_idle setting), and their agent process is never reaped on
+staleness.
+
+Use --dry-run to see exactly what would be killed, and why, before it is.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			force, _ := cmd.Flags().GetBool("force")
-			cleanupOrphanedSessions(force)
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			cleanupOrphanedSessions(force, dryRun)
 		},
 	}
 	sessionsCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
+	sessionsCleanupCmd.Flags().Bool("dry-run", false, "Show what would be killed and why, without killing anything")
 	sessionsCmd.AddCommand(sessionsCleanupCmd)
 
 	sessionsSuspendCmd := &cobra.Command{
@@ -6227,6 +6244,18 @@ func suspendSessions(taskIDs []int, all bool) {
 		suspended++
 	}
 
+	// Killing the window doesn't kill what escaped its process group. Suspend is
+	// an explicit "free this task's memory now", so its side processes go too —
+	// scoped to exactly the tasks that were suspended, and sparing the agent so
+	// the preserved session can still be resumed.
+	suspendedIDs := make(map[int]bool, len(toSuspend))
+	for _, s := range toSuspend {
+		suspendedIDs[s.taskID] = true
+	}
+	reapSideProcesses(database, func(procs []reaper.Process) reaper.Policy {
+		return reapExplicitPolicy(suspendedIDs, procs)
+	}, false)
+
 	fmt.Println()
 	if totalFreedMB > 0 {
 		fmt.Println(successStyle.Render(fmt.Sprintf("Suspended %d session(s), ~%dMB freed", suspended, totalFreedMB)))
@@ -6386,18 +6415,27 @@ func quotedWindowList(windows map[string]bool) string {
 	return strings.Join(parts, ",")
 }
 
-// cleanupOrphanedSessions kills tmux windows whose task ID is no longer in the
-// database (deleted-task orphans), and windows for tasks completed more than
-// two hours ago. Killing the window terminates the agent process running in
-// its pane via SIGHUP propagation.
+// cleanupOrphanedSessions runs two passes.
 //
-// Tmux windows are the source of truth here. Earlier versions tried to find
-// orphaned agent processes via `pgrep -f <name>.*TERM_PROGRAM=tmux`, but
-// TERM_PROGRAM is an env var (not on the command line on macOS), so pgrep
+// The first kills tmux windows whose task ID is no longer in the database
+// (deleted-task orphans) and windows for tasks completed more than two hours
+// ago. Tmux windows are the source of truth for that pass. Earlier versions
+// tried to find orphaned agent processes via `pgrep -f <name>.*TERM_PROGRAM=tmux`,
+// but TERM_PROGRAM is an env var (not on the command line on macOS), so pgrep
 // returned nothing and cleanup quietly did nothing — leaving orphans alive
-// indefinitely. Working at the window level avoids depending on env vars
-// being visible to ps / pgrep.
-func cleanupOrphanedSessions(force bool) {
+// indefinitely. Working at the window level avoids depending on env vars being
+// visible to ps / pgrep.
+//
+// The second pass exists because killing the window is NOT enough. tmux
+// kill-window SIGHUPs the pane's foreground process group; a dev server that
+// was backgrounded, disowned, or setsid'd has left that group, and once its
+// parent shell dies it is reparented to launchd/init where the teardown can
+// never reach it. Those survivors are found by worktree path instead — see
+// internal/reaper — and are reaped on much more conservative rules, because a
+// blocked task in ty usually means "waiting for a human", not "dead".
+//
+// With dryRun set, neither pass kills anything; both report what they would do.
+func cleanupOrphanedSessions(force, dryRun bool) {
 	type windowRef struct {
 		session   string
 		window    string
@@ -6457,7 +6495,8 @@ func cleanupOrphanedSessions(force bool) {
 	existingTaskIDs := make(map[int]bool)
 	oldDoneTaskIDs := make(map[int]bool)
 	dbPath := db.DefaultPath()
-	if database, err := openTaskDB(dbPath); err == nil {
+	database, dbErr := openTaskDB(dbPath)
+	if dbErr == nil {
 		defer database.Close()
 		twoHoursAgo := time.Now().Add(-2 * time.Hour)
 		// IncludeClosed: done/archived tasks are excluded by default, but we need
@@ -6478,7 +6517,7 @@ func cleanupOrphanedSessions(force bool) {
 		// was a kill-everything path that fired precisely when we knew least.
 		// Refuse instead: absence of evidence is not evidence of an orphan.
 		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf(
-			"Could not open the database (%v) — refusing to judge any window orphaned without it.", err)))
+			"Could not open the database (%v) — refusing to judge any window orphaned without it.", dbErr)))
 		return
 	}
 
@@ -6513,28 +6552,43 @@ func cleanupOrphanedSessions(force bool) {
 	}
 	if totalToKill == 0 {
 		fmt.Println(successStyle.Render("No orphaned agent windows found"))
-		return
-	}
-
-	if len(deletedWindows) > 0 {
-		fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for deleted tasks:", len(deletedWindows))))
-	}
-	if len(oldDoneWindows) > 0 {
-		fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for done tasks (>2h old):", len(oldDoneWindows))))
-	}
-
-	killed := 0
-	for _, w := range append(deletedWindows, oldDoneWindows...) {
-		target := w.session + ":" + w.window
-		if err := killWindow(target, force); err != nil {
-			fmt.Printf("  %s %s: %s\n", errorStyle.Render("✗"), target, err.Error())
-			continue
+	} else {
+		if len(deletedWindows) > 0 {
+			fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for deleted tasks:", len(deletedWindows))))
 		}
-		fmt.Printf("  %s %s\n", successStyle.Render("✓ Killed"), target)
-		killed++
+		if len(oldDoneWindows) > 0 {
+			fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for done tasks (>2h old):", len(oldDoneWindows))))
+		}
+
+		killed := 0
+		for _, w := range append(deletedWindows, oldDoneWindows...) {
+			target := w.session + ":" + w.window
+			if dryRun {
+				fmt.Printf("  %s would kill window %s\n", dimStyle.Render("·"), target)
+				continue
+			}
+			if err := killWindow(target, force); err != nil {
+				fmt.Printf("  %s %s: %s\n", errorStyle.Render("✗"), target, err.Error())
+				continue
+			}
+			fmt.Printf("  %s %s\n", successStyle.Render("✓ Killed"), target)
+			killed++
+		}
+
+		if !dryRun {
+			fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d windows", killed, totalToKill)))
+		}
 	}
 
-	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d windows", killed, totalToKill)))
+	// Second pass: the processes the window teardown could not reach. This runs
+	// whether or not any window was killed — the orphans that matter are exactly
+	// the ones whose window is already long gone.
+	reaped := reapSideProcesses(database, func(procs []reaper.Process) reaper.Policy {
+		return reapSweepPolicy(database, procs)
+	}, dryRun)
+	if reaped > 0 {
+		fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Reaped %d orphaned side process(es)", reaped)))
+	}
 }
 
 // killWindow terminates a tmux window. With force=true, it also sends SIGKILL

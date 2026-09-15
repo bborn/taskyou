@@ -622,9 +622,37 @@ Each task tracks its executor state in the database:
 # List all running executor processes
 ./bin/ty sessions list
 
-# Kill orphaned executor processes
+# Kill orphaned executor processes (and the side processes that outlived them)
 ./bin/ty sessions cleanup
+
+# See exactly what would be killed, and why, without killing anything
+./bin/ty sessions cleanup --dry-run
 ```
+
+**Orphaned side processes.** Killing a task's tmux window only SIGHUPs the pane's
+foreground process group. A dev server that was backgrounded, disowned, or
+`setsid`'d has left that group, so once its parent shell dies it is reparented to
+`launchd`/`init` and survives every teardown, leaking gigabytes of swap over
+days. `ty sessions cleanup` therefore runs a second pass that finds those by the
+task worktree path on their command line and SIGTERMs (then SIGKILLs) them.
+`ty sessions suspend` does the same for the tasks it suspends.
+
+The sweep is deliberately conservative:
+
+- **Blocked tasks are live work.** In ty, `blocked` usually means "waiting for a
+  human". Their side processes are only reaped after a long stretch of *no
+  activity at all*, measured from the last status change, log line, or UI visit.
+  Their agent process is never reaped on staleness.
+- **Absent is not deleted.** A task that is not in this machine's database may
+  have been placed here from another machine, so its processes are left alone.
+- **Processing and queued tasks are never touched**, nor is anything still
+  running inside a live tmux pane.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `reap_blocked_idle` | `24h` | Idle time before a blocked or backlog task's side processes are reaped. `0`/`disabled` turns staleness reaping off. |
+| `reap_orphan_min_age` | `24h` | Minimum age for the no-worktree heuristic: a known JS dev server reparented to init with no terminal. |
+| `reap_orphan_dev_servers` | `true` | Set to `false` to disable that heuristic entirely. |
 
 **Direct executor interaction:**
 
