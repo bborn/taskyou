@@ -228,6 +228,14 @@ type updateTaskRequest struct {
 	PermissionMode *string `json:"permission_mode"`
 	EffortLevel    *string `json:"effort_level"`
 	Model          *string `json:"model"`
+	// Status is decoded only to REFUSE it. This route edits a task's fields;
+	// status is not a field, it is a transition, and it has exactly one entry
+	// point (POST /api/tasks/{id}/status → SetTaskStatus) where the actor, the
+	// reason and the completion gates live. Without this the field would simply
+	// not decode, and a client would get a cheerful 200 with nothing changed —
+	// the silent no-op is how a caller comes to believe it closed a task it did
+	// not close.
+	Status *string `json:"status"`
 }
 
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +280,11 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EffortLevel != nil {
 		task.EffortLevel = *req.EffortLevel
+	}
+	if req.Status != nil {
+		jsonErr(w, "status is not editable here — POST /api/tasks/{id}/status, which records who and why and runs the completion gates",
+			http.StatusBadRequest)
+		return
 	}
 	if req.Model != nil {
 		task.Model = *req.Model
