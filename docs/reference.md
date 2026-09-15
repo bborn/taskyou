@@ -20,6 +20,67 @@ The terminal UI is TaskYou's primary interface — everything ships here first. 
 [![Kanban Board](media/hero-board.png)](media/hero-board.png)
 *The main view showing tasks organized across Backlog, In Progress, Blocked, and Done columns*
 
+### List View
+
+Press `v` to swap the four columns for one flat line per task — the same board,
+at a quarter of the vertical cost. Pair it with a saved view and the whole
+"what am I working on right now?" answer fits on one screen:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Active  6 tasks                        ◐ 2 running  ✗ 3 blocked  ○ 1 queued │
+│▌◐ #5321 [ty] Add persistent filtered task list view    +412/-18  running 4m │
+│ ✗ #5318 [ol] Offer refactor — needs a pricing decision           blocked 2h │
+│ ◐ #5310 [ik] Reconnect flow for expired Meta tokens   ✓ +88/-12  running 1h │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Rows carry the same badges as cards (PR state and diff, running dot, permission
+mode, host, pin, dependency lock) plus an age hint. Every key that works on a
+card works on a row — the selection is shared, so `v` never loses your place.
+`B`/`P`/`L`/`D` jump to the first task of a status instead of focusing a column.
+
+### Saved Views
+
+A **view** is a name plus a filter query. Press `V` for the picker:
+
+| Key | Action |
+|-----|--------|
+| `enter` | Apply the highlighted view |
+| `n` | Save the current filter as a new view |
+| `d` then `y` | Delete a view |
+| `c` | Clear the filter |
+| `esc` | Cancel |
+
+The display mode, the filter, and the applied view name are persisted, so the
+board you left is the board you come back to. Typing over an applied view
+detaches it — a view is a starting point, not a lock.
+
+Three starter views ship on first run: **Active** (`status:in-progress
+status:blocked`), **Pinned** (`is:pinned`), and **In review** (`has:pr
+status:blocked`). Delete one and it stays deleted.
+
+#### Filter query grammar
+
+The same grammar works in the filter bar (`/`), in a saved view, in
+`ty list --filter`, and over the HTTP API:
+
+| Token | Matches |
+|-------|---------|
+| `status:blocked`, `is:blocked` | One status (`backlog`, `queued`, `processing`, `blocked`, `done`, `archived`) |
+| `status:in-progress` | Queued **and** processing |
+| `status:open` | Anything not done or archived |
+| `is:pinned` / `is:unpinned` | Pin state |
+| `is:workflow` / `is:task` | Workflow steps vs standalone tasks |
+| `has:pr` / `no:pr` | Tasks with / without a pull request |
+| `tag:release` | Tasks carrying a tag |
+| `[offerlab]` | A project, by name or alias (repeatable; OR'd together) |
+| anything else | Free-text fuzzy search |
+
+Repeating `status:` ORs the statuses together; every other token ANDs. An
+unrecognised `word:value` is not a token — it stays searchable text rather than
+silently matching nothing.
+
 ### Task Detail View
 [![Task Detail View](media/task-review-tui.png)](media/task-review-tui.png)
 *Viewing a task with Claude's output and shell access in split panes*
@@ -84,6 +145,7 @@ The same UI is also served in your browser at `http://localhost:8080` whenever `
 ## Features
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
+- **List View & Saved Views** - `v` swaps the columns for a flat one-line-per-task list; `V` manages named filter views (`status:in-progress status:blocked`, `is:pinned`, `[offerlab]`). The filter and display mode persist across restarts (see [List View](#list-view))
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
 - **Workflows** - Turn one goal into a multi-step DAG (e.g. plan → code → parallel review → collect), each step on its own executor/model, advancing automatically (see [Workflows](#workflows))
@@ -391,6 +453,20 @@ This includes:
 - **Task management** - `ty create`, `ty execute`, `ty retry`, `ty status`, `ty pin`, `ty close`, `ty archive`, `ty delete`
 - **Direct executor interaction** - `ty input` sends keystrokes/text to running executors, `ty output` reads their output
 - **Session management** - `ty sessions list`, `ty sessions cleanup`
+- **Saved views** - `ty views` lists them, `ty views save <name> "<query>"` creates or replaces one, `ty views show <name>` prints what it matches, `ty views delete <name>` removes it
+- **Filtered listing** - `ty list --view active` applies a saved view; `ty list --filter "status:in-progress status:blocked"` applies a query inline (same grammar as the TUI filter bar)
+
+```bash
+ty views save active "status:in-progress status:blocked"
+ty views save offerlab "[offerlab] status:open"
+ty list --view active --json
+ty list --filter "has:pr status:blocked"      # waiting on review
+```
+
+Views are exposed over the HTTP API too: `GET`/`POST /api/views` and
+`GET`/`PATCH`/`DELETE /api/views/{name}`. `GET /api/views/{name}` returns the
+view plus the tasks it currently matches, so a client never has to reimplement
+the query grammar.
 
 Because agents can send input to running executors via `ty input`, they can answer prompts, confirm dialogs, navigate menus, and fully control tasks mid-execution—no human intervention required.
 
@@ -439,6 +515,8 @@ The skill works with Claude Code, Codex, Gemini, or any agent that can execute s
 | `o` | Open task's working directory |
 | `p` | Command palette (fuzzy search) |
 | `/` | Filter tasks |
+| `v` | Toggle list / board view |
+| `V` | Saved views picker |
 | `s` | Settings |
 | `?` | Toggle help |
 | `q` | Quit |

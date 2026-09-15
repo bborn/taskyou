@@ -53,6 +53,8 @@ type KeybindingsConfig struct {
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
+	ToggleListView     *KeybindingConfig `yaml:"toggle_list_view,omitempty"`
+	SavedViews         *KeybindingConfig `yaml:"saved_views,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.

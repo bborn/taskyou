@@ -55,6 +55,22 @@ const (
 	// heuristic entirely, leaving the sweep to only touch processes it can map
 	// to a task worktree. Enabled by default.
 	SettingReapOrphanDevServers = "reap_orphan_dev_servers"
+
+	// SettingBoardDisplayMode is how the board draws itself: BoardDisplayList for
+	// one flat line per task, anything else for the kanban columns.
+	SettingBoardDisplayMode = "board_display_mode"
+	// SettingBoardFilter is the filter query the board had when it was last
+	// closed, restored on launch so a filtered view actually persists.
+	SettingBoardFilter = "board_filter"
+	// SettingBoardView is the name of the saved view that filter came from, ""
+	// when the filter was typed ad hoc. Only used to label the filter bar.
+	SettingBoardView = "board_view"
+)
+
+// Board display modes for SettingBoardDisplayMode.
+const (
+	BoardDisplayBoard = "board"
+	BoardDisplayList  = "list"
 )
 
 // ShellPaneWidthKey is the settings key holding one task's shell pane width.

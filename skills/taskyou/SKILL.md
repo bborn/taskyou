@@ -60,6 +60,9 @@ Use `ty` (short) or `taskyou` (full) — both work identically.
 |--------|---------|
 | See all tasks | `ty board --json` |
 | List by status | `ty list --status <status> --json` |
+| List by filter query | `ty list --filter "status:in-progress status:blocked" --json` |
+| List a saved view | `ty list --view <name> --json` |
+| Manage saved views | `ty views` · `ty views save <name> "<query>"` · `ty views delete <name>` |
 | View task details | `ty show <id> --json --logs` |
 | Create task | `ty create "title" --body "description"` |
 | Create a workflow | `ty pipeline "goal" --project <name>` (plan → code → parallel review → collect) |
@@ -192,6 +195,31 @@ Pipe to `jq` for processing:
 ```bash
 ty board --json | jq '.columns.backlog.tasks[:3]'  # First 3 backlog items
 ty list --json | jq '.[] | select(.pinned == true)'  # Pinned tasks only
+```
+
+## Filter Queries
+
+`ty list --filter` and saved views share one grammar with the TUI filter bar:
+
+| Token | Matches |
+|-------|---------|
+| `status:blocked`, `is:blocked` | One status (`backlog`, `queued`, `processing`, `blocked`, `done`, `archived`) |
+| `status:in-progress` | Queued **and** processing |
+| `status:open` | Anything not done or archived |
+| `is:pinned` / `is:unpinned` | Pin state |
+| `is:workflow` / `is:task` | Workflow steps vs standalone tasks |
+| `has:pr` / `no:pr` | Tasks with / without a pull request |
+| `tag:release` | Tasks carrying a tag |
+| `[project]` | A project (repeatable; OR'd together) |
+| anything else | Free-text search |
+
+Repeating `status:` ORs the statuses; everything else ANDs.
+
+```bash
+ty list --filter "has:pr status:blocked" --json   # Waiting on review
+ty list --filter "[offerlab] status:open" --json  # Open OfferLab work
+ty views save active "status:in-progress status:blocked"
+ty list --view active --json
 ```
 
 ## Orchestration Patterns

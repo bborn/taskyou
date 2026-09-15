@@ -147,6 +147,13 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("DELETE /api/projects/{name}", s.handleDeleteProject)
 
 	// Task types
+	// Saved views (named filter queries; see internal/taskfilter)
+	mux.HandleFunc("GET /api/views", s.handleListViews)
+	mux.HandleFunc("POST /api/views", s.handleCreateView)
+	mux.HandleFunc("GET /api/views/{name}", s.handleGetView)
+	mux.HandleFunc("PATCH /api/views/{name}", s.handleUpdateView)
+	mux.HandleFunc("DELETE /api/views/{name}", s.handleDeleteView)
+
 	mux.HandleFunc("GET /api/types", s.handleListTypes)
 	mux.HandleFunc("POST /api/types", s.handleCreateType)
 	mux.HandleFunc("GET /api/types/{name}", s.handleGetType)
