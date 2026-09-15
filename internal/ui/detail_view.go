@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/config"
+	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
@@ -74,7 +75,7 @@ func newViewSessionName() string {
 
 // hiddenShellWindowName is where a hidden shell waits, in the daemon session.
 func hiddenShellWindowName(taskID int64) string {
-	return fmt.Sprintf("_hidden_shell_%d", taskID)
+	return executor.HiddenShellWindowName(taskID)
 }
 
 // viewTaskWindow shows the task's daemon window under the TUI. It runs in the

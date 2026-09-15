@@ -29,6 +29,75 @@ func executorSpawnLockDir() string {
 	return filepath.Dir(db.DefaultPath())
 }
 
+// SpawnLockDir is executorSpawnLockDir for callers outside the package that
+// must take the same per-task spawn lock (the detail view, before it kills a
+// window it believes is dead).
+func SpawnLockDir() string { return executorSpawnLockDir() }
+
+// SpawnedAtOption is a window option holding the Unix time EnsureTaskWindow
+// created the window. A just-launched agent pane still reports `sh` as its
+// current command, which is indistinguishable from a dead one by that alone.
+const SpawnedAtOption = "@ty_spawned_at"
+
+// ErrExecutorRestartLoop is returned when a task has been launched too many
+// times in a short window. Whatever is relaunching it (two TUIs fighting over
+// the window, an agent that dies on start) will not be fixed by another launch.
+var ErrExecutorRestartLoop = errors.New("this task's executor was restarted too many times in the last few minutes; not starting another")
+
+const (
+	maxExecutorRestarts   = 4
+	executorRestartWindow = 2 * time.Minute
+)
+
+// HiddenShellWindowName is the daemon-session window a task's hidden shell is
+// parked in.
+func HiddenShellWindowName(taskID int64) string {
+	return fmt.Sprintf("_hidden_shell_%d", taskID)
+}
+
+// orphanHiddenShellWindows returns the hidden-shell windows for a task that hold
+// nothing but idle shells. listing is `list-panes -a` output with the fields
+// session, window id, window name and current command, tab-separated. A new
+// task window brings its own shell, so a parked one from an earlier window is
+// left behind; one running anything but a shell (a dev server) is kept.
+func orphanHiddenShellWindows(listing, windowName string) []string {
+	idle := map[string]bool{}
+	var order []string
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) != 4 || !strings.HasPrefix(f[0], "task-daemon-") || f[2] != windowName {
+			continue
+		}
+		if _, seen := idle[f[1]]; !seen {
+			idle[f[1]] = true
+			order = append(order, f[1])
+		}
+		switch strings.TrimPrefix(f[3], "-") {
+		case "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh":
+		default:
+			idle[f[1]] = false
+		}
+	}
+	var out []string
+	for _, id := range order {
+		if idle[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func killOrphanHiddenShells(ctx context.Context, taskID int64) {
+	out, err := tmuxCmd(ctx, "list-panes", "-a", "-F",
+		"#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, id := range orphanHiddenShellWindows(string(out), HiddenShellWindowName(taskID)) {
+		_ = tmuxCmd(ctx, "kill-window", "-t", id).Run()
+	}
+}
+
 // sessionValidator is an optional capability for executors that can verify
 // whether a stored session still exists. EnsureTaskWindow uses it to avoid
 // resuming into a dead session (see the "lost executor pane" recovery there).
@@ -84,6 +153,13 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		}
 	} else {
 		e.logger.Warn("could not acquire executor spawn lock; proceeding best-effort", "task", task.ID, "error", lerr)
+	}
+
+	// Backstop against relaunch loops of any cause, counted in the database so it
+	// holds across every process that can reach this point.
+	if n, err := e.db.CountRecentExecutorStarts(task.ID, executorRestartWindow); err == nil && n >= maxExecutorRestarts {
+		e.db.AppendTaskLog(task.ID, "error", fmt.Sprintf("Refused to start the executor: it was started %d times in the last %s. Something keeps killing or relaunching it; open the task again once that has stopped.", n, executorRestartWindow))
+		return "", false, ErrExecutorRestartLoop
 	}
 
 	daemonSession, err := findOrCreateDaemonSession(ctx)
@@ -160,6 +236,8 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	time.Sleep(100 * time.Millisecond)
 
 	windowTarget := daemonSession + ":" + windowName
+	_ = tmuxCmd(ctx, "set-option", "-w", "-t", windowTarget, SpawnedAtOption, fmt.Sprint(time.Now().Unix())).Run()
+	killOrphanHiddenShells(ctx, task.ID)
 
 	// Create the shell pane alongside the executor pane, in the user's shell
 	// so it doesn't exit immediately.
