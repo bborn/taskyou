@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { api } from "../api/client";
+import type { PlacementHost } from "../api/types";
 import { store, useAppState, type FormState } from "../store";
 import {
   Dialog,
@@ -47,6 +48,18 @@ const PERMISSION_MODES = [
 
 const EFFORT_LEVELS = [NONE, "low", "medium", "high"];
 
+// Placement options that always exist when anything is offering a choice:
+// automatic (the resolver decides at spawn, as it always has) and this machine.
+const AUTOMATIC_HOST = NONE;
+const LOCAL_HOST = "local";
+
+// What the Host trigger shows: the machine's name, never its capability list.
+function hostLabel(value: string, hosts: PlacementHost[]) {
+  if (value === AUTOMATIC_HOST) return "automatic";
+  if (value === LOCAL_HOST) return "this machine";
+  return hosts.find((h) => h.target === value)?.name ?? value;
+}
+
 export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const { projects, types, executors, tasks, permissionMode } = useAppState();
   const editing = form.kind === "edit" ? tasks.find((t) => t.id === form.taskId) : null;
@@ -63,6 +76,10 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
     editing && editing.permission_mode !== "default" ? editing.permission_mode : permissionMode,
   );
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // Machines this task could run on, as the placement plugin sees them. Empty
+  // for everyone without a fleet, and the host picker is then not rendered.
+  const [hosts, setHosts] = useState<PlacementHost[]>([]);
+  const [host, setHost] = useState(AUTOMATIC_HOST);
   const [files, setFiles] = useState<File[]>([]);
   const [executeNow, setExecuteNow] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -70,6 +87,42 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
 
   const titleRef = useRef<HTMLInputElement>(null);
   const ghostTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Which machines are candidates depends on the project (a host needs a
+  // checkout of it) and on the executor (only some can be launched over SSH), so
+  // the list is reloaded whenever either changes. Moving an existing task is a
+  // different operation — it carries work through Git — so this is new-task only.
+  useEffect(() => {
+    if (form.kind !== "new" || !project) {
+      setHosts([]);
+      return;
+    }
+    let active = true;
+    api
+      .placementHosts(project, executor)
+      .then((res) => {
+        if (!active) return;
+        const offered = res.hosts ?? [];
+        setHosts(offered);
+        // Keep a machine that is still offered; otherwise fall back to
+        // automatic rather than silently placing the task somewhere else.
+        setHost((current) =>
+          current === AUTOMATIC_HOST ||
+          current === LOCAL_HOST ||
+          offered.some((h) => h.target === current)
+            ? current
+            : AUTOMATIC_HOST,
+        );
+      })
+      .catch(() => {
+        // No resolver, or it could not answer: no choice is offered, which is
+        // exactly how ty behaved before this existed.
+        if (active) setHosts([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [form.kind, project, executor]);
 
   // Ghost-text autocomplete on the title, debounced; best-effort.
   function onTitleChange(value: string) {
@@ -109,6 +162,8 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           executor,
           execute: executeNow || dangerous,
           permission_mode: dangerous ? "dangerous" : permission,
+          placement: fromSelect(host),
+          placement_workdir: hosts.find((h) => h.target === host)?.workdir ?? "",
         });
         if (effort) await api.updateTask(created.id, { effort_level: effort }).catch(() => {});
         for (const file of files) {
@@ -311,6 +366,34 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
                   </SelectContent>
                 </Select>
               </div>
+              {hosts.length > 0 && (
+                <div className="grid min-w-0 gap-1.5">
+                  <Label>Host</Label>
+                  <Select value={host} onValueChange={setHost}>
+                    <SelectTrigger className="w-full min-w-0">
+                      {/* Render the trigger text ourselves: a host's capability
+                          list belongs in the open list, not stretched across a
+                          column it does not fit in. */}
+                      <SelectValue>{hostLabel(host, hosts)}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={AUTOMATIC_HOST}>automatic</SelectItem>
+                      <SelectItem value={LOCAL_HOST}>this machine</SelectItem>
+                      {hosts.map((h) => (
+                        <SelectItem key={h.target} value={h.target}>
+                          {h.name}
+                          {h.detail ? (
+                            <span className="text-muted-foreground"> — {h.detail}</span>
+                          ) : null}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <span className="text-[11px] text-muted-foreground">
+                    Overrides the automatic placement for this task.
+                  </span>
+                </div>
+              )}
               <div className="grid gap-1.5">
                 <Label>Permission mode</Label>
                 <Select value={toSelect(permission)} onValueChange={(v) => setPermission(fromSelect(v))}>

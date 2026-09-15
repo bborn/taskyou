@@ -445,9 +445,14 @@ type AppModel struct {
 	newTaskForm        *FormModel
 	pendingTask        *db.Task
 	pendingAttachments []string
-	pendingPipeline    string // non-empty when the pending submission is a pipeline definition
-	queueConfirm       *huh.Form
-	queueValue         string
+	// The host chosen in the form, if any: "" leaves placement to the resolver,
+	// "local" pins the task here, anything else is an SSH destination. Recorded
+	// on the task the moment it is created, before it can spawn.
+	pendingPlacement    string
+	pendingPlacementDir string
+	pendingPipeline     string // non-empty when the pending submission is a pipeline definition
+	queueConfirm        *huh.Form
+	queueValue          string
 
 	// Edit task form state
 	editTaskForm *FormModel
@@ -3090,6 +3095,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
+			m.pendingPlacement, m.pendingPlacementDir = form.PlacementChoice()
 			m.pendingPipeline = form.Pipeline()
 			// Default to last queue choice for this project. Permission mode now
 			// lives on the task form, so this is just execute-now vs backlog;
@@ -3168,6 +3174,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				execute := m.queueValue == "yes"
 				m.pendingTask = nil
 				m.pendingAttachments = nil
+				m.pendingPlacement, m.pendingPlacementDir = "", ""
 				m.pendingPipeline = ""
 				m.newTaskForm = nil
 				m.queueConfirm = nil
@@ -3185,13 +3192,15 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			task := m.pendingTask
 			attachments := m.pendingAttachments
+			target, dir := m.pendingPlacement, m.pendingPlacementDir
 			m.pendingTask = nil
 			m.pendingAttachments = nil
+			m.pendingPlacement, m.pendingPlacementDir = "", ""
 			m.pendingPipeline = ""
 			m.newTaskForm = nil
 			m.queueConfirm = nil
 			m.currentView = ViewDashboard
-			return m, m.createTaskWithAttachments(task, attachments)
+			return m, m.createTaskWithAttachments(task, attachments, target, dir)
 		}
 	}
 
@@ -4761,7 +4770,11 @@ func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.C
 	}
 }
 
-func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string) tea.Cmd {
+// createTaskWithAttachments creates a task, its attachments, and — when the form
+// offered a choice of machines and one was picked — its placement. placement is
+// "" for the automatic answer, which writes nothing and leaves the resolver to
+// be asked at spawn exactly as before.
+func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string, placement, placementDir string) tea.Cmd {
 	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
@@ -4796,6 +4809,13 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 		err := database.CreateTask(t)
 		if err != nil {
 			return taskCreatedMsg{task: t, err: err}
+		}
+
+		// A hand-picked host is recorded as the task's placement decision before it
+		// can spawn, so the resolver is never asked. The task is already created:
+		// a placement that cannot be recorded is said out loud, not rolled back.
+		if err := executor.ChoosePlacement(context.Background(), database, t, placement, placementDir); err != nil {
+			database.AppendTaskLog(t.ID, "error", "Could not set this task's host: "+err.Error())
 		}
 
 		// Mark onboarding as complete when first task is created
@@ -5723,7 +5743,7 @@ func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
 		}
 		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
 		m.notifyUntil = time.Now().Add(5 * time.Second)
-		return m.createTaskWithAttachments(newTask, nil)
+		return m.createTaskWithAttachments(newTask, nil, "", "")
 
 	case ai.CommandUpdateStatus:
 		if cmd.TaskID == 0 {

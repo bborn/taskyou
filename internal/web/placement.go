@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/hooks"
 )
 
 func (s *Server) handleGetPlacement(w http.ResponseWriter, r *http.Request) {
@@ -55,4 +56,19 @@ func (s *Server) handleSetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, result)
+}
+
+// handlePlacementHosts lists the machines a new task in this project could be
+// placed on, as the installed placement plugin sees them.
+//
+// This is what makes a manual choice possible in a form: the GUI asks before it
+// shows the picker, and an empty list is the normal answer for a user with no
+// fleet — the picker is then not shown at all.
+func (s *Server) handlePlacementHosts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	hosts := executor.PlacementChoices(r.Context(), s.db, q.Get("project"), q.Get("executor"))
+	if hosts == nil {
+		hosts = []hooks.Host{}
+	}
+	jsonOK(w, map[string]any{"hosts": hosts})
 }

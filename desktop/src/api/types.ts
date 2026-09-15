@@ -172,6 +172,16 @@ export interface Routine {
   last_run?: RoutineRun;
 }
 
+// PlacementHost is one machine the placement plugin offers for a new task. An
+// empty list — no plugin, or no host serving the project — is why the new-task
+// form shows no host picker at all.
+export interface PlacementHost {
+  name: string;
+  target: string;
+  workdir: string;
+  detail?: string;
+}
+
 export interface Placement {
  target: string;
  workdir: string;
