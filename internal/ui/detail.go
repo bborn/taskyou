@@ -1177,6 +1177,14 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 	// window with the user's (ty run inside their tmux).
 	removeStaleViewers(ctx, tuiPaneID)
 
+	// A remote task has no local task-window view, so the TUI pane must not
+	// claim one. Left over from a local task, the pairing sends every
+	// Shift+arrow from the TUI through paneCycleScript, which selects a viewer
+	// pane and a view session that are both gone — the key does nothing and the
+	// keyboard is stuck in the TUI. Here the panes are plain panes of this
+	// window, which is what the unpaired binding already cycles.
+	clearViewPairing(ctx, tuiPaneID)
+
 	script := diesWithTUI(executor.RemoteAttachScript(m.task, loc))
 	out, err := uiTmux(ctx, "split-window",
 		"-v", "-d",
@@ -1933,6 +1941,11 @@ func (m *DetailModel) applyPaneHealth(msg paneHealthMsg) tea.Cmd {
 	// new view replaces whatever is left of the old one (removeStaleViewers).
 	m.claudePaneID, m.workdirPaneID = "", ""
 	m.viewerPaneID, m.viewSession = "", ""
+	// This is the one place the view is declared gone without
+	// closeTaskWindowView running, and the paths below may never build another
+	// one (a blocked or finished task gets no view). Say so on the TUI pane too,
+	// or Shift+arrow keeps aiming at the view that just died.
+	m.clearViewPairingAsync()
 	if msg.alive || msg.hasWindow {
 		m.paneLoading, m.waitingForExecutor = true, false
 		return m.setupPanesAsync()

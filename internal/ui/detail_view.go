@@ -105,6 +105,12 @@ func (m *DetailModel) viewTaskWindow() {
 	m.tuiPaneID = tuiPaneID
 	m.daemonSessionID = daemonSession
 
+	// Drop the previous view's pairing before the new one is built. Everything
+	// below can fail and return, and openViewerPane writes the pairing again
+	// when it succeeds, so the options describe a view that exists rather than
+	// the last one that did.
+	clearViewPairing(ctx, tuiPaneID)
+
 	agent, shell, shellInWindow, err := m.taskWindowPanes(ctx, windowTarget)
 	if err != nil {
 		log.Error("viewTaskWindow: %v", err)
@@ -383,6 +389,41 @@ func paneExists(ctx context.Context, tmux func(context.Context, ...string) *osEx
 	return err == nil && strings.TrimSpace(string(out)) == pane
 }
 
+// clearViewPairing unsets the TUI pane's pairing with a local task view.
+//
+// Shift+arrow reads those options to decide what a step means (see
+// bindPaneNavigation), so they have to describe the pane on screen NOW. They
+// are pane options on the TUI's own pane, which outlives every view and even
+// the ty process in it, so a view that went away without clearing them leaves
+// the keys pointed at a dead pane and a dead session: Shift+arrow then runs a
+// select-pane that fails, and the keyboard cannot leave the TUI at all. Every
+// path that leaves the TUI without a local view has to call this.
+func clearViewPairing(ctx context.Context, tuiPaneID string) {
+	if tuiPaneID == "" {
+		return
+	}
+	runTmuxBatchOn(ctx, uiTmux, [][]string{
+		{"set-option", "-pu", "-t", tuiPaneID, viewPaneOption},
+		{"set-option", "-pu", "-t", tuiPaneID, viewSessionOption},
+	})
+}
+
+// clearViewPairingAsync is clearViewPairing for callers on the UI thread. It
+// is registered as pane work, so a closing view still waits for it.
+func (m *DetailModel) clearViewPairingAsync() {
+	tuiPaneID := m.tuiPaneID
+	if tuiPaneID == "" {
+		return
+	}
+	m.paneWork.Add(1)
+	go func() {
+		defer m.paneWork.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		clearViewPairing(ctx, tuiPaneID)
+	}()
+}
+
 // removeStaleViewers kills view panes a previous view left in the TUI's
 // window, and nothing else.
 func removeStaleViewers(ctx context.Context, tuiPaneID string) {
@@ -443,12 +484,7 @@ func (m *DetailModel) closeTaskWindowView(saveLayout bool) {
 	if m.viewerPaneID != "" {
 		uiTmux(ctx, "kill-pane", "-t", m.viewerPaneID).Run()
 	}
-	if m.tuiPaneID != "" {
-		runTmuxBatchOn(ctx, uiTmux, [][]string{
-			{"set-option", "-pu", "-t", m.tuiPaneID, viewPaneOption},
-			{"set-option", "-pu", "-t", m.tuiPaneID, viewSessionOption},
-		})
-	}
+	clearViewPairing(ctx, m.tuiPaneID)
 	if m.viewSession != "" {
 		agentTmux(ctx, "kill-session", "-t", "="+m.viewSession).Run()
 	}
@@ -554,24 +590,47 @@ func (m *DetailModel) bindPaneNavigation(ctx context.Context) {
 	cycle := func(next bool) string { return "run-shell -b '" + paneCycleScript(next) + "'" }
 	// One invocation per binding, not a batch: each bind-key's body carries its
 	// own escaped separator, and keeping them apart keeps that easy to see.
-	for _, bind := range [][]string{
+	binds := [][]string{
 		{"bind-key", "-T", "root", "S-Down", "if-shell", "-F", inView, cycle(true), "select-pane -t :.+"},
 		{"bind-key", "-T", "root", "S-Right", "if-shell", "-F", inView, cycle(true), "select-pane -t :.+"},
 		{"bind-key", "-T", "root", "S-Up", "if-shell", "-F", inView, cycle(false), "select-pane -t :.-"},
 		{"bind-key", "-T", "root", "S-Left", "if-shell", "-F", inView, cycle(false), "select-pane -t :.-"},
-		// Forward an internal navigation key to the TUI. The task loader focuses
-		// the executor after pane setup completes, including slow SSH attachments.
-		//
-		// The separator MUST be the escaped tmuxCmdSep. A bare ";" is eaten by
-		// tmux's own argv parser as a top-level command separator, so this reads
-		// as TWO commands: it binds only the select-pane half and RUNS the
-		// send-keys immediately — typing C-Up/C-Down into the TUI on every task
-		// open, which the detail view treats as prev/next task.
-		{"bind-key", "-T", "root", "M-S-Up", "select-pane", "-t", ":.0", tmuxCmdSep, "send-keys", "-t", ":.0", "C-Up"},
-		{"bind-key", "-T", "root", "M-S-Down", "select-pane", "-t", ":.0", tmuxCmdSep, "send-keys", "-t", ":.0", "C-Down"},
-	} {
+	}
+	// Forward an internal navigation key to the TUI. The task loader focuses
+	// the executor after pane setup completes, including slow SSH attachments.
+	//
+	// Addressed by pane ID, never ":.0". Pane 0 is not a synonym for "the first
+	// pane": with pane-base-index 1 — a line in a great many tmux.conf files —
+	// there is no pane 0 at all and tmux answers "can't find pane: 0", so both
+	// halves of the binding fail and Alt+Shift+Up/Down does nothing. The TUI
+	// also need not be the first pane of its window when ty runs inside the
+	// user's own tmux.
+	//
+	// The separator MUST be the escaped tmuxCmdSep. A bare ";" is eaten by
+	// tmux's own argv parser as a top-level command separator, so this reads
+	// as TWO commands: it binds only the select-pane half and RUNS the
+	// send-keys immediately — typing C-Up/C-Down into the TUI on every task
+	// open, which the detail view treats as prev/next task.
+	if tui := m.navigationTUIPane(); tui != "" {
+		binds = append(binds,
+			[]string{"bind-key", "-T", "root", "M-S-Up", "select-pane", "-t", tui, tmuxCmdSep, "send-keys", "-t", tui, "C-Up"},
+			[]string{"bind-key", "-T", "root", "M-S-Down", "select-pane", "-t", tui, tmuxCmdSep, "send-keys", "-t", tui, "C-Down"},
+		)
+	}
+	for _, bind := range binds {
 		uiTmux(ctx, bind...).Run()
 	}
+}
+
+// navigationTUIPane is the pane the forwarding bindings send keys to: this
+// instance's own pane. Empty when it is unknown, in which case the bindings are
+// left off rather than aimed at a guess — a guess here types task navigation
+// into whatever pane happens to answer.
+func (m *DetailModel) navigationTUIPane() string {
+	if m.tuiPaneID != "" {
+		return m.tuiPaneID
+	}
+	return ownPaneID()
 }
 
 // paneCycleScript is the shell that run-shell executes to move one step along
