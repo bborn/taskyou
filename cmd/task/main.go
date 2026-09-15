@@ -38,6 +38,7 @@ import (
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/reaper"
 	"github.com/bborn/workflow/internal/routine"
+	"github.com/bborn/workflow/internal/taskfilter"
 	"github.com/bborn/workflow/internal/taskref"
 	"github.com/bborn/workflow/internal/tmuxctl"
 	"github.com/bborn/workflow/internal/tuireload"
@@ -1368,6 +1369,8 @@ Examples:
   task list --status queued
   task list --project myapp
   task list --pr           # Show PR/CI status
+  task list --view active  # Apply a saved view (see: ty views)
+  task list --filter "status:in-progress status:blocked"
   task list --all --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			status, _ := cmd.Flags().GetString("status")
@@ -1391,6 +1394,23 @@ Examples:
 			onlyWorkflows, _ := cmd.Flags().GetBool("workflows")
 			noWorkflows, _ := cmd.Flags().GetBool("no-workflows")
 
+			// A saved view is just its query, so --view and --filter share one
+			// code path: resolve the name, then match with the same grammar the
+			// TUI filter bar uses.
+			viewName, _ := cmd.Flags().GetString("view")
+			filterQuery, _ := cmd.Flags().GetString("filter")
+			if viewName != "" {
+				filterQuery = strings.TrimSpace(resolveViewQuery(database, viewName) + " " + filterQuery)
+			}
+			var query taskfilter.Query
+			if filterQuery != "" {
+				query = parseViewQuery(database, filterQuery)
+				// A view may ask for done tasks, and the match happens in Go
+				// after the query, so a SQL LIMIT here would cap the rows before
+				// filtering. Widen the fetch and re-apply the limit below.
+				all = true
+			}
+
 			opts := db.ListTasksOptions{
 				Status:        status,
 				Project:       project,
@@ -1402,7 +1422,7 @@ Examples:
 			// The workflow split is applied in Go, after the query. Keeping the SQL
 			// LIMIT here would cap the rows BEFORE filtering and silently return far
 			// fewer than asked for, so widen the fetch and re-apply the limit below.
-			if onlyWorkflows || noWorkflows {
+			if onlyWorkflows || noWorkflows || filterQuery != "" {
 				opts.Limit = 5000
 			}
 
@@ -1427,6 +1447,13 @@ Examples:
 					filtered = filtered[:limit]
 				}
 				tasks = filtered
+			}
+
+			if filterQuery != "" {
+				tasks = query.Filter(tasks)
+				if limit > 0 && len(tasks) > limit {
+					tasks = tasks[:limit]
+				}
 			}
 
 			// Fetch PR info if requested
@@ -1578,10 +1605,13 @@ Examples:
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
 	listCmd.Flags().Bool("workflows", false, "Only workflow (pipeline) step tasks")
 	listCmd.Flags().Bool("no-workflows", false, "Exclude workflow step tasks (only standalone tasks)")
+	listCmd.Flags().String("view", "", "Apply a saved view by name (see: ty views)")
+	listCmd.Flags().String("filter", "", `Filter query, e.g. "status:in-progress status:blocked" (see: ty views --help)`)
 	listCmd.MarkFlagsMutuallyExclusive("workflows", "no-workflows")
 	listCmd.RegisterFlagCompletionFunc("status", completeFlagStatuses)
 	listCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	listCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
+	listCmd.RegisterFlagCompletionFunc("view", completeViewNames)
 	rootCmd.AddCommand(listCmd)
 
 	boardCmd := &cobra.Command{
@@ -3413,6 +3443,7 @@ Examples:
 	projectsCmd.AddCommand(projectsDeleteCmd)
 
 	rootCmd.AddCommand(projectsCmd)
+	rootCmd.AddCommand(newViewsCmd())
 
 	// Block command - create a dependency between two tasks
 	blockCmd := &cobra.Command{
