@@ -747,8 +747,12 @@ func (m *DetailModel) SetPosition(position, total int) {
 	m.updateTmuxPaneTitle()
 }
 
-// SetPRInfo sets the PR info for this task.
+// SetPRInfo sets the PR info for this task. Every task reload hands the stored
+// state back in, so an unchanged value is a no-op rather than a re-render.
 func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
+	if github.MarshalPRInfo(m.prInfo) == github.MarshalPRInfo(prInfo) {
+		return
+	}
 	m.prInfo = prInfo
 	if m.ready {
 		m.setViewportContent()

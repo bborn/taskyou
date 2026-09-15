@@ -1427,19 +1427,33 @@ Examples:
 			}
 
 			// Fetch PR info if requested
-			var prCache *github.PRCache
 			var cfg *config.Config
 			prInfoMap := make(map[int64]*github.PRInfo)
 			if showPR {
-				prCache = github.NewPRCache()
 				cfg = config.New(database)
+				// One GitHub query per repository covers every listed branch.
+				byRepo := make(map[string][]*db.Task)
 				for _, t := range tasks {
-					if t.BranchName != "" {
-						repoDir := t.WorktreePath
-						if repoDir == "" {
-							repoDir = cfg.GetProjectDir(t.Project)
-						}
-						if prInfo := prCache.GetPRForBranch(repoDir, t.BranchName); prInfo != nil {
+					if t.BranchName == "" {
+						continue
+					}
+					repoDir := cfg.GetProjectDir(t.Project)
+					if repoDir == "" {
+						repoDir = t.WorktreePath
+					}
+					byRepo[repoDir] = append(byRepo[repoDir], t)
+				}
+				for repoDir, repoTasks := range byRepo {
+					branches := make([]string, len(repoTasks))
+					for i, t := range repoTasks {
+						branches[i] = t.BranchName
+					}
+					res, err := github.FetchPRsForBranches(context.Background(), repoDir, branches)
+					if err != nil {
+						continue
+					}
+					for _, t := range repoTasks {
+						if prInfo := res.PRs[t.BranchName]; prInfo != nil {
 							prInfoMap[t.ID] = prInfo
 						}
 					}
@@ -1724,8 +1738,7 @@ Examples:
 				if repoDir == "" {
 					repoDir = cfg.GetProjectDir(task.Project)
 				}
-				prCache := github.NewPRCache()
-				prInfo = prCache.GetPRForBranch(repoDir, task.BranchName)
+				prInfo, _ = github.LookupPR(context.Background(), repoDir, task.BranchName)
 			}
 
 			if outputJSON {
