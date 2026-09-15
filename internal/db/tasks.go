@@ -474,6 +474,7 @@ type ListTasksOptions struct {
 	IncludeClosed  bool // Include closed tasks even when Status is empty
 	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
 	OrderByRecency bool // Sort purely by recency, ignoring pinned-first ordering
+	OpenPROnly     bool // Only tasks whose stored PR is still open or draft (not merged/closed)
 }
 
 // ListTasks retrieves tasks with optional filters.
@@ -529,6 +530,12 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
 		query += " AND status NOT IN ('done', 'archived')"
+	}
+
+	// pr_info_json is written by json.Marshal, so the state key has a fixed
+	// shape. LIKE rather than json_extract also tolerates a malformed row.
+	if opts.OpenPROnly {
+		query += ` AND (pr_info_json LIKE '%"state":"OPEN"%' OR pr_info_json LIKE '%"state":"DRAFT"%')`
 	}
 
 	// Soft-deleted (trashed) tasks are hidden everywhere by default — the board,
