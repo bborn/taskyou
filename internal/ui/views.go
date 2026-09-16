@@ -277,7 +277,9 @@ func (m *ViewPickerModel) helpLine() string {
 	case viewPickerConfirmDelete:
 		return "y: delete  n/esc: keep"
 	}
-	return "enter: apply  n: save current  d: delete  c: clear filter  esc: cancel"
+	// Kept under the modal's inner width (see modalWidth below): the help is one
+	// line, and a wrapped "esc:" / "cancel" reads like a rendering bug.
+	return "enter: apply · n: save · d: delete · c: clear · esc: cancel"
 }
 
 func (m *ViewPickerModel) renderItem(v *db.SavedView, selected bool, width int) string {

@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -335,5 +337,48 @@ func TestViewPickerClearRequest(t *testing.T) {
 	picker, _ = picker.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	if !picker.ClearRequested() {
 		t.Error("'c' should ask the board to drop its filter")
+	}
+}
+
+// The filter bar is one row by construction. A long query plus the hint used to
+// overflow and wrap, which pushes the board down and reads like a rendering
+// fault — and a long query is the normal case now that a view is a query.
+func TestFilterBarNeverExceedsTerminalWidth(t *testing.T) {
+	for _, width := range []int{80, 120, 150} {
+		m, database := viewTestApp(t)
+		m.width, m.height = width, 30
+		view, _ := database.SaveView("Payments", "[payments-api] status:open status:blocked")
+		m.applySavedView(view)
+		m.filterActive = true
+		m.filterInput.SetValue(m.filterText)
+
+		bar := m.renderFilterBar()
+		if got := lipgloss.Width(bar); got > width {
+			t.Errorf("width %d: filter bar rendered %d wide", width, got)
+		}
+		if got := lipgloss.Height(bar); got != 1 {
+			t.Errorf("width %d: filter bar is %d rows, want 1", width, got)
+		}
+	}
+}
+
+// The mini help grows every time a binding is added, and the bubbles help model
+// renders at its natural width when Width is 0 — so before the first resize it
+// could make the dashboard wider than the terminal, which re-wraps the board.
+//
+// Scope note: this asserts the help line, not the whole dashboard. The kanban
+// itself has a pre-existing floor — between MobileWidthThreshold (80) and ~91
+// columns it renders four desktop columns that do not fit — so a dashboard-wide
+// assertion would fail for a reason this change neither caused nor fixes.
+func TestHelpLineNeverExceedsTerminalWidth(t *testing.T) {
+	for _, width := range []int{60, 80, 120, 150} {
+		m, _ := viewTestApp(t)
+		m.width, m.height = width, 30
+		m.keys = LoadKeyMap()
+		m.help = help.New()
+
+		if got := lipgloss.Width(m.renderHelp()); got > width {
+			t.Errorf("width %d: help line rendered %d wide", width, got)
+		}
 	}
 }
