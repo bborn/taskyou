@@ -53,7 +53,7 @@ const Protocol = 3
 
 // ContractFingerprint pins the contract inputs Protocol covers. See
 // contract_test.go; it prints the replacement value when the inputs move.
-const ContractFingerprint = "0525e1796950e2a5"
+const ContractFingerprint = "6f6ce470baec9838"
 
 // Severity ranks a finding. The zero value is intentionally invalid so a
 // finding always carries an explicit one.

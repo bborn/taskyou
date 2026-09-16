@@ -5304,9 +5304,12 @@ func handleUserPromptSubmitHook(database *db.DB, taskID int64, input *ClaudeHook
 	// (see db.WaitForAgentReply) needs the counter to move even for a task whose
 	// status this hook will decline to touch — the wait is about the agent, not
 	// about what the board says.
-	if _, err := database.BeginAgentTurn(taskID); err != nil {
-		return err
-	}
+	//
+	// Best effort on purpose: status is load-bearing and the counter is not, so a
+	// failed counter write must never cost the transition below. A hook opens the
+	// database without migrating it (see db.OpenOptions), so on a database ty has
+	// not brought up to date this is the write that fails.
+	_, _ = database.BeginAgentTurn(taskID)
 
 	task, err := database.GetTask(taskID)
 	if err != nil {
@@ -5490,11 +5493,10 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	// Close the turn before anything else. A caller waiting on this task's reply
 	// (see db.WaitForAgentReply) needs the counter to move even for a task whose
 	// status this hook will decline to touch — and a Stop that only means "a tool
-	// is about to run" is not the end of a turn at all.
+	// is about to run" is not the end of a turn at all. Best effort, for the same
+	// reason as the matching write in handleUserPromptSubmitHook.
 	if input.StopReason != "tool_use" {
-		if _, err := database.CompleteAgentTurn(taskID); err != nil {
-			return err
-		}
+		_, _ = database.CompleteAgentTurn(taskID)
 	}
 
 	task, err := database.GetTask(taskID)
