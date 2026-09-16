@@ -74,6 +74,13 @@ try:
     close_size = evaluate('(()=>{const r=document.querySelector("[data-slot=dialog-close]").getBoundingClientRect();return [r.width,r.height]})()')
     assert min(close_size) >= 44, f'Sheet close target too small: {close_size}'
     print('PASS mobile attachment picker and close target')
+    # Portal content mounts after DialogContent's first effect. Its keyboard
+    # listener must attach when the panel appears, not only on initial render.
+    evaluate('Object.defineProperty(visualViewport,"height",{configurable:true,value:400});visualViewport.dispatchEvent(new Event("resize"))')
+    wait('document.querySelector("[role=dialog]").style.bottom === `${document.documentElement.clientHeight-400}px`')
+    evaluate('delete visualViewport.height;visualViewport.dispatchEvent(new Event("resize"))')
+    wait('document.querySelector("[role=dialog]").style.bottom === ""')
+    print('PASS dialog portal attaches and resets keyboard inset')
     for width, height in [(320, 568), (375, 420), (390, 844)]:
         browser('set', 'viewport', str(width), str(height))
         wait('!!document.querySelector("[role=dialog]")')
