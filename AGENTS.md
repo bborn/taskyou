@@ -313,12 +313,29 @@ Each task can specify its executor in the task form. The executor runs in an iso
 
 ### Executor Integration (Claude Example)
 
-Tasks run in tmux windows with hooks that track state:
+Tasks run in tmux windows with hooks that track state (written to the worktree's
+`.claude/settings.local.json`, handled by `ty claude-hook --event <event>`):
 
+- **SessionStart** - Records the Claude session that OWNS the task
+- **UserPromptSubmit** - A prompt was submitted, so a blocked task is "processing" again
 - **PreToolUse** - Before tool execution, ensures task is "processing"
 - **PostToolUse** - After tool completes, ensures task stays "processing"
-- **Notification** - When idle or needs permission, marks task "blocked"
+- **Notification** - When idle, needs permission, or is asking, marks task "blocked"
 - **Stop** - When Claude finishes responding, updates state accordingly
+- **StopFailure** - When the turn ends in an error, marks task "blocked" and records the provider error
+- **SessionEnd** - The agent exited; recorded as a signal the daemon reads instead of
+  inferring an exit from a missing tmux window. It never changes a status by itself
+
+Two rules these hooks live by:
+
+1. **Only the owning session is obeyed.** A task's `claude_session_id` is the owner,
+   claimed while the slot is empty (ty clears it before every fresh launch) and re-keyed
+   only by a SessionStart that continues the same conversation (`resume|clear|compact|fork`).
+   A `claude` the agent runs itself from Bash inherits `WORKTREE_TASK_ID` and loads these
+   same hooks; its events are logged and ignored rather than allowed to move the board.
+2. **A hook never stalls or fails the agent.** Each is registered with a timeout, reads a
+   bounded prefix of stdin (and drains the rest), opens SQLite with a short busy timeout,
+   and always exits 0 — failures go to ty's log, never back to Claude.
 
 ### Worktree Isolation
 

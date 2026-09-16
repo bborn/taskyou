@@ -11,6 +11,7 @@ import (
 	osexec "os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/pprof"
 	"sort"
@@ -86,7 +87,13 @@ var taskEmitter *events.Emitter
 // task.blocked/task.completed lifecycle hooks. Otherwise only the daemon
 // process emits these events and external watchers miss most transitions.
 func openTaskDB(path string) (*db.DB, error) {
-	database, err := db.Open(path)
+	return openTaskDBWithOptions(path, db.OpenOptions{})
+}
+
+// openTaskDBWithOptions is openTaskDB for callers that cannot take its defaults —
+// the Claude hooks, which run in the agent's critical path.
+func openTaskDBWithOptions(path string, opts db.OpenOptions) (*db.DB, error) {
+	database, err := db.OpenWithOptions(path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -473,10 +480,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 		Hidden: true, // Internal use only
 		Run: func(cmd *cobra.Command, args []string) {
 			hookEvent, _ := cmd.Flags().GetString("event")
-			if err := handleClaudeHook(hookEvent); err != nil {
-				// Don't print errors - hooks should be silent
-				os.Exit(1)
-			}
+			runClaudeHookCommand(hookEvent)
 		},
 	}
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
@@ -4987,15 +4991,64 @@ type ClaudeHookInput struct {
 	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
 	Message          string `json:"message,omitempty"`           // General message field
 	StopReason       string `json:"stop_reason,omitempty"`       // For Stop hooks
+	Source           string `json:"source,omitempty"`            // For SessionStart: startup|resume|clear|compact|fork
+	Reason           string `json:"reason,omitempty"`            // For SessionEnd (exit reason) and StopFailure (failure)
+	Error            string `json:"error,omitempty"`             // For StopFailure: the provider/runtime error
 	// Tool use fields (for PreToolUse and PostToolUse hooks)
 	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
 	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
 	ToolResponse json.RawMessage `json:"tool_response,omitempty"` // Tool result (PostToolUse only)
 	ToolUseID    string          `json:"tool_use_id,omitempty"`   // Unique identifier for this tool call
+
+	// truncated is set when the payload was larger than hookStdinLimit and only
+	// its leading fields could be recovered. Not part of Claude's wire format.
+	truncated bool
+}
+
+// Hook-path limits. A hook runs inside the agent's critical path: whatever it
+// does, it must finish in well under the `timeout` registered in the generated
+// settings (see setupClaudeHooks) and it must never make the agent wait on us.
+const (
+	// hookStdinLimit is how much of the payload we parse. UserPromptSubmit
+	// carries the whole prompt and PostToolUse the whole tool response, either
+	// of which can be megabytes; the fields we act on all sit near the front.
+	// Generous enough to hold any realistic tool_input (which the worktree
+	// write-guard does need in full), small enough that decoding it is never
+	// something the agent would notice waiting for.
+	hookStdinLimit = 1 << 20
+	// hookStdinDrainLimit bounds the discard that follows, which exists so the
+	// agent never blocks writing into a pipe nobody is reading.
+	hookStdinDrainLimit = 64 << 20
+	// hookSalvageLimit bounds the prefix scanned when the JSON turns out to be
+	// incomplete. Claude puts session_id and the small event scalars first, and
+	// scanning megabytes for them costs seconds of the agent's time - which is
+	// the very thing this path exists to avoid.
+	hookSalvageLimit = 16 << 10
+	// hookDBBusyTimeout is how long a hook waits on a locked database before
+	// giving up. Short on purpose: a busy database is worth a missed status
+	// update, never a stalled agent.
+	hookDBBusyTimeout = 1 * time.Second
+)
+
+// runClaudeHookCommand runs one hook and always succeeds.
+//
+// A hook that exits non-zero has its stderr fed to the agent and, for several
+// events, blocks the turn it fired on. So our own trouble — a locked database, a
+// payload we could not parse — goes to ty's log, and the agent carries on
+// knowing nothing about it.
+func runClaudeHookCommand(hookEvent string) {
+	if err := handleClaudeHook(hookEvent); err != nil {
+		ui.GetLogger().Warn("claude-hook %s failed: %v", hookEvent, err)
+	}
 }
 
 // handleClaudeHook processes Claude Code hook callbacks.
 // It reads hook data from stdin and updates task status accordingly.
+//
+// Every failure path here returns an error that the caller logs and swallows:
+// hooks report to ty, never to Claude. A hook that exits non-zero (or writes to
+// stderr) is surfaced to the agent, and for some events blocks its turn — so a
+// locked database or a malformed payload must cost a status update, nothing more.
 func handleClaudeHook(hookEvent string) error {
 	// Get task ID from environment (set by executor when launching Claude)
 	// If not set, this Claude session predates the task tracking system - silently succeed
@@ -5008,67 +5061,341 @@ func handleClaudeHook(hookEvent string) error {
 		return fmt.Errorf("invalid WORKTREE_TASK_ID: %s", taskIDStr)
 	}
 
-	// Read hook input from stdin
-	var input ClaudeHookInput
-	decoder := json.NewDecoder(os.Stdin)
-	if err := decoder.Decode(&input); err != nil {
-		return fmt.Errorf("decode hook input: %w", err)
-	}
+	// Read (and drain) stdin before touching the database, so the agent's write
+	// completes even if everything below fails.
+	input := readClaudeHookInput(os.Stdin)
 
-	// Open database
+	// Open the database the way a hook must: a short busy timeout, and no
+	// migrations (ty created this schema long before any agent ran).
 	dbPath := db.DefaultPath()
-	database, err := openTaskDB(dbPath)
+	database, err := openTaskDBWithOptions(dbPath, db.OpenOptions{
+		BusyTimeout: hookDBBusyTimeout,
+		SkipMigrate: true,
+	})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
-	// Log session ID once (on first hook call for this task)
-	logSessionIDOnce(database, taskID, &input)
+	return dispatchClaudeHook(database, taskID, hookEvent, input)
+}
+
+// dispatchClaudeHook routes one hook payload to its handler, after checking that
+// the session sending it is the one that owns the task.
+func dispatchClaudeHook(database *db.DB, taskID int64, hookEvent string, input *ClaudeHookInput) error {
+	if !claimHookSession(database, taskID, hookEvent, input) {
+		// A foreign session gets no say in the task's status. It does not get a
+		// free pass on the worktree write-guard though: that guard is about where
+		// bytes land, not about who owns the board, and a nested agent writing
+		// outside the worktree is exactly what it exists to stop.
+		if hookEvent == "PreToolUse" {
+			task, err := database.GetTask(taskID)
+			if err == nil && task != nil {
+				emitWorktreeGuardDecision(database, taskID, task, input)
+			}
+		}
+		return nil
+	}
 
 	// Handle based on hook event type
 	switch hookEvent {
 	case "PreToolUse":
-		return handlePreToolUseHook(database, taskID, &input)
+		return handlePreToolUseHook(database, taskID, input)
 	case "PostToolUse":
-		return handlePostToolUseHook(database, taskID, &input)
+		return handlePostToolUseHook(database, taskID, input)
 	case "Notification":
-		return handleNotificationHook(database, taskID, &input)
+		return handleNotificationHook(database, taskID, input)
+	case "UserPromptSubmit":
+		return handleUserPromptSubmitHook(database, taskID, input)
 	case "Stop":
-		return handleStopHook(database, taskID, &input)
+		return handleStopHook(database, taskID, input)
+	case "StopFailure":
+		return handleStopFailureHook(database, taskID, input)
+	case "SessionStart":
+		return nil // claimHookSession already recorded the session
+	case "SessionEnd":
+		return handleSessionEndHook(database, taskID, input)
 	default:
 		// Unknown hook type, ignore
 		return nil
 	}
 }
 
-// logSessionIDOnce logs the Claude session ID for a task, but only once.
-// It checks if a session ID log already exists to avoid duplicate entries.
-// Also persists the session ID to the task record for reliable resumption.
-func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
-	if input.SessionID == "" {
-		return
-	}
+// readClaudeHookInput reads a bounded prefix of the hook payload, drains the
+// rest, and parses what it got. It never returns nil and never reports an error:
+// a payload we cannot read is a status update we cannot make, which is not
+// something to tell the agent about.
+func readClaudeHookInput(r io.Reader) *ClaudeHookInput {
+	data, truncated := readBoundedHookStdin(r)
+	input := parseClaudeHookInput(data)
+	input.truncated = truncated
+	return input
+}
 
-	// Check if we've already logged a session ID for this task
-	logs, err := database.GetTaskLogs(taskID, 50)
+// readBoundedHookStdin reads at most hookStdinLimit bytes, then discards the
+// remainder (bounded by hookStdinDrainLimit) so the agent's write to the hook's
+// stdin pipe always completes. Exiting with data still in the pipe gives the
+// writer an EPIPE, which is exactly the kind of noise a hook must not create.
+func readBoundedHookStdin(r io.Reader) (data []byte, truncated bool) {
+	data, err := io.ReadAll(io.LimitReader(r, hookStdinLimit))
 	if err != nil {
-		return
+		return data, false
 	}
+	if int64(len(data)) < hookStdinLimit {
+		return data, false
+	}
+	io.CopyN(io.Discard, r, hookStdinDrainLimit)
+	return data, true
+}
 
-	sessionPrefix := "Claude session: "
-	for _, log := range logs {
-		if log.LineType == "system" && strings.HasPrefix(log.Content, sessionPrefix) {
-			// Already logged
-			return
+// parseClaudeHookInput decodes a hook payload, falling back to a scan of the
+// leading fields when the JSON is incomplete — which is what an oversized
+// payload truncated at hookStdinLimit looks like. Claude puts session_id,
+// hook_event_name and the small event-specific scalars first, so a truncated
+// payload still identifies its session and still drives the right transition;
+// only the bulky fields (tool_input, tool_response) are lost.
+func parseClaudeHookInput(data []byte) *ClaudeHookInput {
+	var input ClaudeHookInput
+	if err := json.Unmarshal(data, &input); err == nil {
+		return &input
+	}
+	fields := salvageHookFields(data)
+	return &ClaudeHookInput{
+		SessionID:        fields["session_id"],
+		TranscriptPath:   fields["transcript_path"],
+		Cwd:              fields["cwd"],
+		PermissionMode:   fields["permission_mode"],
+		HookEventName:    fields["hook_event_name"],
+		NotificationType: fields["notification_type"],
+		Message:          fields["message"],
+		StopReason:       fields["stop_reason"],
+		Source:           fields["source"],
+		Reason:           fields["reason"],
+		Error:            fields["error"],
+		ToolName:         fields["tool_name"],
+	}
+}
+
+// hookJSONStringField matches `"<name>": "<value>"` in a JSON document, value
+// included escapes and all, so the match can be unquoted by encoding/json.
+var hookJSONStringField = regexp.MustCompile(`"([a-z_]+)"\s*:\s*("(?:[^"\\]|\\.)*")`)
+
+// salvageHookFields scans a bounded prefix of a possibly-truncated payload once
+// and returns its top-level string fields. First occurrence wins: Claude's
+// payloads are flat enough that nested objects (tool_input) come after the
+// scalars we want. One pass, because scanning is the expensive part here and
+// this runs while the agent waits.
+func salvageHookFields(data []byte) map[string]string {
+	if len(data) > hookSalvageLimit {
+		data = data[:hookSalvageLimit]
+	}
+	fields := make(map[string]string)
+	for _, m := range hookJSONStringField.FindAllSubmatch(data, -1) {
+		name := string(m[1])
+		if _, seen := fields[name]; seen {
+			continue
+		}
+		var v string
+		if err := json.Unmarshal(m[2], &v); err == nil {
+			fields[name] = v
 		}
 	}
+	return fields
+}
 
-	// Log the session ID
-	database.AppendTaskLog(taskID, "system", sessionPrefix+input.SessionID)
+// sessionStartTakesOver reports whether a SessionStart with this source is the
+// owning conversation continuing under a new session ID, rather than a new and
+// unrelated session.
+//
+// "startup" is deliberately absent: that is what a `claude` the agent launches
+// itself from Bash reports, and adopting it would hand the task's status over to
+// a nested session. Everything else here is the SAME conversation being
+// re-keyed — a resume, a /clear, a compact, a fork — which the agent cannot
+// reach from a tool call.
+func sessionStartTakesOver(source string) bool {
+	switch source {
+	case "resume", "clear", "compact", "fork":
+		return true
+	}
+	return false
+}
 
-	// Persist session ID to task record for reliable resumption
-	database.UpdateTaskClaudeSessionID(taskID, input.SessionID)
+// claimHookSession decides whether a hook payload is allowed to act on the task,
+// and records the owning session the first time it sees one.
+//
+// The task's claude_session_id is the owner. Any process that inherits
+// WORKTREE_TASK_ID loads this worktree's hooks — most notably a `claude -p ...`
+// the agent runs from Bash, whose Stop hook would otherwise mark the parent task
+// blocked, or advance a workflow step to done, on the strength of a nested
+// session finishing its own unrelated turn.
+//
+// Ownership is claimed by whoever arrives while the slot is empty, and ty is
+// what empties it: every path that starts a fresh Claude session clears
+// claude_session_id first (UpdateTaskClaudeSessionID(id, "")), and a resume
+// keeps the stored ID, so the legitimate changes all land on an empty slot or on
+// a matching ID. The one remaining case is the owning conversation being re-keyed
+// in place (/clear, fork, compact, a resume that forks), which arrives as a
+// SessionStart - see sessionStartTakesOver.
+func claimHookSession(database *db.DB, taskID int64, hookEvent string, input *ClaudeHookInput) bool {
+	if input == nil || input.SessionID == "" {
+		return true // nothing to check against (older CLI, or a synthetic call)
+	}
+	task, err := database.GetTask(taskID)
+	if err != nil || task == nil {
+		// We cannot tell who owns the task; the handlers re-read it anyway and
+		// will do nothing. Don't turn a database hiccup into a dropped hook.
+		return true
+	}
+
+	owner := strings.TrimSpace(task.ClaudeSessionID)
+	switch {
+	case owner == "":
+		recordOwningSession(database, taskID, input.SessionID, "")
+		return true
+	case owner == input.SessionID:
+		return true
+	case hookEvent == "SessionStart" && sessionStartTakesOver(input.Source):
+		recordOwningSession(database, taskID, input.SessionID, input.Source)
+		return true
+	default:
+		logForeignHookOnce(database, taskID, hookEvent, owner, input.SessionID)
+		return false
+	}
+}
+
+// recordOwningSession persists the session that owns the task and logs it, so a
+// resume has an ID to resume and a reader can see when ownership moved. reason is
+// the SessionStart source when this replaces an earlier owner, "" on first claim.
+func recordOwningSession(database *db.DB, taskID int64, sessionID, reason string) {
+	line := "Claude session: " + sessionID
+	if reason != "" {
+		line += " (took over on session " + reason + ")"
+	}
+	if logged, err := database.HasLogLineContaining(taskID, line); err == nil && logged {
+		return
+	}
+	database.AppendTaskLog(taskID, "system", line)
+	database.UpdateTaskClaudeSessionID(taskID, sessionID)
+}
+
+// logForeignHookOnce records, once per foreign session, that a hook from a
+// session that does not own this task was ignored. Once per session rather than
+// once per hook: a nested `claude -p` fires a hook per tool call, and the point
+// is to make the nesting visible, not to bury the task's log under it.
+func logForeignHookOnce(database *db.DB, taskID int64, hookEvent, owner, foreign string) {
+	line := fmt.Sprintf("Ignored a %s hook from Claude session %s — this task is owned by session %s",
+		hookEvent, foreign, owner)
+	marker := fmt.Sprintf("hook from Claude session %s — this task is owned by session %s", foreign, owner)
+	if logged, err := database.HasLogLineContaining(taskID, marker); err == nil && logged {
+		return
+	}
+	database.AppendTaskLog(taskID, "system", line)
+}
+
+// handleUserPromptSubmitHook handles UserPromptSubmit hooks (a human sent the
+// agent something), which is the earliest possible evidence that a blocked task
+// is working again.
+//
+// Without it, a task parked in 'blocked' only returned to 'processing' on the
+// next PreToolUse — so a follow-up the agent answers from its own head, running
+// no tool at all, spent its whole turn showing as "waiting for input" on the
+// board and could be swept as idle while it typed.
+//
+// This hook must stay silent on stdout: whatever a UserPromptSubmit hook prints
+// is injected into the agent's context as additional instructions.
+func handleUserPromptSubmitHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil || task.StartedAt == nil {
+		return nil
+	}
+	if task.Status == db.StatusBlocked {
+		database.SetTaskStatus(taskID, db.StatusProcessing, db.ActorHook,
+			"a prompt was submitted to the agent, so it is working again",
+			db.Observedf("Claude's UserPromptSubmit hook fired for session %s", input.SessionID))
+		database.AppendTaskLog(taskID, "system", "Agent resumed working")
+	}
+	return nil
+}
+
+// handleStopFailureHook handles StopFailure hooks (the agent's turn ended in an
+// error rather than a reply).
+//
+// A failed turn is not a finished one: nothing was handed off, so a workflow step
+// must never advance on it. Park the task for a human and record what the
+// provider actually said, which is otherwise visible only inside the transcript.
+func handleStopFailureHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil || task.StartedAt == nil {
+		return nil
+	}
+	detail := firstNonEmpty(input.Error, input.Reason, input.Message)
+	if task.Status == db.StatusProcessing {
+		database.SetTaskStatus(taskID, db.StatusBlocked, db.ActorHook,
+			"the agent's turn ended in a failure, so it is waiting on a human",
+			db.Observedf("Claude's StopFailure hook reported %q", detail))
+	}
+	line := "Agent turn failed"
+	if detail != "" {
+		line += ": " + detail
+	}
+	database.AppendTaskLog(taskID, "error", line)
+	noteProviderError(database, taskID, input)
+	return nil
+}
+
+// handleSessionEndHook records that the agent process exited.
+//
+// This is a POSITIVE exit signal, and the only one that isn't an inference: a
+// missing tmux window can equally mean the pane was moved into a UI session, or
+// that the window has not come up yet, and both mistakes have parked working
+// tasks. The daemon reads this line (db.HasSessionEnded) instead of guessing.
+//
+// It deliberately writes no status. An agent exiting says nothing about whether
+// its work is finished — the transitions stay with the hooks and sweeps that have
+// real evidence to point at (see SetTaskStatus).
+func handleSessionEndHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	reason := firstNonEmpty(input.Reason, input.Message)
+	if !sessionEndIsExit(reason) {
+		// The CONVERSATION ended, not the process: /clear and a compaction both
+		// close one session and open another inside the same running agent. Logging
+		// these as an exit would have the daemon stop polling a task whose agent is
+		// still working. A SessionStart follows immediately with the new session ID.
+		database.AppendTaskLog(taskID, "system", "Claude session ended and restarted ("+reason+")")
+		return nil
+	}
+	line := db.SessionEndedLogPrefix
+	if reason != "" {
+		line += " (" + reason + ")"
+	}
+	database.AppendTaskLog(taskID, "system", line)
+	return nil
+}
+
+// sessionEndIsExit reports whether a SessionEnd reason means the agent PROCESS
+// went away. Claude fires SessionEnd for in-process conversation boundaries too
+// (/clear, a compaction), and those must not read as an exit.
+func sessionEndIsExit(reason string) bool {
+	switch reason {
+	case "clear", "compact":
+		return false
+	}
+	return true
+}
+
+// firstNonEmpty returns the first non-blank string, or "".
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // handleNotificationHook handles Notification hooks from Claude.
@@ -5307,6 +5634,16 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 // nothing when the write is allowed, leaving Claude's normal permission flow intact.
 func emitWorktreeGuardDecision(database *db.DB, taskID int64, task *db.Task, input *ClaudeHookInput) {
 	if task == nil {
+		return
+	}
+	// A payload too big to parse (a multi-megabyte Write) arrives with its
+	// tool_input lost, and guessing from a tool name alone would either wave
+	// through a write we never saw or deny one we never read. Say so in ty's log
+	// - silently allowing is what makes a guard look like it is working when it
+	// is not - and leave Claude's own permission flow to handle the call.
+	if input.truncated && len(input.ToolInput) == 0 {
+		ui.GetLogger().Warn("claude-hook PreToolUse: task %d tool %q payload exceeded %d bytes; worktree guard not evaluated",
+			taskID, input.ToolName, hookStdinLimit)
 		return
 	}
 	var allow []string
