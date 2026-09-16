@@ -45,8 +45,7 @@ func (o *OpenClawExecutor) Name() string {
 
 // IsAvailable checks if the openclaw CLI is installed.
 func (o *OpenClawExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("openclaw")
-	return err == nil
+	return binaryOnPath("openclaw")
 }
 
 // Execute runs a task using the OpenClaw CLI.

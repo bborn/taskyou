@@ -38,8 +38,7 @@ func (c *CodexExecutor) Name() string {
 
 // IsAvailable checks if the codex CLI is installed.
 func (c *CodexExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("codex")
-	return err == nil
+	return binaryOnPath("codex")
 }
 
 // ensureAuthenticated checks if Codex has valid authentication and attempts to refresh if needed.

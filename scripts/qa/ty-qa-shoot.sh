@@ -18,10 +18,16 @@
 #   TY_QA_SHOT_ENV="VAR1 VAR2" forwards those vars into the VHS terminal — for a
 #   scenario that must not touch the real machine (e.g. HOME).
 #
+#   TY_QA_SHOT_CMD="doctor --strict" shoots a CLI subcommand instead of the TUI:
+#   the same isolated instance and terminal, but the line typed is `ty <cmd>`.
+#   Pair it with TY_QA_SHOT_KEEP_DB so the command sees the seeded database.
+#
 # Examples:
 #   ty-qa-shoot.sh "$TY_QA_PROJECTS/demo" /tmp/card.png "Sleep 9s"   # git-repo card (waits for claude -p inference)
 #   ty-qa-shoot.sh /tmp/plain /tmp/welcome.png "Sleep 5s"            # welcome fork
 #   ty-qa-shoot.sh /tmp/plain /tmp/picker.png "Sleep 5s" "Enter" "Sleep 1s" 'Type "ty"' "Sleep 2s"
+#   TY_QA_SHOT_KEEP_DB=1 TY_QA_SHOT_CMD=doctor \
+#     ty-qa-shoot.sh /tmp/plain /tmp/doctor.png "Sleep 8s"          # a CLI report
 #
 # Requires: vhs (brew install vhs), magick (brew install imagemagick).
 set -euo pipefail
@@ -35,7 +41,11 @@ command -v magick >/dev/null || { echo "ty-qa: imagemagick not installed (brew i
 # Data shots keep the seeded DB — freeze the daemon so the TUI we launch doesn't
 # start an executor and churn `queued` tasks mid-shot. (First-run shots use a
 # fresh DB with no tasks, so there's nothing to protect.)
-if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ]; then
+#
+# A CLI shot is exempt: it launches no TUI, so nothing ensures a daemon and
+# there is no board to churn — and freezing would replace the real daemon with a
+# decoy `sleep`, which is precisely what a shot of `ty doctor` must not show.
+if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ] && [ -z "${TY_QA_SHOT_CMD:-}" ]; then
   ty_qa_freeze_daemon
 fi
 
@@ -82,7 +92,10 @@ GIF="${OUT%.png}.gif"
   fi
   echo 'Enter'
   echo 'Show'
-  echo "Type \"$TY_BIN\""
+  # TY_QA_SHOT_CMD shoots a CLI subcommand instead of the TUI — `ty doctor`,
+  # `ty board --json`, anything that prints and exits. Same terminal, same
+  # isolated instance, same capture path; only the line typed differs.
+  echo "Type \"$TY_BIN ${TY_QA_SHOT_CMD:-}\""
   echo 'Enter'
   if [ "$#" -eq 0 ]; then echo 'Sleep 6s'; fi
   for line in "$@"; do echo "$line"; done

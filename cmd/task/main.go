@@ -39,6 +39,7 @@ import (
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/reaper"
 	"github.com/bborn/workflow/internal/routine"
+	"github.com/bborn/workflow/internal/taskfilter"
 	"github.com/bborn/workflow/internal/taskref"
 	"github.com/bborn/workflow/internal/tmuxctl"
 	"github.com/bborn/workflow/internal/tuireload"
@@ -235,6 +236,16 @@ Examples:
 		"mcp-server":  true,
 		"claude-hook": true,
 	}
+	// Compare this binary against the running daemon before the command does
+	// anything. Cobra runs only the innermost PersistentPreRun, and no
+	// subcommand defines one, so this covers every CLI entrypoint.
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if !shouldReportHandshake(cmd) {
+			return
+		}
+		reportHandshake(os.Stderr)
+	}
+
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
 		// Flush any pending event hook goroutines kicked off by the command.
 		// Without this, short-lived CLI commands exit before `task.completed`
@@ -1372,6 +1383,8 @@ Examples:
   task list --status queued
   task list --project myapp
   task list --pr           # Show PR/CI status
+  task list --view active  # Apply a saved view (see: ty views)
+  task list --filter "status:in-progress status:blocked"
   task list --all --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			status, _ := cmd.Flags().GetString("status")
@@ -1395,6 +1408,23 @@ Examples:
 			onlyWorkflows, _ := cmd.Flags().GetBool("workflows")
 			noWorkflows, _ := cmd.Flags().GetBool("no-workflows")
 
+			// A saved view is just its query, so --view and --filter share one
+			// code path: resolve the name, then match with the same grammar the
+			// TUI filter bar uses.
+			viewName, _ := cmd.Flags().GetString("view")
+			filterQuery, _ := cmd.Flags().GetString("filter")
+			if viewName != "" {
+				filterQuery = strings.TrimSpace(resolveViewQuery(database, viewName) + " " + filterQuery)
+			}
+			var query taskfilter.Query
+			if filterQuery != "" {
+				query = parseViewQuery(database, filterQuery)
+				// A view may ask for done tasks, and the match happens in Go
+				// after the query, so a SQL LIMIT here would cap the rows before
+				// filtering. Widen the fetch and re-apply the limit below.
+				all = true
+			}
+
 			opts := db.ListTasksOptions{
 				Status:        status,
 				Project:       project,
@@ -1406,7 +1436,7 @@ Examples:
 			// The workflow split is applied in Go, after the query. Keeping the SQL
 			// LIMIT here would cap the rows BEFORE filtering and silently return far
 			// fewer than asked for, so widen the fetch and re-apply the limit below.
-			if onlyWorkflows || noWorkflows {
+			if onlyWorkflows || noWorkflows || filterQuery != "" {
 				opts.Limit = 5000
 			}
 
@@ -1431,6 +1461,13 @@ Examples:
 					filtered = filtered[:limit]
 				}
 				tasks = filtered
+			}
+
+			if filterQuery != "" {
+				tasks = query.Filter(tasks)
+				if limit > 0 && len(tasks) > limit {
+					tasks = tasks[:limit]
+				}
 			}
 
 			// Fetch PR info if requested
@@ -1582,10 +1619,13 @@ Examples:
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
 	listCmd.Flags().Bool("workflows", false, "Only workflow (pipeline) step tasks")
 	listCmd.Flags().Bool("no-workflows", false, "Exclude workflow step tasks (only standalone tasks)")
+	listCmd.Flags().String("view", "", "Apply a saved view by name (see: ty views)")
+	listCmd.Flags().String("filter", "", `Filter query, e.g. "status:in-progress status:blocked" (see: ty views --help)`)
 	listCmd.MarkFlagsMutuallyExclusive("workflows", "no-workflows")
 	listCmd.RegisterFlagCompletionFunc("status", completeFlagStatuses)
 	listCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	listCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
+	listCmd.RegisterFlagCompletionFunc("view", completeViewNames)
 	rootCmd.AddCommand(listCmd)
 
 	boardCmd := &cobra.Command{
@@ -2986,75 +3026,8 @@ and open TUIs switch to the new version with agent sessions left running.`,
 	}
 	rootCmd.AddCommand(upgradeCmd)
 
-	// Doctor command - diagnose the agent server's GitHub auth health.
-	doctorCmd := &cobra.Command{
-		Use:   "doctor",
-		Short: "Diagnose agent server health (GitHub auth & rate limits)",
-		Long: `Checks the local GitHub CLI authentication used by agents and warns about
-conditions that cause shared GraphQL bucket exhaustion across agent servers:
-
-  - gh not installed or not logged in (GitHub operations silently fail)
-  - an expired/revoked token (401 Bad credentials)
-  - authentication as a PERSONAL account, whose 5,000 pt/hr GraphQL limit is
-    shared per-user across every server authed as that account
-  - low remaining GraphQL headroom
-
-Each agent server should authenticate with its OWN GitHub App installation
-token (a bot identity), which gets an independent GraphQL bucket.
-
-Exits non-zero on hard errors (gh missing, logged out, expired token). Pass
---strict to also exit non-zero on warnings (e.g. personal-account auth), so a
-fleet sweep like 'for s in ...; do ssh $s ty doctor --strict; done' can flag
-servers programmatically.`,
-		Run: func(cmd *cobra.Command, args []string) {
-			strict, _ := cmd.Flags().GetBool("strict")
-			fmt.Println(boldStyle.Render("TaskYou Doctor"))
-			fmt.Println(dimStyle.Render("Checking GitHub authentication..."))
-			fmt.Println()
-
-			status := github.CheckAuth(context.Background())
-			if status.Err != nil {
-				fmt.Println(warnStyle.Render("⚠ Could not fully probe gh: " + status.Err.Error()))
-				fmt.Println()
-			}
-
-			findings := status.Findings()
-			hasError := false
-			for _, f := range findings {
-				var icon, msg string
-				switch f.Severity {
-				case github.SeverityOK:
-					icon = successStyle.Render("✓")
-					msg = f.Message
-				case github.SeverityWarn:
-					icon = warnStyle.Render("⚠")
-					msg = warnStyle.Render(f.Message)
-				case github.SeverityError:
-					icon = errorStyle.Render("✗")
-					msg = errorStyle.Render(f.Message)
-					hasError = true
-				}
-				fmt.Printf("%s %s\n", icon, msg)
-				if f.Detail != "" {
-					fmt.Println(dimStyle.Render("    " + f.Detail))
-				}
-			}
-
-			fmt.Println()
-			if hasError || status.HasProblems() {
-				fmt.Println(dimStyle.Render("Tip: provision this server with its own GitHub App installation token,"))
-				fmt.Println(dimStyle.Render("mirroring the offerlab-devs[bot] pattern, for an independent rate-limit bucket."))
-			} else {
-				fmt.Println(successStyle.Render("All checks passed."))
-			}
-
-			if hasError || (strict && status.HasProblems()) {
-				os.Exit(1)
-			}
-		},
-	}
-	doctorCmd.Flags().Bool("strict", false, "Exit non-zero on warnings too (e.g. personal-account auth), for fleet health sweeps")
-	rootCmd.AddCommand(doctorCmd)
+	// Doctor command - diagnose the whole install, read-only. See doctor.go.
+	rootCmd.AddCommand(newDoctorCmd())
 
 	// Settings command
 	settingsCmd := &cobra.Command{
@@ -3417,6 +3390,7 @@ Examples:
 	projectsCmd.AddCommand(projectsDeleteCmd)
 
 	rootCmd.AddCommand(projectsCmd)
+	rootCmd.AddCommand(newViewsCmd())
 
 	// Block command - create a dependency between two tasks
 	blockCmd := &cobra.Command{
@@ -4469,6 +4443,11 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 
 	fmt.Fprintln(os.Stderr, dimStyle.Render("Using local database: "+dbPath))
 
+	// Same comparison the CLI makes. The stderr copy scrolls away under the alt
+	// screen, so anything worth saying is also handed to the board as a banner.
+	reportHandshake(os.Stderr)
+	notice := handshakeNotice()
+
 	// Load config from database
 	cfg := config.New(database)
 
@@ -4487,6 +4466,9 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	}
 	model.EnableReload(token)
 	model.EnableTerminalTaskReport()
+	if notice != "" {
+		model.ShowStartupNotice(notice, 30*time.Second)
+	}
 	switch {
 	case launch.query != "":
 		model.OpenPaletteOnLoad(launch.query)
@@ -4628,6 +4610,7 @@ func ensureDaemonRunning(dangerousMode bool) error {
 			// Stale pid file, remove it
 			os.Remove(pidFile)
 			os.Remove(modeFile)
+			removeDaemonRecord()
 		}
 	}
 
@@ -4828,6 +4811,9 @@ func stopDaemon() error {
 
 	os.Remove(pidFile)
 	os.Remove(modeFile)
+	// The daemon removes this itself on a clean exit; do it here too so a
+	// SIGKILLed one cannot leave a record that outlives the process it describes.
+	removeDaemonRecord()
 	return nil
 }
 
@@ -4861,6 +4847,15 @@ func runDaemon() error {
 	}
 	os.WriteFile(modeFile, []byte(modeStr), 0644)
 	defer os.Remove(modeFile)
+
+	// Record what this daemon is and where it lives, so a TUI or CLI of another
+	// build can say so instead of leaving the user to work it out from symptoms.
+	// Best effort: a daemon that cannot describe itself still runs tasks, and
+	// clients read a missing record as "unknown build", never as an error.
+	if err := writeDaemonRecord(); err != nil {
+		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not write daemon build record: "+err.Error()))
+	}
+	defer removeDaemonRecord()
 
 	// Setup logger
 	logger := log.NewWithOptions(os.Stderr, log.Options{

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,36 @@ func OpenWithOptions(path string, opts OpenOptions) (*DB, error) {
 	return wrapped, nil
 }
 
+// OpenReadOnly opens an existing database without migrating it.
+//
+// `ty doctor` exists to report what is on this machine, not to change it, and
+// db.Open's first act is to run every migration — which on an old file is a
+// repair. Opening read-only means doctor can say "this database was last
+// migrated by an older build" instead of quietly making that untrue.
+//
+// The file must already exist: creating one would itself be a change.
+func OpenReadOnly(path string) (*DB, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	// mode=ro needs the file: URI form. immutable is deliberately NOT set — the
+	// database may have a live WAL from the running daemon, and readers must
+	// still see it.
+	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	sqlDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetConnMaxLifetime(2 * time.Second)
+	wrapped := &DB{DB: sqlDB, path: path}
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	return wrapped, nil
+}
+
 // permModeAutoMigrationKey guards the one-time rewrite of legacy "auto"
 // permission_mode rows (which meant acceptEdits) to "accept-edits", now that
 // "auto" denotes Claude Code's real auto mode.
@@ -167,6 +198,24 @@ const permModeAutoMigrationKey = "migration:auto_means_accept_edits_v1"
 // that default. Left in place it launches `claude --model claude`, which the CLI
 // rejects. Rewrite those rows to "" (no override / Claude's global default).
 const modelClaudeSlugMigrationKey = "migration:clear_model_claude_slug_v1"
+
+// SchemaVersion is the migration level this build brings a database up to.
+//
+// It is a hand-maintained counter, bumped by one every time a migration is
+// added to migrate() below — there is no automatic derivation, because the
+// migrations are idempotent statements rather than numbered files and nothing
+// in the list can be counted reliably (ALTER TABLEs are allowed to fail, and
+// remoteMigrations is appended from another file).
+//
+// Two things read it. `ty doctor` compares the stamp in a database against this
+// constant to tell "current" from "last touched by an older ty". And
+// handshake.Protocol must be bumped whenever a schema change means a daemon and
+// a client of different builds would disagree about a row — see
+// internal/handshake.
+const SchemaVersion = 1
+
+// SchemaVersionKey is where SchemaVersion is stamped in the settings table.
+const SchemaVersionKey = "schema_version"
 
 // migrate runs database migrations.
 func (db *DB) migrate() error {
@@ -276,6 +325,20 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine, id)`,
+
+		// Saved views: named filter queries in the internal/taskfilter grammar
+		// (e.g. "status:in-progress status:blocked"). The board, the CLI and the
+		// HTTP API all resolve a name through this table, so a view means exactly
+		// one thing everywhere. Names are unique case-insensitively so "Active"
+		// and "active" cannot become two rows that render identically.
+		`CREATE TABLE IF NOT EXISTS saved_views (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			query TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 
 		// Pipeline artifacts: inter-phase document hand-off for workflows (e.g. the
 		// rpi workflow). Keyed by (branch, name) so a document phase can write a full
@@ -555,6 +618,11 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("ensure default task types: %w", err)
 	}
 
+	// Seed the starter saved views (once — see savedViewSeedKey)
+	if err := db.seedDefaultSavedViews(); err != nil {
+		return fmt.Errorf("seed saved views: %w", err)
+	}
+
 	// Assign default colors to projects without colors
 	if err := db.ensureProjectColors(); err != nil {
 		return fmt.Errorf("ensure project colors: %w", err)
@@ -572,7 +640,35 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("backfill status events: %w", err)
 	}
 
+	// Stamp the schema this build just brought the file up to. Written last, so
+	// a migrate that died halfway does not claim to have finished. Read by
+	// `ty doctor`, which opens the database read-only and so cannot migrate it
+	// itself — the stamp is the only way it can tell a current file from one
+	// last touched by an older build.
+	//
+	// Only when it actually changes: migrate() runs on every Open, and every ty
+	// command opens the database. An unconditional write here would be one more
+	// row for every `ty list` to contend with on the single writer.
+	if current, ok := db.ReadSchemaVersion(); !ok || current != SchemaVersion {
+		db.SetSetting(SchemaVersionKey, strconv.Itoa(SchemaVersion))
+	}
+
 	return nil
+}
+
+// ReadSchemaVersion returns the schema version recorded in the file, and
+// whether one was recorded at all. A database last opened by a build from
+// before the stamp existed reports (0, false) — old, but not corrupt.
+func (db *DB) ReadSchemaVersion() (int, bool) {
+	v, err := db.GetSetting(SchemaVersionKey)
+	if err != nil || strings.TrimSpace(v) == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // ensurePersonalProject creates the 'personal' project if it doesn't exist.

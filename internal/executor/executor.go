@@ -3502,6 +3502,42 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 	return "", fmt.Errorf("new-window failed: %v (output: %s)", err, outputStr)
 }
 
+// ClaudeHookEvents are the Claude Code hook events ty installs into a task's
+// worktree. Every one of them is load-bearing for task status, so the set is
+// named once here rather than being implied by whatever setupClaudeHooks
+// happens to write:
+//
+//   - SessionStart records the Claude session that OWNS the task; everything
+//     below is ignored when it comes from any other session (see
+//     claimHookSession), because a `claude` the agent runs from Bash inherits
+//     WORKTREE_TASK_ID and loads these same hooks
+//   - UserPromptSubmit returns a blocked task to "processing" on the reply,
+//     rather than on the next tool call it may never make
+//   - PreToolUse / PostToolUse keep a working task on "processing"
+//   - Notification marks it "blocked" when Claude wants an answer
+//   - Stop marks it "blocked" when Claude has finished its turn
+//   - StopFailure marks it "blocked" when the turn ended in an error, and
+//     records what the provider actually said
+//   - SessionEnd is the agent's own report that it exited — the one exit signal
+//     that is not an inference from a missing tmux window. It writes no status
+//
+// setupClaudeHooks builds its config from this list, `ty doctor` verifies a
+// live task's settings file against it, and internal/handshake fingerprints it:
+// changing the set changes what the daemon and a client must agree on, so it
+// forces a handshake.Protocol bump.
+var ClaudeHookEvents = []string{
+	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+	"Notification", "Stop", "StopFailure", "SessionEnd",
+}
+
+// claudeHookMatchers restricts a hook to certain events. Notification fires for
+// more than the cases ty cares about, and SessionStart for more sources than
+// can legitimately re-key a task's owning session.
+var claudeHookMatchers = map[string]string{
+	"Notification": "idle_prompt|permission_prompt|elicitation_dialog|agent_needs_input",
+	"SessionStart": "startup|resume|clear|fork",
+}
+
 // claudeHookTimeoutSeconds bounds every generated hook. Claude waits for a hook
 // to exit before carrying on, so an unbounded one is a stall waiting to happen:
 // the handler opens SQLite, and a database another process holds locked would
@@ -3510,25 +3546,16 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 // cannot predict - a slow disk, a paged-out binary, an NFS worktree.
 const claudeHookTimeoutSeconds = 5
 
-// claudeHookEntry builds one entry of the generated hooks config: a single
-// `ty claude-hook --event <event>` command, with a timeout, optionally scoped to
-// a matcher. Every event goes through here so none of them can quietly ship
-// without a timeout.
-func claudeHookEntry(taskBin, event, matcher string) []map[string]interface{} {
-	entry := map[string]interface{}{
-		"hooks": []map[string]interface{}{
-			{
-				"type":    "command",
-				"command": fmt.Sprintf("%s claude-hook --event %s", taskBin, event),
-				"timeout": claudeHookTimeoutSeconds,
-			},
-		},
-	}
-	if matcher != "" {
-		entry["matcher"] = matcher
-	}
-	return []map[string]interface{}{entry}
+// ClaudeSettingsPath is the settings file ty writes hooks into for a task
+// running in workDir. Exported so `ty doctor` can read back what the daemon
+// actually installed instead of guessing the path.
+func ClaudeSettingsPath(workDir string) string {
+	return filepath.Join(workDir, ".claude", "settings.local.json")
 }
+
+// WorktreeMCPConfigPath is the per-task MCP config file handed to Claude with
+// --mcp-config. Exported for `ty doctor`; see worktreeMCPConfigPath.
+func WorktreeMCPConfigPath(taskID int64) string { return worktreeMCPConfigPath(taskID) }
 
 // setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
 // The hooks call back to `task claude-hook` to update task status.
@@ -3539,7 +3566,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 		return nil, fmt.Errorf("create .claude dir: %w", err)
 	}
 
-	settingsPath := filepath.Join(claudeDir, "settings.local.json")
+	settingsPath := ClaudeSettingsPath(workDir)
 
 	// Find the task binary path - use absolute path for hooks
 	taskBin := resolveTaskBin()
@@ -3548,19 +3575,27 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	// when launching Claude; the hook reads it to find the task, and checks the
 	// session ID in the payload against the one that owns that task so a nested
 	// `claude` the agent runs itself cannot drive the board (see claimHookSession).
+	// Which events are installed, and why each one matters, is ClaudeHookEvents.
 	//
-	// The full lifecycle is registered, because the gaps between events are where
-	// a task's status goes stale:
-	//   - SessionStart:     records the session that owns the task
-	//   - UserPromptSubmit: back to "processing" the moment a human replies, even
-	//                       if the answer needs no tool
-	//   - PreToolUse:       fires before tool execution - ensures task is "processing"
-	//   - PostToolUse:      fires after tool completes - ensures task stays "processing"
-	//   - Notification:     Claude is idle, needs permission, or is asking - "blocked"
-	//   - Stop:             the turn ended - "blocked" (or a workflow step advances)
-	//   - StopFailure:      the turn ERRORED - "blocked", with the provider error
-	//   - SessionEnd:       the agent exited; a positive signal the daemon reads
-	//                       instead of inferring an exit from a missing window
+	// Every hook carries a timeout: Claude waits for one to exit before carrying
+	// on, so an unbounded hook is a stalled agent waiting to happen.
+	hookEntries := map[string]interface{}{}
+	for _, event := range ClaudeHookEvents {
+		entry := map[string]interface{}{
+			"hooks": []map[string]interface{}{
+				{
+					"type":    "command",
+					"command": fmt.Sprintf("%s claude-hook --event %s", taskBin, event),
+					"timeout": claudeHookTimeoutSeconds,
+				},
+			},
+		}
+		if matcher, ok := claudeHookMatchers[event]; ok {
+			entry["matcher"] = matcher
+		}
+		hookEntries[event] = []map[string]interface{}{entry}
+	}
+
 	hooksConfig := map[string]interface{}{
 		// Pre-approve reading from .claude/attachments/ so Claude can access task attachments
 		// without permission prompts (attachments are written there by prepareAttachments)
@@ -3569,16 +3604,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 				"Read(.claude/attachments/**)",
 			},
 		},
-		"hooks": map[string]interface{}{
-			"SessionStart":     claudeHookEntry(taskBin, "SessionStart", "startup|resume|clear|fork"),
-			"UserPromptSubmit": claudeHookEntry(taskBin, "UserPromptSubmit", ""),
-			"PreToolUse":       claudeHookEntry(taskBin, "PreToolUse", ""),
-			"PostToolUse":      claudeHookEntry(taskBin, "PostToolUse", ""),
-			"Notification":     claudeHookEntry(taskBin, "Notification", "idle_prompt|permission_prompt|elicitation_dialog|agent_needs_input"),
-			"Stop":             claudeHookEntry(taskBin, "Stop", ""),
-			"StopFailure":      claudeHookEntry(taskBin, "StopFailure", ""),
-			"SessionEnd":       claudeHookEntry(taskBin, "SessionEnd", ""),
-		},
+		"hooks": hookEntries,
 	}
 
 	// Check if settings.local.json already exists

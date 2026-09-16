@@ -63,11 +63,7 @@ func cursorLaunchBin() string {
 
 // IsAvailable checks if the Cursor Agent CLI is installed.
 func (c *CursorExecutor) IsAvailable() bool {
-	if _, err := exec.LookPath("cursor-agent"); err == nil {
-		return true
-	}
-	_, err := exec.LookPath("agent")
-	return err == nil
+	return binaryOnPath("cursor")
 }
 
 // Execute runs a task using the Cursor CLI.

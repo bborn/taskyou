@@ -1,9 +1,11 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/textutil"
@@ -107,10 +109,30 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		IncludeClosed: q.Get("all") == "true",
 	}
 
+	// `filter` runs the shared query grammar (internal/taskfilter) server-side.
+	// It exists so a browser client never has to reimplement that grammar: a
+	// second parser is a second set of answers, and a saved view would then mean
+	// one thing on the board and another in the filter bar.
+	//
+	// The match happens in Go after the query, so a SQL LIMIT here would cap the
+	// rows BEFORE filtering. Widen the fetch and re-apply the limit below.
+	filterQuery := strings.TrimSpace(q.Get("filter"))
+	if filterQuery != "" {
+		opts.Limit = 0
+		opts.IncludeClosed = true
+	}
+
 	tasks, err := s.db.ListTasks(opts)
 	if err != nil {
 		jsonErr(w, "failed to list tasks", http.StatusInternalServerError)
 		return
+	}
+
+	if filterQuery != "" {
+		tasks = s.parseViewQuery(filterQuery).Filter(tasks)
+		if limit > 0 && len(tasks) > limit {
+			tasks = tasks[:limit]
+		}
 	}
 
 	result := make([]*taskJSON, len(tasks))
@@ -538,20 +560,58 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paneID := task.ClaudePaneID
-	if paneID == "" {
-		jsonErr(w, "task has no executor pane", http.StatusBadRequest)
-		return
-	}
-
 	var req inputRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
+	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		info := s.remoteTerminalInfo(ctx, task, false)
+		cancel()
+		if info.Error != "" {
+			jsonErr(w, info.Error, http.StatusBadGateway)
+			return
+		}
+		if info.ClaudePaneID == "" {
+			jsonErr(w, "task has no remote executor pane", http.StatusConflict)
+			return
+		}
+		terminal := paneTerminal{ctx: r.Context(), runner: executor.RemoteRunner{Host: info.RemoteHost}}
+		if req.Key != "" {
+			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, req.Key); err != nil {
+				jsonErr(w, "failed to send key to remote agent", http.StatusBadGateway)
+				return
+			}
+		}
+		if req.Message != "" {
+			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, "-l", req.Message); err != nil {
+				jsonErr(w, "failed to send input to remote agent", http.StatusBadGateway)
+				return
+			}
+			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, "Enter"); err != nil {
+				jsonErr(w, "failed to submit input to remote agent", http.StatusBadGateway)
+				return
+			}
+		} else if req.Enter {
+			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, "Enter"); err != nil {
+				jsonErr(w, "failed to send enter to remote agent", http.StatusBadGateway)
+				return
+			}
+		}
+		jsonOK(w, map[string]bool{"ok": true})
+		return
+	}
+
 	if s.runner == nil {
 		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
+		return
+	}
+
+	paneID := task.ClaudePaneID
+	if paneID == "" {
+		jsonErr(w, "task has no executor pane", http.StatusBadRequest)
 		return
 	}
 
