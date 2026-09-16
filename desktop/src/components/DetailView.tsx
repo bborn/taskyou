@@ -120,6 +120,7 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [messageError, setMessageError] = useState("");
   const [showChat, setShowChat] = useState(true);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -447,6 +448,13 @@ export function DetailView({ taskId }: { taskId: number }) {
               store.setForm({ kind: "edit", taskId: task.id });
             }}
           />
+          <ActionRow
+            label="Attachments"
+            onClick={() => {
+              setActionsOpen(false);
+              setAttachmentsOpen(true);
+            }}
+          />
           {task.pr_url && (
             <ActionRow
               label={task.pr_number ? `Open PR #${task.pr_number}` : "Open PR"}
@@ -481,6 +489,13 @@ export function DetailView({ taskId }: { taskId: number }) {
               )}
             </SelectContent>
           </Select>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={attachmentsOpen} onOpenChange={setAttachmentsOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Attachments</DialogTitle></DialogHeader>
+          <AttachmentsPanel taskId={task.id} />
         </DialogContent>
       </Dialog>
 

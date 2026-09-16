@@ -1,0 +1,81 @@
+name: iPhone Safari QA
+
+on:
+  workflow_dispatch:
+  # Explicit opt-in before workflow_dispatch is available on the default branch.
+  push:
+    branches: [codex/ios-safari-qa]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iphone-safari-qa
+  cancel-in-progress: true
+
+jobs:
+  safari:
+    # Standard runners are free ONLY for public repositories. Fail closed if
+    # visibility changes. No PR/schedule triggers, matrices, or automatic retries.
+    if: >-
+      github.event.repository.visibility == 'public' &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(github.event.head_commit.message, '[ios-qa]'))
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set isolated paths
+        run: |
+          echo "APPIUM_HOME=$RUNNER_TEMP/appium-home" >> "$GITHUB_ENV"
+          echo "QA_ARTIFACTS=$RUNNER_TEMP/ios-evidence" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build isolated test application
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$QA_ARTIFACTS"
+          pnpm --dir desktop install --frozen-lockfile
+          pnpm --dir desktop build
+          cp -R desktop/dist internal/web/ui/dist
+          go build -tags ui -o "$RUNNER_TEMP/ty-ios-qa" ./cmd/task
+      - name: Install pinned automation tools on runner only
+        timeout-minutes: 5
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ios-tools" --no-audit --no-fund appium@3.7.0
+          echo "$RUNNER_TEMP/ios-tools/node_modules/.bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ios-tools/node_modules/.bin/appium" driver install xcuitest@12.12.4
+      - name: Download verified prebuilt device helper
+        timeout-minutes: 2
+        run: |
+          curl --fail --location --max-time 60 --output "$RUNNER_TEMP/wda.zip" \
+            https://github.com/appium/WebDriverAgent/releases/download/v16.12.8/WebDriverAgentRunner-Build-Sim-x86_64.zip
+          echo "bf683d59a8ffc031031ddeeb3d5edf9556f3060692694904edcf4b8aa5ba05a2  $RUNNER_TEMP/wda.zip" | shasum -a 256 --check
+          unzip -q "$RUNNER_TEMP/wda.zip" -d "$RUNNER_TEMP/wda"
+          echo "QA_WDA_PATH=$RUNNER_TEMP/wda/WebDriverAgentRunner-Runner.app" >> "$GITHUB_ENV"
+      - name: Exercise Safari with the software keyboard
+        timeout-minutes: 9
+        run: python3 scripts/qa/ios/check-safari.py "$RUNNER_TEMP/ty-ios-qa"
+      - name: Bound evidence storage
+        if: always()
+        run: |
+          python3 scripts/qa/ios/bound-evidence.py "$QA_ARTIFACTS"
+      - name: Save screenshots and diagnostics for one day
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-safari-${{ github.run_id }}
+          path: ${{ env.QA_ARTIFACTS }}
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 9

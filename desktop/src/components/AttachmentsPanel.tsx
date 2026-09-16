@@ -68,22 +68,27 @@ export function AttachmentsPanel({ taskId }: { taskId: number }) {
     >
       <div className="flex flex-col gap-1 text-[12.5px]">
         {attachments.length === 0 && (
-          <span className="text-xs text-muted-foreground">No attachments — drop files here</span>
+          <span className="text-xs text-muted-foreground">No attachments yet.</span>
         )}
         {attachments.map((a) => (
           <div key={a.id} className="flex items-center gap-2">
-            <a className="text-status-backlog" onClick={() => void openExternal(api.attachmentUrl(a.id))}>
+            <a href={api.attachmentUrl(a.id)} className="min-w-0 flex-1 break-all text-status-backlog" onClick={(e) => { e.preventDefault(); void openExternal(api.attachmentUrl(a.id)); }}>
               {a.filename}
             </a>
             <span className="text-muted-foreground">{formatSize(a.size)}</span>
             <Button
               variant="ghost"
               size="icon"
-              className="size-5"
+              className="size-5 shrink-0 max-md:size-11"
               title="Delete attachment"
+              aria-label={`Delete ${a.filename}`}
               onClick={async () => {
-                await api.deleteAttachment(a.id).catch(() => {});
-                void reload();
+                try {
+                  await api.deleteAttachment(a.id);
+                  await reload();
+                } catch (e) {
+                  store.toast({ title: "Could not delete attachment", body: String(e), kind: "error" });
+                }
               }}
             >
               ✕
