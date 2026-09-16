@@ -32,7 +32,7 @@ import (
 var (
 	tyBinOnce sync.Once
 	tyBinPath string
-	tyBinErr  error
+	errTyBin  error
 )
 
 // buildTyBinary compiles the real CLI once per test run. The `ty close` path
@@ -44,17 +44,17 @@ func buildTyBinary(t *testing.T) string {
 	tyBinOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "ty-bin-*")
 		if err != nil {
-			tyBinErr = err
+			errTyBin = err
 			return
 		}
 		tyBinPath = filepath.Join(dir, "ty")
 		out, err := exec.Command("go", "build", "-o", tyBinPath, ".").CombinedOutput()
 		if err != nil {
-			tyBinErr = fmt.Errorf("build ty: %v\n%s", err, out)
+			errTyBin = fmt.Errorf("build ty: %v\n%s", err, out)
 		}
 	})
-	if tyBinErr != nil {
-		t.Fatalf("%v", tyBinErr)
+	if errTyBin != nil {
+		t.Fatalf("%v", errTyBin)
 	}
 	return tyBinPath
 }

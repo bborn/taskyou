@@ -5,8 +5,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/spf13/cobra"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // addStatusDebugCommands wires the two tools that make the status log
