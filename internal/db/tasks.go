@@ -1443,6 +1443,25 @@ func (db *DB) AppendTaskLog(taskID int64, lineType, content string) error {
 	return nil
 }
 
+// CountRecentExecutorStarts counts the executor launches logged for a task
+// within the last window. It reads the shared database, so every process that
+// can start an executor (each TUI, the web API) sees the same count; a counter
+// held in one process let two TUIs relaunch one task 19 times between them
+// without either tripping.
+func (db *DB) CountRecentExecutorStarts(taskID int64, window time.Duration) (int, error) {
+	var n int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND line_type = 'system'
+		  AND (content LIKE 'Starting new % session' OR content LIKE 'Reconnecting to % session %')
+		  AND created_at >= datetime('now', ?)
+	`, taskID, fmt.Sprintf("-%d seconds", int(window.Seconds()))).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count executor starts: %w", err)
+	}
+	return n, nil
+}
+
 // HasQuestionLog reports whether the task ever recorded a needs-input question
 // (line_type "question"). The workflow "finished but couldn't signal" sweep uses
 // this to avoid auto-completing a step that is genuinely waiting on a human answer.

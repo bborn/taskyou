@@ -24,6 +24,7 @@ import (
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/executorlock"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/qmd"
@@ -1041,9 +1042,10 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 		// BuildCommand. Kill the stale window so the start path below rebuilds the
 		// executor (with the correct per-project config dir).
 		if m.cachedWindowTarget != "" && !m.windowHasLiveExecutor(m.cachedWindowTarget) {
-			log.Info("setupPanesAsync: window %q has no live executor (stale placeholder); killing to rebuild", m.cachedWindowTarget)
-			m.killStaleWindow(m.cachedWindowTarget)
-			m.cachedWindowTarget = ""
+			if m.killStaleWindow(m.cachedWindowTarget) {
+				log.Info("setupPanesAsync: window %q has no live executor; killed it to rebuild", m.cachedWindowTarget)
+				m.cachedWindowTarget = ""
+			}
 		}
 		if m.cachedWindowTarget != "" {
 			m.viewTaskWindow()
@@ -1350,7 +1352,7 @@ func (m *DetailModel) haltReason(err error) (string, bool) {
 			path = m.task.WorktreePath
 		}
 		return worktreeMissingMessage(path), true
-	case errors.Is(err, errExecutorSpawnLoop):
+	case errors.Is(err, errExecutorSpawnLoop), errors.Is(err, executor.ErrExecutorRestartLoop):
 		return spawnLoopMessage(m.executorDisplayName()), true
 	}
 	return "", false
@@ -1783,28 +1785,82 @@ func (m *DetailModel) windowHasLiveExecutor(windowTarget string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := agentTmux(ctx, "list-panes", "-t", windowTarget, "-F", "#{pane_current_command}").Output()
+	out, err := agentTmux(ctx, "list-panes", "-t", windowTarget, "-F",
+		"#{pane_dead}\t#{"+executor.SpawnedAtOption+"}\t#{pane_current_command}\t#{pane_start_command}").Output()
 	if err != nil {
 		GetLogger().Debug("windowHasLiveExecutor: list-panes failed for %q: %v (assuming live)", windowTarget, err)
 		return true
 	}
-	return liveExecutorInPaneCommands(strings.Split(strings.TrimSpace(string(out)), "\n"))
+	return liveExecutorInPanes(strings.Split(strings.TrimSpace(string(out)), "\n"), time.Now())
+}
+
+// spawnGrace is how long a window EnsureTaskWindow created is treated as live
+// no matter what its panes report: the agent is still starting inside `sh -c`.
+const spawnGrace = time.Minute
+
+// liveExecutorInPanes reports whether a task window holds a live executor.
+// Each line is pane_dead, the window's spawned-at time, pane_current_command
+// and pane_start_command, tab-separated.
+//
+// The current command alone is not enough. ty launches the agent as
+// `sh -c <script>`, so for its first moments a healthy pane reports `sh`, and a
+// second TUI opening the task in that moment took it for a corpse and killed it.
+// The first TUI then did the same to the replacement, and the two relaunched
+// task 5436 nineteen times. A pane ty launched that way lives exactly as long as
+// its agent (the script ends when the agent does), so a pane that is not dead
+// and was started by `sh -c` is live whatever it is running right now.
+func liveExecutorInPanes(lines []string, now time.Time) bool {
+	var cmds []string
+	for _, line := range lines {
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) != 4 {
+			continue
+		}
+		dead, spawnedAt, current, start := f[0], f[1], f[2], strings.TrimSpace(f[3])
+		if dead == "1" {
+			continue
+		}
+		if at, err := strconv.ParseInt(spawnedAt, 10, 64); err == nil && now.Sub(time.Unix(at, 0)) < spawnGrace {
+			return true
+		}
+		if strings.HasPrefix(start, "sh -c ") {
+			return true
+		}
+		cmds = append(cmds, current)
+	}
+	return liveExecutorInPaneCommands(cmds)
 }
 
 // killStaleWindow removes a daemon task window that no longer has a live executor
-// pane so the caller can recreate it cleanly. Best-effort; also clears the stale
-// stored window ID so a later findTaskWindow doesn't resurrect the dead target.
-func (m *DetailModel) killStaleWindow(windowTarget string) {
-	if windowTarget == "" {
-		return
+// pane so the caller can recreate it cleanly, and reports whether it did.
+//
+// Killing is the one destructive step in opening a task, and every ty that has
+// the task open reaches it. It is decided under the same per-task lock every
+// launch takes, and the window is looked at again once the lock is held: a
+// launch that finished while we waited has made the window live. If the lock
+// can't be had, the window is left alone.
+func (m *DetailModel) killStaleWindow(windowTarget string) bool {
+	if windowTarget == "" || m.task == nil {
+		return false
+	}
+	release, err := executorlock.AcquireSpawn(executor.SpawnLockDir(), m.task.ID, 5*time.Second)
+	if err != nil {
+		GetLogger().Warn("killStaleWindow: task %d: %v; leaving %q alone", m.task.ID, err, windowTarget)
+		return false
+	}
+	defer release()
+	if m.windowHasLiveExecutor(windowTarget) {
+		GetLogger().Info("killStaleWindow: %q came alive while waiting for the lock; keeping it", windowTarget)
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	agentTmux(ctx, "kill-window", "-t", windowTarget).Run()
-	if m.database != nil && m.task != nil {
+	if m.database != nil {
 		m.database.UpdateTaskWindowID(m.task.ID, "")
 		m.task.TmuxWindowID = ""
 	}
+	return true
 }
 
 // startResumableSession starts a new tmux window with the task's executor.
