@@ -29,6 +29,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
+	"github.com/bborn/workflow/internal/taskfilter"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -58,6 +59,8 @@ const (
 	ViewRoutines             // global routines fleet-health view
 	ViewActionPicker         // modal list of plugin actions for the current task
 	ViewRepoClone            // clone a pasted repo URL, then continue as a folder
+	ViewSavedViews           // modal list of saved filter views
+	ViewListOptions          // modal for the list's grouping and sort
 )
 
 // KeyMap defines key bindings.
@@ -109,11 +112,16 @@ type KeyMap struct {
 	// Rebuild a task's missing worktree (detail view recovery)
 	RecreateWorktree key.Binding
 	ResumeSession    key.Binding
+	// Board display: kanban columns vs a flat list, and the saved-view picker
+	ToggleListView key.Binding
+	SavedViews     key.Binding
+	// How the list is arranged: group by, sort
+	ListOptions key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.OpenBrowser, k.Help, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.ToggleListView, k.SavedViews, k.CommandPalette, k.Help, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -124,7 +132,8 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
-		{k.Filter, k.CommandPalette, k.Settings, k.Routines},
+		{k.Filter, k.ToggleListView, k.SavedViews, k.ListOptions},
+		{k.CommandPalette, k.Settings, k.Routines},
 		{k.ChangeStatus, k.PlaceTask, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -294,6 +303,18 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("enter"),
 			key.WithHelp("enter", "resume session"),
 		),
+		ToggleListView: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "list/board"),
+		),
+		SavedViews: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "saved views"),
+		),
+		ListOptions: key.NewBinding(
+			key.WithKeys("O"),
+			key.WithHelp("O", "arrange list"),
+		),
 	}
 }
 
@@ -359,6 +380,9 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
 	km.ResumeSession = applyBinding(km.ResumeSession, cfg.ResumeSession)
+	km.ToggleListView = applyBinding(km.ToggleListView, cfg.ToggleListView)
+	km.SavedViews = applyBinding(km.SavedViews, cfg.SavedViews)
+	km.ListOptions = applyBinding(km.ListOptions, cfg.ListOptions)
 
 	return km
 }
@@ -536,6 +560,13 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
+	// Board display state. listMode and the active filter/view are persisted in
+	// settings (see loadBoardViewState), so the board you left is the board you
+	// come back to — the whole point of a "persistent filtered view".
+	listMode     bool
+	activeView   string // name of the applied saved view; cleared once the filter is edited by hand
+	viewPicker   *ViewPickerModel
+	listOptsView *ListOptionsModel
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -724,6 +755,10 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		model.currentVersion = version[0]
 	}
 	model.initPluginNudge()
+
+	// Restore the display mode and filter the user left behind, before the first
+	// task load, so the board comes back the way they left it.
+	model.loadBoardViewState()
 
 	return model
 }
@@ -975,6 +1010,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Route to current view
 		switch m.currentView {
+		case ViewSavedViews:
+			return m.updateSavedViews(msg)
+		case ViewListOptions:
+			return m.updateListOptions(msg)
 		case ViewDashboard:
 			return m.updateDashboard(msg)
 		case ViewDetail:
@@ -1739,6 +1778,12 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.actionPickerView != nil {
 		m.actionPickerView.SetSize(width, height)
 	}
+	if m.viewPicker != nil {
+		m.viewPicker.SetSize(width, height)
+	}
+	if m.listOptsView != nil {
+		m.listOptsView.SetSize(width, height)
+	}
 	if m.newTaskForm != nil {
 		m.newTaskForm.SetSize(width, height)
 	}
@@ -1774,6 +1819,14 @@ func (m *AppModel) View() string {
 	switch m.currentView {
 	case ViewDashboard:
 		return m.viewDashboard()
+	case ViewSavedViews:
+		if m.viewPicker != nil {
+			return m.viewPicker.View()
+		}
+	case ViewListOptions:
+		if m.listOptsView != nil {
+			return m.listOptsView.View()
+		}
 	case ViewDetail:
 		if m.detailView != nil {
 			return m.detailView.View()
@@ -1958,7 +2011,7 @@ func (m *AppModel) viewDashboard() string {
 	// Show filter bar if filter is active or has text
 	filterBar := ""
 	filterBarHeight := 0
-	if m.filterActive || m.filterText != "" {
+	if m.filterActive || m.filterText != "" || m.activeView != "" {
 		filterBar = m.renderFilterBar()
 		filterBarHeight = lipgloss.Height(filterBar)
 	}
@@ -2106,6 +2159,17 @@ func (m *AppModel) renderFilterBar() string {
 	}
 	parts = append(parts, filterIcon)
 
+	// Name the saved view the filter came from, so an inherited filter reads as
+	// a deliberate view rather than a mysterious query someone left behind.
+	if m.activeView != "" {
+		viewStyle := lipgloss.NewStyle().
+			Background(ColorPrimary).
+			Foreground(lipgloss.Color("#000000")).
+			Bold(true).
+			Padding(0, 1)
+		parts = append(parts, viewStyle.Render(m.activeView), " ")
+	}
+
 	// Filter input or static text
 	if m.filterActive {
 		// Show active input
@@ -2129,15 +2193,24 @@ func (m *AppModel) renderFilterBar() string {
 			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (Tab: select %s, ↑↓: navigate)", what)))
 		} else {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
-			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
-			// so advertise the short alias (is:wf) rather than the full token.
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, @: host, is:wf: workflows only)", navHelp)))
+			// The hint is the first thing sacrificed when the bar runs out of
+			// room (see the truncation below), so put the keys first and the
+			// grammar reminder last.
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, @: host, status: is: has:)", navHelp)))
 		}
 	} else if m.filterText != "" {
-		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
+		parts = append(parts, helpStyle.Render("  (/: edit, V: views, Esc: clear)"))
 	}
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+
+	// Hard-truncate rather than let it wrap. The bar is one row by construction;
+	// a wrapped hint pushes the board down and reads like a rendering fault. Now
+	// that a filter is routinely a long query ("[payments-api] status:open") this
+	// is the common case, not an edge one — the tail of the hint is what goes.
+	if m.width > 2 {
+		filterContent = lipgloss.NewStyle().MaxWidth(m.width - 2).Render(filterContent)
+	}
 
 	// No background: each part's styling ends in an ANSI reset, so a bar
 	// background only survived in the trailing padding, as a gray stub after
@@ -2157,7 +2230,20 @@ func (m *AppModel) renderFilterBar() string {
 }
 
 func (m *AppModel) renderHelp() string {
-	return m.help.View(m.keys)
+	// Cap the help to the terminal. The bubbles help model renders at its
+	// natural width when Width is 0, so a keymap that outgrows the terminal
+	// would make the whole dashboard wider than the screen and re-wrap the
+	// board. Width is also set on resize; this covers the pre-resize render.
+	if m.width <= 0 {
+		return m.help.View(m.keys)
+	}
+	m.help.Width = m.width
+
+	// Belt and braces: bubbles honours Width at ordinary terminal sizes but
+	// returns the untruncated line at very narrow ones (measured: a 60-column
+	// Width still renders 159 columns), so clamp the result ourselves rather
+	// than trust it. Cheap, and the invariant is what the board depends on.
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(m.help.View(m.keys))
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2355,12 +2441,24 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterInput.Focus()
 		return m, textinput.Blink
 
+	case key.Matches(msg, m.keys.ToggleListView):
+		return m, m.toggleListMode()
+
+	case key.Matches(msg, m.keys.SavedViews):
+		return m, m.openViewPicker()
+
+	case key.Matches(msg, m.keys.ListOptions):
+		// Arranging a board that isn't drawn as a list would change nothing the
+		// user can see, so switch to the list first.
+		if !m.listMode {
+			m.setListMode(true)
+		}
+		return m, m.openListOptions()
+
 	case key.Matches(msg, m.keys.Back):
 		// If filter is set, clear it first
 		if m.filterText != "" {
-			m.filterText = ""
-			m.filterInput.SetValue("")
-			return m, m.loadTasks()
+			return m, tea.Batch(m.clearBoardFilter(), m.loadTasks())
 		}
 		return m.showQuitConfirm()
 	}
@@ -2378,11 +2476,9 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch keyMsg.String() {
 	case "esc":
-		m.filterActive, m.filterText, m.showFilterDropdown = false, "", false
-		m.filterInput.SetValue("")
+		m.filterActive = false
 		m.filterInput.Blur()
-		m.filterAutocomplete.Reset()
-		return m, m.loadTasks()
+		return m, tea.Batch(m.clearBoardFilter(), m.loadTasks())
 
 	case "backspace":
 		if m.filterInput.Value() == "" {
@@ -2506,7 +2602,9 @@ func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if newText := m.filterInput.Value(); newText != m.filterText {
 		m.filterText = newText
+		m.noteFilterEdited()
 		cmd = tea.Batch(cmd, m.applyFilter())
+		m.persistBoardViewState()
 
 		m.updateFilterAutocomplete(newText)
 	}
@@ -2597,9 +2695,11 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() tea.Cmd {
 	m.filterRevision++
-	kind, text := parseFilterKind(m.filterText)
-	if text == "" {
-		m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(m.tasks, kind)))
+	q := m.parseFilterQuery()
+	if q.Rest() == "" {
+		// Nothing to fuzzy-match: the structured predicates are the whole
+		// filter, and applying them is cheap enough to do inline.
+		m.kanban.SetTasks(m.collapseForBoard(filterMatching(m.tasks, q)))
 		return nil
 	}
 	if m.filterInFlight {
@@ -2635,22 +2735,22 @@ func (m *AppModel) finishBoardFilter(msg boardFilterMsg) tea.Cmd {
 }
 
 func (m *AppModel) filteredBoardTasks() []*db.Task {
-	// A board mixes workflow steps and standalone tasks, and there was no way to
-	// look at just one population. `is:workflow` / `is:task` splits them, and is
-	// stripped from the query before fuzzy matching so it never pollutes scoring.
-	kind, filterText := parseFilterKind(m.filterText)
+	// The structured half of the query — status:, is:, has:, tag: — is parsed and
+	// applied as plain predicates by internal/taskfilter, which the CLI and the
+	// HTTP API use too, so a saved view means the same thing on every surface.
+	// Whatever is left (project tags and free text) still goes through the fuzzy
+	// scorer below; the tokens are stripped first so they never pollute scoring.
+	q := m.parseFilterQuery()
 
-	// `@host` narrows the board to the machine a task ran on, using the same
-	// syntax as the badge on the card. Like `is:`, it is stripped from the query
-	// before fuzzy matching so a host name never scores against titles.
-	hosts, filterText := parseFilterHosts(filterText)
-	narrow := func(tasks []*db.Task) []*db.Task {
-		return filterTasksByHost(filterTasksByKind(tasks, kind), hosts, localHostname())
+	base := m.tasks
+	if q.HasStructured() {
+		base = filterMatching(base, q)
 	}
 
+	filterText := q.Rest()
 	if filterText == "" {
-		// No keyword left: show everything, or just the requested kind and hosts.
-		return narrow(m.tasks)
+		// No keyword left: the structured predicates are the whole filter.
+		return base
 	}
 
 	queryLower := strings.ToLower(filterText)
@@ -2667,9 +2767,9 @@ func (m *AppModel) filteredBoardTasks() []*db.Task {
 	// of older done tasks (e.g. searching "demo functionality" finds nothing
 	// even though "Go to Task" locates the done task by id). This mirrors the
 	// command palette, which already supplements its list via SearchTasks. See #4705.
-	candidates := make(map[int64]*db.Task, len(m.tasks))
-	ordered := make([]*db.Task, 0, len(m.tasks))
-	for _, task := range m.tasks {
+	candidates := make(map[int64]*db.Task, len(base))
+	ordered := make([]*db.Task, 0, len(base))
+	for _, task := range base {
 		if _, ok := candidates[task.ID]; !ok {
 			candidates[task.ID] = task
 			ordered = append(ordered, task)
@@ -2679,6 +2779,12 @@ func (m *AppModel) filteredBoardTasks() []*db.Task {
 		if _, keyword, _ := parseFilterProjects(queryLower); keyword != "" {
 			if results, err := m.db.SearchTasks(keyword, boardFilterDBSearchLimit); err == nil {
 				for _, task := range results {
+					// Rows pulled straight from the database bypassed the
+					// structured pass above, so re-apply it here or a
+					// `status:blocked` view quietly grows done tasks back.
+					if !q.Match(task) {
+						continue
+					}
 					if _, ok := candidates[task.ID]; !ok {
 						candidates[task.ID] = task
 						ordered = append(ordered, task)
@@ -2707,45 +2813,22 @@ func (m *AppModel) filteredBoardTasks() []*db.Task {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	return narrow(filtered)
+	return filtered
 }
 
-// filterKind values for the `is:` filter token.
-const (
-	filterKindWorkflow = "workflow"
-	filterKindTask     = "task"
-)
-
-// parseFilterKind extracts an `is:workflow` / `is:task` token from the filter
-// query and returns it along with the query minus that token. Aliases: `is:wf`,
-// `is:pipeline` for workflows; `is:normal` for standalone tasks. Returns an
-// empty kind when no token is present.
-func parseFilterKind(query string) (kind, rest string) {
-	fields := strings.Fields(query)
-	kept := make([]string, 0, len(fields))
-	for _, f := range fields {
-		switch strings.ToLower(f) {
-		case "is:workflow", "is:wf", "is:pipeline":
-			kind = filterKindWorkflow
-		case "is:task", "is:normal":
-			kind = filterKindTask
-		default:
-			kept = append(kept, f)
-		}
-	}
-	return kind, strings.TrimSpace(strings.Join(kept, " "))
+// parseFilterQuery parses the filter bar into structured predicates. It is the
+// only place the query is built, so `@host` can never be resolved against the
+// wrong machine name — or forgotten at one of the two call sites.
+func (m *AppModel) parseFilterQuery() taskfilter.Query {
+	return taskfilter.Parse(m.filterText).WithLocalHost(localHostname())
 }
 
-// filterTasksByKind keeps only workflow steps or only standalone tasks. An empty
-// kind is a no-op so callers can pass it through unconditionally.
-func filterTasksByKind(tasks []*db.Task, kind string) []*db.Task {
-	if kind == "" {
-		return tasks
-	}
-	want := kind == filterKindWorkflow
+// filterMatching keeps the tasks satisfying a query's structured predicates,
+// preserving order.
+func filterMatching(tasks []*db.Task, q taskfilter.Query) []*db.Task {
 	out := make([]*db.Task, 0, len(tasks))
 	for _, t := range tasks {
-		if pipeline.IsWorkflowTask(t) == want {
+		if q.Match(t) {
 			out = append(out, t)
 		}
 	}

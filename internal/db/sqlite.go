@@ -244,6 +244,20 @@ func (db *DB) migrate() error {
 
 		`CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine, id)`,
 
+		// Saved views: named filter queries in the internal/taskfilter grammar
+		// (e.g. "status:in-progress status:blocked"). The board, the CLI and the
+		// HTTP API all resolve a name through this table, so a view means exactly
+		// one thing everywhere. Names are unique case-insensitively so "Active"
+		// and "active" cannot become two rows that render identically.
+		`CREATE TABLE IF NOT EXISTS saved_views (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			query TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
 		// Pipeline artifacts: inter-phase document hand-off for workflows (e.g. the
 		// rpi workflow). Keyed by (branch, name) so a document phase can write a full
 		// markdown document that a later phase on the same shared branch reads back,
@@ -520,6 +534,11 @@ func (db *DB) migrate() error {
 	// Ensure default task types exist
 	if err := db.ensureDefaultTaskTypes(); err != nil {
 		return fmt.Errorf("ensure default task types: %w", err)
+	}
+
+	// Seed the starter saved views (once — see savedViewSeedKey)
+	if err := db.seedDefaultSavedViews(); err != nil {
+		return fmt.Errorf("seed saved views: %w", err)
 	}
 
 	// Assign default colors to projects without colors

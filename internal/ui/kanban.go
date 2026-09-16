@@ -78,6 +78,16 @@ type KanbanBoard struct {
 	// now (from latestActivity), the stand / waiting question when blocked, or
 	// an age hint for idle statuses.
 	latestActivity map[int64]*db.TaskLog
+
+	// List mode: the same tasks rendered as one flat line each instead of four
+	// status columns. The columns stay populated either way (the count helpers
+	// and the render signature read them), so toggling is free. See list.go.
+	listMode   bool
+	listTasks  []*db.Task  // k.allTasks in list order (pinned, then urgency)
+	listRow    int         // selected index into listTasks
+	listScroll int         // first visible index
+	listTitle  string      // active saved view / filter, shown in the header
+	listOpts   ListOptions // grouping and sort (see listopts.go)
 }
 
 // cardHeight is the number of vertical lines a task card occupies, including
@@ -106,6 +116,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 		prInfo:           make(map[int64]*github.PRInfo),
 		runningProcesses: make(map[int64]bool),
 		originColumn:     -1,
+		listOpts:         DefaultListOptions(),
 	}
 }
 
@@ -141,6 +152,16 @@ func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 
 	k.allTasks = tasks
 	k.distributeTasksToColumns()
+	k.rebuildListTasks()
+
+	if k.listMode {
+		// The flat list has no columns to stay in — just keep the same task
+		// selected wherever it moved to.
+		if selectedID != 0 {
+			k.selectListTask(selectedID)
+		}
+		return
+	}
 
 	// When origin column is set (detail view navigation), stay in that column
 	// even if the task moved to a different column
@@ -271,6 +292,11 @@ func (k *KanbanBoard) IsColumnCollapsed(colIdx int) bool {
 // ToggleColumnCollapse toggles the collapsed state of a column.
 // Cannot collapse the currently selected column.
 func (k *KanbanBoard) ToggleColumnCollapse(colIdx int) {
+	if k.listMode {
+		// No columns are drawn, so collapsing one would only be a surprise
+		// waiting on the board when the user switches back.
+		return
+	}
 	if colIdx < 0 || colIdx >= len(k.columns) {
 		return
 	}
@@ -472,12 +498,16 @@ func (k *KanbanBoard) SetSize(width, height int) {
 	// When height changes (e.g. quickview appearing/disappearing),
 	// recalculate scroll offsets so the selected task stays visible
 	if heightChanged {
+		k.ensureListRowVisible()
 		k.ensureSelectedVisible()
 	}
 }
 
 // MoveLeft moves selection to the left column, skipping collapsed columns.
 func (k *KanbanBoard) MoveLeft() {
+	if k.listMode {
+		return // a flat list has no columns to move between
+	}
 	for i := k.selectedCol - 1; i >= 0; i-- {
 		if !k.IsColumnCollapsed(i) {
 			k.selectedCol = i
@@ -490,6 +520,9 @@ func (k *KanbanBoard) MoveLeft() {
 
 // MoveRight moves selection to the right column, skipping collapsed columns.
 func (k *KanbanBoard) MoveRight() {
+	if k.listMode {
+		return // a flat list has no columns to move between
+	}
 	for i := k.selectedCol + 1; i < len(k.columns); i++ {
 		if !k.IsColumnCollapsed(i) {
 			k.selectedCol = i
@@ -503,6 +536,10 @@ func (k *KanbanBoard) MoveRight() {
 // MoveUp moves selection up within the current column.
 // If at the top, wraps around to the bottom.
 func (k *KanbanBoard) MoveUp() {
+	if k.listMode {
+		k.moveListUp()
+		return
+	}
 	col := k.columns[k.selectedCol]
 	if len(col.Tasks) == 0 {
 		return
@@ -519,6 +556,10 @@ func (k *KanbanBoard) MoveUp() {
 // MoveDown moves selection down within the current column.
 // If at the bottom, wraps around to the top.
 func (k *KanbanBoard) MoveDown() {
+	if k.listMode {
+		k.moveListDown()
+		return
+	}
 	col := k.columns[k.selectedCol]
 	if len(col.Tasks) == 0 {
 		return
@@ -535,6 +576,12 @@ func (k *KanbanBoard) MoveDown() {
 // JumpToPinned moves selection to the first pinned task in the current column.
 // If there are no pinned tasks, moves to the top of the column.
 func (k *KanbanBoard) JumpToPinned() {
+	if k.listMode {
+		// Pinned tasks sort to the head of the list.
+		k.listRow = 0
+		k.ensureListRowVisible()
+		return
+	}
 	col := k.columns[k.selectedCol]
 	if len(col.Tasks) == 0 {
 		return
@@ -548,6 +595,15 @@ func (k *KanbanBoard) JumpToPinned() {
 // JumpToUnpinned moves selection to the first unpinned task in the current column.
 // If all tasks are pinned or there are no tasks, stays at current position.
 func (k *KanbanBoard) JumpToUnpinned() {
+	if k.listMode {
+		pinned, unpinned := splitPinnedTasks(k.listTasks)
+		if len(unpinned) == 0 {
+			return
+		}
+		k.listRow = len(pinned)
+		k.ensureListRowVisible()
+		return
+	}
 	col := k.columns[k.selectedCol]
 	if len(col.Tasks) == 0 {
 		return
@@ -625,6 +681,9 @@ func (k *KanbanBoard) clampSelection() {
 
 // SelectedTask returns the currently selected task.
 func (k *KanbanBoard) SelectedTask() *db.Task {
+	if k.listMode {
+		return k.selectedListTask()
+	}
 	if k.selectedCol >= len(k.columns) {
 		return nil
 	}
@@ -637,6 +696,9 @@ func (k *KanbanBoard) SelectedTask() *db.Task {
 
 // SelectTask selects a task by ID.
 func (k *KanbanBoard) SelectTask(id int64) bool {
+	// Move both cursors: whichever mode is active now, the other one must land
+	// on the same task when the user toggles.
+	foundInList := k.selectListTask(id)
 	for colIdx, col := range k.columns {
 		for rowIdx, task := range col.Tasks {
 			if task.ID == id {
@@ -647,11 +709,14 @@ func (k *KanbanBoard) SelectTask(id int64) bool {
 			}
 		}
 	}
-	return false
+	return foundInList
 }
 
 // IsEmpty returns true if all columns have no tasks.
 func (k *KanbanBoard) IsEmpty() bool {
+	if k.listMode {
+		return len(k.listTasks) == 0
+	}
 	for _, col := range k.columns {
 		if len(col.Tasks) > 0 {
 			return false
@@ -662,6 +727,9 @@ func (k *KanbanBoard) IsEmpty() bool {
 
 // TotalTaskCount returns the total number of tasks across all columns.
 func (k *KanbanBoard) TotalTaskCount() int {
+	if k.listMode {
+		return len(k.listTasks)
+	}
 	count := 0
 	for _, col := range k.columns {
 		count += len(col.Tasks)
@@ -689,10 +757,14 @@ func (k *KanbanBoard) View() string {
 	}
 
 	var out string
-	if k.IsMobileMode() {
+	switch {
+	case k.listMode:
+		// One flat line per task — the same in a narrow terminal as a wide one.
+		out = k.viewList()
+	case k.IsMobileMode():
 		// Use single-column view for narrow terminals.
 		out = k.viewMobile()
-	} else {
+	default:
 		out = k.viewDesktop()
 	}
 
@@ -756,6 +828,10 @@ func (k *KanbanBoard) renderSignature() uint64 {
 	h.int(k.selectedRow)
 	h.int(k.hiddenDoneCount)
 	h.boolean(IsGlobalDangerousMode())
+	h.boolean(k.listMode)
+	h.int(k.listRow)
+	h.int(k.listScroll)
+	h.str(k.listTitle)
 
 	for _, off := range k.scrollOffsets {
 		h.int(off)
@@ -1443,6 +1519,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 // FocusColumn moves selection to a specific column by index.
 // If the column is collapsed, it will be uncollapsed first.
 func (k *KanbanBoard) FocusColumn(colIdx int) {
+	if k.listMode {
+		// The status keys still mean something in a flat list: jump to the first
+		// task with that status instead of focusing a column that isn't drawn.
+		if colIdx >= 0 && colIdx < len(k.columns) {
+			k.jumpListToStatus(k.columns[colIdx].Status)
+		}
+		return
+	}
 	if colIdx >= 0 && colIdx < len(k.columns) {
 		// Uncollapse the column if it's collapsed
 		if k.IsColumnCollapsed(colIdx) {
@@ -1462,6 +1546,12 @@ func (k *KanbanBoard) ColumnCount() int {
 // GetTaskPosition returns the position of the currently selected task in its column.
 // Returns (position, total) where position is 1-indexed, or (0, 0) if no task is selected.
 func (k *KanbanBoard) GetTaskPosition() (int, int) {
+	if k.listMode {
+		if len(k.listTasks) == 0 || k.listRow < 0 || k.listRow >= len(k.listTasks) {
+			return 0, 0
+		}
+		return k.listRow + 1, len(k.listTasks)
+	}
 	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
 		return 0, 0
 	}
@@ -1475,6 +1565,9 @@ func (k *KanbanBoard) GetTaskPosition() (int, int) {
 // HasPrevTask returns true if there is a previous task in the current column.
 // Returns false if already at the first task or no tasks exist.
 func (k *KanbanBoard) HasPrevTask() bool {
+	if k.listMode {
+		return len(k.listTasks) > 1 && k.listRow > 0
+	}
 	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
 		return false
 	}
@@ -1488,6 +1581,9 @@ func (k *KanbanBoard) HasPrevTask() bool {
 // HasNextTask returns true if there is a next task in the current column.
 // Returns false if already at the last task or no tasks exist.
 func (k *KanbanBoard) HasNextTask() bool {
+	if k.listMode {
+		return len(k.listTasks) > 1 && k.listRow < len(k.listTasks)-1
+	}
 	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
 		return false
 	}
@@ -1504,6 +1600,10 @@ func (k *KanbanBoard) HasNextTask() bool {
 func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 	if k.width < 40 || k.height < 10 {
 		return nil
+	}
+
+	if k.listMode {
+		return k.handleClickList(x, y)
 	}
 
 	// Use mobile click handling for narrow terminals

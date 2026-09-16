@@ -54,6 +54,9 @@ type KeybindingsConfig struct {
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
 	ResumeSession      *KeybindingConfig `yaml:"resume_session,omitempty"`
+	ToggleListView     *KeybindingConfig `yaml:"toggle_list_view,omitempty"`
+	SavedViews         *KeybindingConfig `yaml:"saved_views,omitempty"`
+	ListOptions        *KeybindingConfig `yaml:"list_options,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
