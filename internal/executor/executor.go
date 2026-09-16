@@ -344,6 +344,42 @@ func (e *Executor) recoverStaleTmuxRefs() {
 // would blocked-out a task that is in the middle of coming up.
 const orphanSpawnGrace = 90 * time.Second
 
+// agentSessionEnded reports whether the task's CURRENT agent session told us it
+// exited — Claude's SessionEnd hook, recorded on the task's log (see
+// db.HasSessionEnded). It is the only exit evidence here that is not an
+// inference; every window probe below has to guess, and has guessed wrong in
+// both directions (a pane joined into a UI session leaves no window behind; a
+// window that has not come up yet looks identical to one that is gone).
+//
+// False on any error. Absence of the signal must never be read as an exit.
+func (e *Executor) agentSessionEnded(taskID int64) bool {
+	ended, err := e.db.HasSessionEnded(taskID)
+	if err != nil {
+		e.logger.Debug("could not read the agent's session-end signal", "task", taskID, "error", err)
+		return false
+	}
+	return ended
+}
+
+// resultFromRecordedStatus turns "the agent is gone" into a run result by
+// reading the status the hooks and tools already wrote — it never decides an
+// outcome of its own. Done and backlog were written with evidence by whoever set
+// them; anything else means nobody claimed the work was finished, so the task is
+// parked for a human to look at rather than completed on the strength of an exit.
+func (e *Executor) resultFromRecordedStatus(taskID int64) execResult {
+	finalTask, _ := e.db.GetTask(taskID)
+	if finalTask != nil {
+		if finalTask.Status == db.StatusDone {
+			return execResult{Success: true}
+		}
+		if finalTask.Status == db.StatusBacklog {
+			return execResult{Interrupted: true}
+		}
+	}
+	// Default: blocked (user must mark done or retry)
+	return execResult{NeedsInput: true, Message: "Task needs review"}
+}
+
 // executorWindowLives reports whether a task's executor window is still there,
 // asking the machine the task was actually placed on.
 //
@@ -512,10 +548,16 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 			continue
 		}
 
+		// The agent's own exit report (Claude's SessionEnd hook). A task that
+		// told us it exited needs neither the grace period nor a window probe to
+		// be believed — both exist only to keep a missing window from being read
+		// as a dead agent, and this is the agent saying so itself.
+		exited := e.agentSessionEnded(task.ID)
+
 		// Give a just-started task time to bring its window up before declaring
 		// it dead. Only on the periodic pass: at startup the panes really are
 		// gone no matter how recently the task started.
-		if !startup && task.StartedAt != nil && time.Since(task.StartedAt.Time) < orphanSpawnGrace {
+		if !exited && !startup && task.StartedAt != nil && time.Since(task.StartedAt.Time) < orphanSpawnGrace {
 			continue
 		}
 
@@ -538,7 +580,7 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 		// running (e.g. the tmux server survived a daemon restart) - leave it.
 		// For a placed task that window is on another machine, so this asks the
 		// machine the task actually runs on.
-		if e.executorWindowLives(task) {
+		if !exited && e.executorWindowLives(task) {
 			continue
 		}
 
@@ -546,8 +588,13 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 		if !startup {
 			msg = "Executor died - task was 'processing' with no live executor. Moved to blocked; retry to resume."
 		}
+		reason := "orphaned: the task was 'processing' with no live executor"
+		if exited {
+			msg = "The agent exited (it reported SessionEnd) while the task was 'processing'. Moved to blocked; retry to resume."
+			reason = "the agent reported that it exited while the task was still 'processing'"
+		}
 		if err := e.updateStatus(task.ID, db.StatusBlocked, db.ActorSweep,
-			"orphaned: the task was 'processing' with no live executor",
+			reason,
 			db.Observedf("%s", msg)); err != nil {
 			e.logger.Error("Failed to reconcile orphaned task", "id", task.ID, "error", err)
 			continue
@@ -667,7 +714,10 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			if time.Since(task.StartedAt.Time) < minWorkflowStepRuntime {
 				continue // too young to have meaningfully run and finished
 			}
-			if tmuxWindowExistsForTask(task.ID) {
+			// An agent that reported its own exit (SessionEnd) has definitely
+			// stopped, whatever tmux still shows — a pane joined into a UI session
+			// leaves the daemon window behind with nothing running in it.
+			if !e.agentSessionEnded(task.ID) && tmuxWindowExistsForTask(task.ID) {
 				continue // still owned by a live session
 			}
 		}
@@ -3406,21 +3456,44 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 // named once here rather than being implied by whatever setupClaudeHooks
 // happens to write:
 //
+//   - SessionStart records the Claude session that OWNS the task; everything
+//     below is ignored when it comes from any other session (see
+//     claimHookSession), because a `claude` the agent runs from Bash inherits
+//     WORKTREE_TASK_ID and loads these same hooks
+//   - UserPromptSubmit returns a blocked task to "processing" on the reply,
+//     rather than on the next tool call it may never make
 //   - PreToolUse / PostToolUse keep a working task on "processing"
 //   - Notification marks it "blocked" when Claude wants an answer
 //   - Stop marks it "blocked" when Claude has finished its turn
+//   - StopFailure marks it "blocked" when the turn ended in an error, and
+//     records what the provider actually said
+//   - SessionEnd is the agent's own report that it exited — the one exit signal
+//     that is not an inference from a missing tmux window. It writes no status
 //
 // setupClaudeHooks builds its config from this list, `ty doctor` verifies a
 // live task's settings file against it, and internal/handshake fingerprints it:
 // changing the set changes what the daemon and a client must agree on, so it
 // forces a handshake.Protocol bump.
-var ClaudeHookEvents = []string{"PreToolUse", "PostToolUse", "Notification", "Stop"}
-
-// claudeHookMatchers restricts a hook to certain events. Only Notification has
-// one: it fires for more than the two cases ty cares about.
-var claudeHookMatchers = map[string]string{
-	"Notification": "idle_prompt|permission_prompt",
+var ClaudeHookEvents = []string{
+	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+	"Notification", "Stop", "StopFailure", "SessionEnd",
 }
+
+// claudeHookMatchers restricts a hook to certain events. Notification fires for
+// more than the cases ty cares about, and SessionStart for more sources than
+// can legitimately re-key a task's owning session.
+var claudeHookMatchers = map[string]string{
+	"Notification": "idle_prompt|permission_prompt|elicitation_dialog|agent_needs_input",
+	"SessionStart": "startup|resume|clear|fork",
+}
+
+// claudeHookTimeoutSeconds bounds every generated hook. Claude waits for a hook
+// to exit before carrying on, so an unbounded one is a stall waiting to happen:
+// the handler opens SQLite, and a database another process holds locked would
+// otherwise hold the agent at a stopped cursor. The handler's own budget is
+// smaller still (see hookDBBusyTimeout); this is the backstop for everything it
+// cannot predict - a slow disk, a paged-out binary, an NFS worktree.
+const claudeHookTimeoutSeconds = 5
 
 // ClaudeSettingsPath is the settings file ty writes hooks into for a task
 // running in workDir. Exported so `ty doctor` can read back what the daemon
@@ -3447,13 +3520,14 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	// Find the task binary path - use absolute path for hooks
 	taskBin := resolveTaskBin()
 
-	// Configure hooks to call our task binary
-	// The WORKTREE_TASK_ID env var is set when launching Claude
-	// We use multiple hook types to ensure accurate task state tracking:
-	// - PreToolUse: Fires before tool execution - ensures task is "processing"
-	// - PostToolUse: Fires after tool completes - ensures task stays "processing"
-	// - Notification: Fires when Claude is idle or needs permission - marks task "blocked"
-	// - Stop: Fires when Claude finishes responding - marks task "blocked" when waiting for input
+	// Configure hooks to call our task binary. The WORKTREE_TASK_ID env var is set
+	// when launching Claude; the hook reads it to find the task, and checks the
+	// session ID in the payload against the one that owns that task so a nested
+	// `claude` the agent runs itself cannot drive the board (see claimHookSession).
+	// Which events are installed, and why each one matters, is ClaudeHookEvents.
+	//
+	// Every hook carries a timeout: Claude waits for one to exit before carrying
+	// on, so an unbounded hook is a stalled agent waiting to happen.
 	hookEntries := map[string]interface{}{}
 	for _, event := range ClaudeHookEvents {
 		entry := map[string]interface{}{
@@ -3461,6 +3535,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 				{
 					"type":    "command",
 					"command": fmt.Sprintf("%s claude-hook --event %s", taskBin, event),
+					"timeout": claudeHookTimeoutSeconds,
 				},
 			},
 		}
@@ -4637,6 +4712,17 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				return e.applyHostSignal(taskID, ev)
 			}
 
+			// Locally, the agent reports its own exit: Claude's SessionEnd hook
+			// writes it to the task log. Believe that over the window probe below,
+			// which needs three consecutive misses to commit and cannot see an exit
+			// at all when the window outlives the process (tmux remain-on-exit, a
+			// pane joined into a UI session). What the exit MEANS still comes from
+			// the recorded status, never from the exit itself.
+			if remoteHost == "" && e.agentSessionEnded(taskID) {
+				e.logger.Debug("agent reported session end; ending poll", "taskID", taskID)
+				return e.resultFromRecordedStatus(taskID)
+			}
+
 			// A placed host answers for all of its tasks at once over one standing
 			// connection; only fall back to a per-task round trip when that channel
 			// has nothing fresh to say. See hostchannel.go.
@@ -4760,17 +4846,7 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 
 			// Window genuinely gone for missingThreshold consecutive checks —
 			// check final status from hooks.
-			finalTask, _ := e.db.GetTask(taskID)
-			if finalTask != nil {
-				if finalTask.Status == db.StatusDone {
-					return execResult{Success: true}
-				}
-				if finalTask.Status == db.StatusBacklog {
-					return execResult{Interrupted: true}
-				}
-			}
-			// Default: blocked (user must mark done or retry)
-			return execResult{NeedsInput: true, Message: "Task needs review"}
+			return e.resultFromRecordedStatus(taskID)
 		}
 	}
 }

@@ -76,8 +76,38 @@ func (db *DB) Path() string {
 	return db.path
 }
 
+// DefaultBusyTimeout is how long a normal connection waits for a locked
+// database before giving up. Long enough to ride out the daemon's writes.
+const DefaultBusyTimeout = 5 * time.Second
+
 // Open opens or creates a SQLite database at the given path.
 func Open(path string) (*DB, error) {
+	return OpenWithOptions(path, OpenOptions{})
+}
+
+// OpenOptions tunes Open for callers that cannot take its defaults.
+type OpenOptions struct {
+	// BusyTimeout is how long to wait on a locked database. Zero means
+	// DefaultBusyTimeout.
+	BusyTimeout time.Duration
+	// SkipMigrate opens the database without running migrations. For short-lived
+	// processes that only read and write rows in a schema ty already created —
+	// the agent-facing hooks — where a migration is both unnecessary and, against
+	// a database somebody else has locked, several seconds of the agent's time.
+	SkipMigrate bool
+}
+
+// OpenWithOptions opens a database with explicit options. See Open.
+//
+// The agent-facing hooks pass a short busy timeout and skip migrations: a hook
+// runs in the agent's critical path, so a database another process holds locked
+// must make it give up quickly and silently rather than hold the agent at a
+// stopped cursor. Everything else should use Open.
+func OpenWithOptions(path string, opts OpenOptions) (*DB, error) {
+	busyTimeout := opts.BusyTimeout
+	if busyTimeout <= 0 {
+		busyTimeout = DefaultBusyTimeout
+	}
 	// Ensure directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -91,7 +121,8 @@ func Open(path string) (*DB, error) {
 	// and fail immediately with SQLITE_BUSY under contention.
 	// Note: the bare _busy_timeout DSN param does NOT work with
 	// modernc.org/sqlite, but _pragma=busy_timeout(N) does.
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)",
+		path, busyTimeout.Milliseconds())
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -115,8 +146,10 @@ func Open(path string) (*DB, error) {
 	wrapped := &DB{DB: db, path: path}
 
 	// Run migrations
-	if err := wrapped.migrate(); err != nil {
-		return nil, fmt.Errorf("migrate: %w", err)
+	if !opts.SkipMigrate {
+		if err := wrapped.migrate(); err != nil {
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
 	}
 
 	return wrapped, nil

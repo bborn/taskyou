@@ -40,11 +40,15 @@ import (
 // Those three inputs are fingerprinted by TestContractFingerprint. Change one
 // without bumping Protocol and the test fails, printing the fingerprint to
 // paste back in — so the bump is a deliberate act, not a thing you remember.
-const Protocol = 1
+// 2: the Claude hook set gained SessionStart/UserPromptSubmit/StopFailure/
+// SessionEnd, and hook payloads are now checked against the session that owns
+// the task. A daemon that installs those hooks against a client too old to
+// handle them loses the transitions they carry.
+const Protocol = 2
 
 // ContractFingerprint pins the contract inputs Protocol covers. See
 // contract_test.go; it prints the replacement value when the inputs move.
-const ContractFingerprint = "ddb37abc33e3cc99"
+const ContractFingerprint = "0525e1796950e2a5"
 
 // Severity ranks a finding. The zero value is intentionally invalid so a
 // finding always carries an explicit one.

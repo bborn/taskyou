@@ -199,6 +199,18 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		}
 	}
 
+	// The generated hook settings are what make a Claude session report its status,
+	// and what binds it to this task (the session ID check in claimHookSession).
+	// The daemon launch path writes them and removes them again when its run ends,
+	// so a session started from here — the TUI and HTTP API path — would otherwise
+	// come up with no hooks at all and leave the board frozen on whatever it last
+	// said. The cleanup is deliberately dropped: the session outlives this call.
+	if taskExecutor.Name() == db.ExecutorClaude {
+		if _, herr := e.setupClaudeHooks(workDir, task.ID); herr != nil {
+			e.logger.Warn("could not set up Claude hooks", "task", task.ID, "error", herr)
+		}
+	}
+
 	// Build prompt with task details when starting fresh (no session to resume).
 	var prompt string
 	if sessionID == "" {

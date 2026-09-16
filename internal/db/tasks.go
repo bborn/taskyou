@@ -1636,6 +1636,36 @@ func (db *DB) HasSessionStarted(taskID int64) (bool, error) {
 	return n > 0, nil
 }
 
+// SessionEndedLogPrefix starts the log line an agent's own "I am exiting" hook
+// writes (Claude's SessionEnd). It is the one exit signal that is not an
+// inference: a missing tmux window can equally mean the pane was moved into a
+// UI session, or that the window has not come up yet.
+const SessionEndedLogPrefix = "Agent session ended"
+
+// HasSessionEnded reports whether the task's CURRENT executor session has told
+// us it exited, i.e. a SessionEndedLogPrefix line was written after the most
+// recent session-start line. Comparing the two is what keeps a retry honest: a
+// task relaunched after an earlier exit has a newer start line, so the old exit
+// no longer counts.
+//
+// This never says anything about how the session ended, only that it did — the
+// caller still has to look at the task's status and its evidence to decide what
+// that means.
+func (db *DB) HasSessionEnded(taskID int64) (bool, error) {
+	var endedID, startedID int64
+	err := db.QueryRow(`
+		SELECT
+			COALESCE((SELECT MAX(id) FROM task_logs WHERE task_id = ? AND content LIKE ?), 0),
+			COALESCE((SELECT MAX(id) FROM task_logs WHERE task_id = ?
+				AND (content LIKE 'Starting new%' OR content LIKE 'Resuming%'
+					OR content LIKE 'Reconnecting to % session %')), 0)
+	`, taskID, SessionEndedLogPrefix+"%", taskID).Scan(&endedID, &startedID)
+	if err != nil {
+		return false, fmt.Errorf("check session ended: %w", err)
+	}
+	return endedID > 0 && endedID > startedID, nil
+}
+
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	return db.GetTaskLogsBefore(taskID, 0, limit)
