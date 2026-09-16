@@ -1,8 +1,8 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import { Pin } from "lucide-react";
 import type { LogLine, Task, TaskStatus } from "../api/types";
 import { ageHint, referenceTime, shortDuration } from "../lib/board";
-import { buildSections, type ListOptions } from "../lib/list";
+import { buildSections, PINNED_GROUP, type ListSection, type ListOptions } from "../lib/list";
 import { store, useAppSelector } from "../store";
 import { PRBadge, cardSubLine, useSpinner } from "./Board";
 import { cn } from "@/lib/utils";
@@ -13,6 +13,11 @@ import { cn } from "@/lib/utils";
 // line, and grows a second only when the task has something live to say — the
 // agent's current step, or the stand a blocked task is waiting on. A backlog
 // item has nothing to report, so a second line there would buy nothing.
+
+/** Rows rendered per section before a "N more" button. The store loads every
+ * task including done, so an uncapped Done section is thousands of rows — the
+ * kanban column and the phone list both cap at the same number. */
+const SECTION_RENDER_CAP = 50;
 
 const STATUS_DOT: Record<string, string> = {
   backlog: "bg-status-backlog",
@@ -152,6 +157,56 @@ const TaskRow = memo(function TaskRow({
   );
 }, rowPropsEqual);
 
+/** One section, capped. Two things are never hidden behind the cap: the pinned
+ * section (a pinned task falling out of view defeats the point of pinning) and
+ * the selected task (the keyboard can move onto a row the cap would hide). */
+function Section({
+  section,
+  selectedTaskId,
+  showProject,
+  projectColorFor,
+  latestFor,
+}: {
+  section: ListSection;
+  selectedTaskId: number | null;
+  showProject: boolean;
+  projectColorFor: (task: Task) => string;
+  latestFor: (task: Task) => LogLine | undefined;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const selectedBeyondCap =
+    section.tasks.findIndex((t) => t.id === selectedTaskId) >= SECTION_RENDER_CAP;
+  const uncapped = showAll || selectedBeyondCap || section.key === PINNED_GROUP;
+  const visible = uncapped ? section.tasks : section.tasks.slice(0, SECTION_RENDER_CAP);
+  const hidden = section.tasks.length - visible.length;
+
+  return (
+    <div>
+      {section.title && (
+        <SectionHeader title={section.title} status={section.status} count={section.tasks.length} />
+      )}
+      {visible.map((task) => (
+        <TaskRow
+          key={task.id}
+          task={task}
+          selected={task.id === selectedTaskId}
+          projectColor={projectColorFor(task)}
+          latest={latestFor(task)}
+          showProject={showProject}
+        />
+      ))}
+      {hidden > 0 && (
+        <button
+          className="w-full rounded-md py-1.5 text-center text-[11px] text-muted-foreground hover:bg-surface-2"
+          onClick={() => setShowAll(true)}
+        >
+          {hidden} more…
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SectionHeader({
   title,
   status,
@@ -198,27 +253,16 @@ export function TaskList({ tasks, options }: { tasks: Task[]; options: ListOptio
   return (
     <div className="flex-1 overflow-y-auto rounded-xl border bg-surface-1 p-2">
       {sections.map((section) => (
-        <div key={section.key || "all"}>
-          {section.title && (
-            <SectionHeader
-              title={section.title}
-              status={section.status}
-              count={section.tasks.length}
-            />
-          )}
-          {section.tasks.map((task) => (
-            <TaskRow
-              key={task.id}
-              task={task}
-              selected={task.id === selectedTaskId}
-              projectColor={
-                projects.find((p) => p.name === task.project)?.color || "var(--muted-foreground)"
-              }
-              latest={latestLogs[String(task.id)]}
-              showProject={showProject}
-            />
-          ))}
-        </div>
+        <Section
+          key={section.key || "all"}
+          section={section}
+          selectedTaskId={selectedTaskId}
+          showProject={showProject}
+          projectColorFor={(task) =>
+            projects.find((p) => p.name === task.project)?.color || "var(--muted-foreground)"
+          }
+          latestFor={(task) => latestLogs[String(task.id)]}
+        />
       ))}
     </div>
   );
