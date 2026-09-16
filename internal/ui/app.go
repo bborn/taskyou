@@ -566,6 +566,11 @@ type AppModel struct {
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
 	latestRelease  *github.LatestRelease // Latest release from GitHub (nil if not checked yet or same version)
 
+	// One-time plugins nudge, shown alongside the upgrade banner (see plugin_nudge.go)
+	showPluginNudge       bool // nudge visible this session
+	hasWorkflows          bool // at least one workflow resolves
+	starterPackInstalling bool // `ty plugins add` running off the UI loop
+
 	// pendingFocusTaskID is a task to select once the board has loaded, set by
 	// --task. Zero means no request.
 	pendingFocusTaskID int64
@@ -718,6 +723,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 	if len(version) > 0 {
 		model.currentVersion = version[0]
 	}
+	model.initPluginNudge()
 
 	return model
 }
@@ -791,6 +797,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		isSystemMsg = true
 	case placementFinishedMsg:
 		isSystemMsg = true
+	case starterPackInstalledMsg:
+		// The starter pack install finishes off the UI loop and may land while a
+		// form or picker is open; it must still reach the main switch.
+		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
 		// main switch to update the notification banner, not be routed to a view.
@@ -837,7 +847,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
 				m.folderPicker = nil
-				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
+				m.welcomeView = m.newWelcomeView()
 				m.currentView = ViewWelcome
 				return m, nil
 			}
@@ -949,6 +959,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.currentView = ViewNewTask
 					return m, m.newTaskForm.Init()
 				}
+			case "i":
+				if m.welcomeView.missingWorkflows {
+					return m, m.startStarterPackInstall()
+				}
 			case "esc", "ctrl+c":
 				m.welcomeView = nil
 				m.currentView = ViewDashboard
@@ -1020,7 +1034,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 2. No real projects yet (only "personal") and we're in a junk folder:
 			//    show the Welcome fork instead of dumping into a task form.
 			if m.shouldShowWelcomeFork(msg.tasks) {
-				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
+				m.welcomeView = m.newWelcomeView()
 				m.previousView = m.currentView
 				m.currentView = ViewWelcome
 				return m, tea.Batch(cmds...)
@@ -1673,6 +1687,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue watching for more changes
 		cmds = append(cmds, m.waitForDBChange())
 
+	case starterPackInstalledMsg:
+		m.handleStarterPackInstalled(msg)
+
 	case versionCheckMsg:
 		if msg.release != nil {
 			m.latestRelease = msg.release
@@ -1919,6 +1936,17 @@ func (m *AppModel) viewDashboard() string {
 			bannerUpgradeBg, bannerUpgradeFg, m.width))
 	}
 
+	// One-time plugins nudge, styled like the upgrade banner it sits beside
+	if m.showPluginNudge {
+		nudgeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#61AFEF")). // Blue background
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		headerParts = append(headerParts, nudgeStyle.Render(pluginNudgeText(m.hasWorkflows, m.starterPackInstalling)))
+	}
+
 	// Show notification banner if active
 	if m.notification != "" && time.Now().Before(m.notifyUntil) {
 		headerParts = append(headerParts, renderBanner(m.notification, bannerWarnBg, bannerWarnFg, m.width))
@@ -2133,6 +2161,9 @@ func (m *AppModel) renderHelp() string {
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if cmd, handled := m.handlePluginNudgeKey(msg); handled {
+		return m, cmd
+	}
 	switch {
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
