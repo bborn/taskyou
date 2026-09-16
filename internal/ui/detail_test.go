@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -827,4 +828,62 @@ func TestDetailModel_PaneTitleUsesTmuxPaneEnvBeforePanesExist(t *testing.T) {
 	if got := m.titlePaneID(); got != "%7" {
 		t.Errorf("titlePaneID() = %q, want the joined pane %%7", got)
 	}
+}
+
+// The header's PR line is right-aligned, so the URL sits flush against the
+// pane's padding and border — the spot where iTerm2 guessed the link's extent
+// from the screen and opened ".../pull/732│". An explicit OSC 8 hyperlink names
+// the target, and it must not cost the line any visible width, or the
+// right-aligned block shifts.
+func TestDetailModel_RenderHeaderPRLinkIsAHyperlink(t *testing.T) {
+	const url = "https://github.com/bborn/taskyou/pull/732"
+
+	for _, focused := range []bool{true, false} {
+		// 44 columns is narrow enough that the line wraps mid-URL; lipgloss then
+		// re-opens the hyperlink on the second row, and both rows must still point
+		// at the whole PR.
+		for _, width := range []int{200, 100, 80, 60, 44} {
+			m := &DetailModel{
+				task: &db.Task{
+					ID:      732,
+					Title:   "Fix PR URL formatting in iTerm output",
+					Status:  db.StatusBlocked,
+					Project: "taskyou",
+				},
+				prInfo: &github.PRInfo{
+					Number: 732,
+					URL:    url,
+					State:  github.PRStateOpen,
+				},
+				focused: focused,
+				width:   width,
+				height:  24,
+			}
+
+			header := m.renderHeader()
+			targets := hyperlinkTargets(header)
+			if len(targets) == 0 {
+				t.Errorf("focused=%v width=%d: the PR line has no OSC 8 hyperlink, so the terminal is left guessing:\n%q", focused, width, header)
+			}
+			for _, got := range targets {
+				if got != url {
+					t.Errorf("focused=%v width=%d: hyperlink target is %q, want %q", focused, width, got, url)
+				}
+			}
+			for i, line := range strings.Split(header, "\n") {
+				if w := lipgloss.Width(line); w > width-4 {
+					t.Errorf("focused=%v width=%d: header line %d is %d wide; the hyperlink changed the visible width", focused, width, i, w)
+				}
+			}
+		}
+	}
+}
+
+// hyperlinkTargets returns the URI of every OSC 8 hyperlink opened in s.
+func hyperlinkTargets(s string) []string {
+	var targets []string
+	for _, m := range regexp.MustCompile("\x1b\\]8;;([^\x07\x1b]+)\x07").FindAllStringSubmatch(s, -1) {
+		targets = append(targets, m[1])
+	}
+	return targets
 }

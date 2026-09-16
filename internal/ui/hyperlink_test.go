@@ -55,3 +55,30 @@ func TestLinkifyURLsGlamourOutput(t *testing.T) {
 		}
 	}
 }
+
+// A URL drawn flush against a box-drawing border, a truncation ellipsis or a
+// bullet must not take that character into its target. iTerm2 opened
+// ".../pull/732│" — the pane border swallowed into the link — and a hyperlink
+// whose target ends in the border is no better than no hyperlink at all.
+func TestLinkifyURLsStopsAtNonURLCharacters(t *testing.T) {
+	const url = "https://github.com/bborn/taskyou/pull/732"
+	link := ansi.SetHyperlink(url) + url + ansi.ResetHyperlink()
+
+	for _, suffix := range []string{"│", "┃", "▏", "…", "→", "•", "║"} {
+		t.Run(suffix, func(t *testing.T) {
+			if got, want := linkifyURLs(url+suffix), link+suffix; got != want {
+				t.Errorf("linkifyURLs(%q)\n got %q\nwant %q", url+suffix, got, want)
+			}
+		})
+	}
+}
+
+// Query strings, fragments and percent-escapes are part of the URL and must
+// survive into the target.
+func TestLinkifyURLsKeepsFullURI(t *testing.T) {
+	const url = "https://github.com/bborn/taskyou/pull/732/files?w=1&diff=split#diff-a%2Fb.go"
+	want := ansi.SetHyperlink(url) + url + ansi.ResetHyperlink()
+	if got := linkifyURLs(url); got != want {
+		t.Errorf("linkifyURLs(%q)\n got %q\nwant %q", url, got, want)
+	}
+}
