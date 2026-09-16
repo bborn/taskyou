@@ -28,6 +28,7 @@ func (m *AppModel) loadBoardViewState() {
 		m.listMode = mode == config.BoardDisplayList
 		m.kanban.SetListMode(m.listMode)
 	}
+	m.kanban.SetListOptions(m.listOptions())
 
 	filter, err := m.db.GetSetting(config.SettingBoardFilter)
 	if err != nil || strings.TrimSpace(filter) == "" {
@@ -171,4 +172,56 @@ func (m *AppModel) updateSavedViews(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, m.applySavedView(applied))
 	}
 	return m, cmd
+}
+
+// openListOptions opens the arrangement widget.
+func (m *AppModel) openListOptions() tea.Cmd {
+	m.listOptsView = NewListOptionsModel(m.kanban.ListOptions(), m.width, m.height)
+	m.previousView = m.currentView
+	m.currentView = ViewListOptions
+	return m.listOptsView.Init()
+}
+
+// updateListOptions routes input to the arrangement widget. The board is
+// re-arranged on every keystroke rather than on apply, so the effect of a
+// choice is visible while choosing it; esc puts the original back.
+func (m *AppModel) updateListOptions(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.listOptsView == nil {
+		m.currentView = ViewDashboard
+		return m, nil
+	}
+
+	view, cmd := m.listOptsView.Update(msg)
+	m.listOptsView = view
+	m.kanban.SetListOptions(view.Options())
+
+	switch {
+	case view.IsCancelled():
+		m.kanban.SetListOptions(m.listOptions())
+		m.listOptsView = nil
+		m.currentView = ViewDashboard
+	case view.IsDone():
+		opts := view.Options()
+		m.kanban.SetListOptions(opts)
+		opts.Save(m.setSetting)
+		m.listOptsView = nil
+		m.currentView = ViewDashboard
+	}
+	return m, cmd
+}
+
+// listOptions reads the persisted arrangement.
+func (m *AppModel) listOptions() ListOptions {
+	if m.db == nil {
+		return DefaultListOptions()
+	}
+	return LoadListOptions(m.db.GetSetting)
+}
+
+// setSetting adapts the database for ListOptions.Save.
+func (m *AppModel) setSetting(key, value string) error {
+	if m.db == nil {
+		return nil
+	}
+	return m.db.SetSetting(key, value)
 }

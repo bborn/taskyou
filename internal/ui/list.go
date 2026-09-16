@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -21,9 +20,15 @@ import (
 // SetListMode carries the selected task across, so toggling never loses your
 // place and every action in app.go keeps working through SelectedTask().
 
-// listRowHeight is the vertical cost of one list row. Unlike a kanban card
-// (cardHeight), a row is a single line — that density is the point.
-const listRowHeight = 1
+// listRowLines is how many lines one task occupies at each density: one for a
+// compact row, and four for a relaxed one (id, title, sub-line, spacer). The
+// scroll maths needs it to know how many tasks fit on screen.
+func (k *KanbanBoard) listRowLines() int {
+	if k.listOpts.Density == DensityRelaxed {
+		return 4
+	}
+	return 1
+}
 
 // listStatusRank orders the flat list by "how much this needs me now".
 // Anything unlisted sorts last.
@@ -69,24 +74,35 @@ func (k *KanbanBoard) SetListTitle(title string) {
 // by state that the render signature covers but that changes outside SetTasks.
 func (k *KanbanBoard) invalidateView() { k.cachedViewOK = false }
 
-// rebuildListTasks flattens the board's tasks into list order: pinned first
-// (they are pinned precisely so they stay in sight), then by status urgency,
-// then keeping the order they arrived in — which is the freshness order the
-// loader already established.
+// rebuildListTasks flattens the board's tasks into display order. What that
+// order is — the sections, and the sort inside them — is ListOptions' business,
+// not the board's.
 func (k *KanbanBoard) rebuildListTasks() {
-	tasks := make([]*db.Task, 0, len(k.allTasks))
-	tasks = append(tasks, k.allTasks...)
-
-	sort.SliceStable(tasks, func(i, j int) bool {
-		a, b := tasks[i], tasks[j]
-		if a.Pinned != b.Pinned {
-			return a.Pinned
-		}
-		return listRank(a.Status) < listRank(b.Status)
-	})
-	k.listTasks = tasks
+	k.listTasks = k.listOpts.Arrange(k.allTasks)
 	k.clampListSelection()
 }
+
+// SetListOptions changes how the list is arranged and re-sorts it, keeping the
+// selected task selected across the rearrangement.
+func (k *KanbanBoard) SetListOptions(opts ListOptions) {
+	opts = opts.Normalize()
+	if k.listOpts == opts {
+		return
+	}
+	var selectedID int64
+	if t := k.selectedListTask(); t != nil {
+		selectedID = t.ID
+	}
+	k.listOpts = opts
+	k.rebuildListTasks()
+	if selectedID != 0 {
+		k.selectListTask(selectedID)
+	}
+	k.invalidateView()
+}
+
+// ListOptions returns the current arrangement.
+func (k *KanbanBoard) ListOptions() ListOptions { return k.listOpts }
 
 func listRank(status string) int {
 	if r, ok := listStatusRank[status]; ok {
@@ -109,10 +125,13 @@ func (k *KanbanBoard) clampListSelection() {
 	k.ensureListRowVisible()
 }
 
-// listCapacity is how many rows fit in the viewport at the current height.
+// listCapacity is how many TASKS fit in the viewport at the current height and
+// density. Section headers also consume lines, so this is a floor rather than
+// an exact count — it only has to be conservative enough that the selected row
+// is always scrolled into view.
 func (k *KanbanBoard) listCapacity() int {
-	// -2 for the container border, -1 for the header bar.
-	capacity := (k.height - 3) / listRowHeight
+	// -2 container border, -1 header bar, -1 arrangement widget.
+	capacity := (k.height - 4) / k.listRowLines()
 	if capacity < 1 {
 		capacity = 1
 	}
@@ -186,7 +205,9 @@ func (k *KanbanBoard) moveListDown() {
 }
 
 // jumpListToStatus moves the cursor to the first task with the given status,
-// which is what the column-focus keys (B/P/L/D) mean in a flat list.
+// which is what the column-focus keys (B/P/L/D) mean in a flat list. It scans
+// display order rather than assuming the list is grouped by status, because
+// under "group by project" it is not.
 func (k *KanbanBoard) jumpListToStatus(status string) {
 	wanted := []string{status}
 	if status == db.StatusQueued {
@@ -204,58 +225,6 @@ func (k *KanbanBoard) jumpListToStatus(status string) {
 	}
 }
 
-// viewList renders the flat list: a header bar naming the view and its counts,
-// then one line per task.
-func (k *KanbanBoard) viewList() string {
-	innerWidth := k.width - 2 // container border
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
-	capacity := k.listCapacity()
-
-	start := k.listScroll
-	end := start + capacity
-	if end > len(k.listTasks) {
-		end = len(k.listTasks)
-	}
-
-	lines := []string{k.renderListHeader(innerWidth)}
-
-	switch {
-	case len(k.listTasks) == 0:
-		empty := lipgloss.NewStyle().
-			Foreground(ColorMuted).
-			Width(innerWidth).
-			Align(lipgloss.Center).
-			Italic(true).
-			MarginTop(1)
-		lines = append(lines, empty.Render(listEmptyMessage(k.listTitle)))
-	default:
-		for i := start; i < end; i++ {
-			lines = append(lines, k.renderListRow(k.listTasks[i], innerWidth, i == k.listRow))
-		}
-	}
-
-	// One shared indicator line: how many rows sit outside the viewport.
-	if hidden := k.listHiddenSummary(start, end); hidden != "" {
-		style := lipgloss.NewStyle().
-			Foreground(ColorMuted).
-			Width(innerWidth).
-			Align(lipgloss.Center).
-			Italic(true)
-		lines = append(lines, style.Render(hidden))
-	}
-
-	_, highlightBorder := GetThemeBorderColors()
-	container := lipgloss.NewStyle().
-		Width(innerWidth).
-		Height(k.height - 2).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(highlightBorder)
-
-	return container.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
-}
-
 // listEmptyMessage explains an empty list in terms of why it is empty: an
 // unfiltered empty board is a new install, a filtered one is a filter that
 // matched nothing.
@@ -264,23 +233,6 @@ func listEmptyMessage(title string) string {
 		return "No tasks — press 'n' to create one"
 	}
 	return fmt.Sprintf("No tasks match %s — press '/' to change the filter", title)
-}
-
-// listHiddenSummary describes rows scrolled out of view, above and below.
-func (k *KanbanBoard) listHiddenSummary(start, end int) string {
-	above, below := start, len(k.listTasks)-end
-	if below < 0 {
-		below = 0
-	}
-	switch {
-	case above > 0 && below > 0:
-		return fmt.Sprintf("%s %d   %s %d", IconArrowUp(), above, IconArrowDown(), below)
-	case above > 0:
-		return fmt.Sprintf("%s %d more above", IconArrowUp(), above)
-	case below > 0:
-		return fmt.Sprintf("%s %d more below", IconArrowDown(), below)
-	}
-	return ""
 }
 
 // renderListHeader names the list and counts what is in it by status, so the
@@ -327,98 +279,6 @@ func (k *KanbanBoard) renderListHeader(width int) string {
 		return headerStyle.Render(truncateRunes(left, width-2))
 	}
 	return headerStyle.Render(left + strings.Repeat(" ", gap) + right)
-}
-
-// listCursor marks the selected row in the gutter. The selection also gets a
-// background highlight, but a bare colour is not enough on its own: in a
-// no-colour terminal (or a piped render) the highlight vanishes and every row
-// looks the same, so the cursor glyph carries the selection too.
-func listCursor(selected bool) string {
-	if selected {
-		return Icon("▌", ">")
-	}
-	return " "
-}
-
-// renderListRow renders one task as a single line:
-//
-//	▌ ● #1234 [ol] Fix the retry banner            +12/-3 ✓ 📌  running 4m
-//
-// The left half identifies the task, the right half carries the same badges
-// the kanban card shows plus an age hint, so nothing is lost by switching modes.
-func (k *KanbanBoard) renderListRow(task *db.Task, width int, isSelected bool) string {
-	if width < 20 {
-		width = 20
-	}
-	cursor := listCursor(isSelected)
-	inner := width - 2 - lipgloss.Width(cursor) - 1 // padding + cursor gutter
-
-	icon := StatusIcon(task.Status)
-	id := fmt.Sprintf("#%d", task.ID)
-	project := ""
-	if task.Project != "" {
-		project = "[" + shortProjectName(task.Project) + "]"
-	}
-
-	right := strings.Join(k.listRowIndicators(task, isSelected), " ")
-	if hint := taskAgeHint(task); hint != "" {
-		if right != "" {
-			right += "  "
-		}
-		right += hint
-	}
-
-	// Budget the title with what is left after the fixed columns and the
-	// right-hand badges, so a long title never pushes the badges off-screen.
-	title := task.Title
-	if wf := k.workflowGroup(task.ID); wf != nil {
-		title = "⇄ " + wf.Goal()
-	}
-	fixed := lipgloss.Width(icon) + 1 + len(id) + 1
-	if project != "" {
-		fixed += lipgloss.Width(project) + 1
-	}
-	titleWidth := inner - fixed - lipgloss.Width(right) - 2
-	if titleWidth < 8 {
-		titleWidth = 8
-	}
-	title = truncateRunes(title, titleWidth)
-
-	// A selected row is a solid highlight bar, so per-token colours would fight
-	// the background; render it plain and let the bar carry the emphasis.
-	var left string
-	if isSelected {
-		parts := []string{icon, id}
-		if project != "" {
-			parts = append(parts, project)
-		}
-		parts = append(parts, title)
-		left = strings.Join(parts, " ")
-	} else {
-		parts := []string{FgStyle(StatusColor(task.Status)).Render(icon), Dim.Render(id)}
-		if project != "" {
-			parts = append(parts, FgStyle(ProjectColor(task.Project)).Render(project))
-		}
-		titleStyle := lipgloss.NewStyle()
-		if k.NeedsInput(task.ID) {
-			titleStyle = titleStyle.Foreground(ColorWarning)
-		}
-		parts = append(parts, titleStyle.Render(title))
-		left = strings.Join(parts, " ")
-	}
-
-	gap := inner - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
-	line := cursor + " " + left + strings.Repeat(" ", gap) + right
-
-	rowStyle := lipgloss.NewStyle().Width(width).Padding(0, 1).MaxHeight(1)
-	if isSelected {
-		bg, fg := GetThemeCardColors()
-		rowStyle = rowStyle.Bold(true).Background(bg).Foreground(fg)
-	}
-	return rowStyle.Render(line)
 }
 
 // listRowIndicators returns the badges for a row: the same set the kanban card
@@ -504,18 +364,41 @@ func shortProjectName(project string) string {
 }
 
 // handleClickList maps a click to the row under it, selecting that task.
+//
+// It replays the same block layout the renderer builds rather than dividing y
+// by a row height: with section headers and two densities in play, any
+// shortcut here would drift from what is actually on screen, and a click that
+// selects the wrong task is worse than one that selects nothing.
 func (k *KanbanBoard) handleClickList(x, y int) *db.Task {
 	_ = x
-	// y=0 is the container's top border, y=1 the header bar; rows start at 2.
-	row := y - 2
-	if row < 0 {
+	// y=0 container border, y=1 header bar, y=2 arrangement widget.
+	const firstContentLine = 3
+	target := y - firstContentLine
+	if target < 0 {
 		return nil
 	}
-	idx := k.listScroll + row
-	if idx < 0 || idx >= len(k.listTasks) {
-		return nil
+
+	innerWidth := k.width - 2
+	if innerWidth < 20 {
+		innerWidth = 20
 	}
-	k.listRow = idx
-	k.ensureListRowVisible()
-	return k.listTasks[idx]
+	blocks := k.buildListBlocks(innerWidth)
+
+	line := 0
+	for i := k.listScroll; i < len(blocks); i++ {
+		b := blocks[i]
+		if i != k.listScroll || k.listScroll == 0 {
+			line += len(b.header)
+		}
+		if target < line {
+			return nil // landed on a section header, not a task
+		}
+		if target < line+len(b.body) {
+			k.listRow = i
+			k.ensureListRowVisible()
+			return k.listTasks[i]
+		}
+		line += len(b.body)
+	}
+	return nil
 }

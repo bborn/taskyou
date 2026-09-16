@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -37,7 +38,10 @@ func TestListModeOrdersByUrgency(t *testing.T) {
 	board := listBoard(t, listSampleTasks())
 
 	got := listIDs(board)
-	want := []int64{2, 3, 5, 1, 4} // processing, blocked, queued, backlog, done
+	// Sections run blocked, In progress, backlog, done. Processing and queued
+	// share the In progress section — the same pairing the kanban column makes —
+	// so #2 (processing) and #5 (queued) sit together, urgency ordering them.
+	want := []int64{3, 2, 5, 1, 4}
 	if len(got) != len(want) {
 		t.Fatalf("list has %d tasks, want %d", len(got), len(want))
 	}
@@ -61,12 +65,12 @@ func TestListModeFloatsPinnedToTop(t *testing.T) {
 func TestListModeNavigationWraps(t *testing.T) {
 	board := listBoard(t, listSampleTasks())
 
-	if got := board.SelectedTask(); got == nil || got.ID != 2 {
+	if got := board.SelectedTask(); got == nil || got.ID != 3 {
 		t.Fatalf("list should start on the first row, got %v", got)
 	}
 
 	board.MoveDown()
-	if got := board.SelectedTask(); got.ID != 3 {
+	if got := board.SelectedTask(); got.ID != 2 {
 		t.Errorf("down should advance one row, got #%d", got.ID)
 	}
 
@@ -77,7 +81,7 @@ func TestListModeNavigationWraps(t *testing.T) {
 	}
 
 	board.MoveDown() // wrap past the bottom
-	if got := board.SelectedTask(); got.ID != 2 {
+	if got := board.SelectedTask(); got.ID != 3 {
 		t.Errorf("down from the last row should wrap to the first, got #%d", got.ID)
 	}
 }
@@ -189,22 +193,24 @@ func TestListModeScrollsToKeepSelectionVisible(t *testing.T) {
 		t.Errorf("selected row %d outside viewport [%d,%d)", board.listRow, board.listScroll, board.listScroll+capacity)
 	}
 
-	// The indicator must tell the user rows are hidden, or a long list looks
-	// truncated rather than scrolled.
-	if !strings.Contains(board.View(), "more") && !strings.Contains(board.View(), IconArrowUp()) {
-		t.Error("expected a scroll indicator in a list longer than the viewport")
+	// Whatever the scroll position, the selected task must actually be drawn —
+	// that is the invariant the scroll maths exists to keep.
+	if sel := board.SelectedTask(); sel == nil || !strings.Contains(board.View(), fmt.Sprintf("#%d", sel.ID)) {
+		t.Errorf("selected task is not on screen:\n%s", board.View())
 	}
 }
 
 func TestListModeClickSelectsRow(t *testing.T) {
 	board := listBoard(t, listSampleTasks())
 
-	// y=0 border, y=1 header, y=2 the first row.
-	if got := board.HandleClick(10, 3); got == nil || got.ID != 3 {
-		t.Errorf("click on the second row should select #3, got %v", got)
+	// y=0 border, y=1 header bar, y=2 arrangement widget, y=3 the first section
+	// header, y=4 the first task.
+	first := board.ListTasks()[0]
+	if got := board.HandleClick(10, 4); got == nil || got.ID != first.ID {
+		t.Errorf("click on the first row should select #%d, got %v", first.ID, got)
 	}
-	if got := board.SelectedTask(); got == nil || got.ID != 3 {
-		t.Errorf("click should move the selection, got %v", got)
+	if got := board.HandleClick(10, 3); got != nil {
+		t.Errorf("click on a section header should select nothing, got %v", got)
 	}
 	if got := board.HandleClick(10, 99); got != nil {
 		t.Errorf("click past the last row should select nothing, got %v", got)
