@@ -65,42 +65,63 @@ func TestTerminalTaskReporterWrapsForTmux(t *testing.T) {
 	}
 }
 
-func TestReportTerminalTaskFollowsFocus(t *testing.T) {
+// The variables name the task the user is working in, which is the one whose
+// detail view is open. The board publishes nothing: its highlight follows the
+// cursor, and leaving the last visited task published there left every terminal
+// named after a task the user had already backed out of.
+func TestReportTerminalTaskOnlyInDetailView(t *testing.T) {
 	tasks := []*db.Task{
 		{ID: 1, Title: "One", Status: db.StatusBacklog},
 		{ID: 2, Title: "Two", Status: db.StatusBacklog},
 	}
-	var last string
+	var writes []string
 	m := &AppModel{
 		width:        100,
 		height:       50,
 		currentView:  ViewDashboard,
 		keys:         DefaultKeyMap(),
 		kanban:       NewKanbanBoard(100, 50),
-		terminalTask: &terminalTaskReporter{write: func(s string) { last = s }},
+		terminalTask: &terminalTaskReporter{write: func(s string) { writes = append(writes, s) }},
 	}
 	m.kanban.SetTasks(tasks)
-	before := m.kanban.SelectedTask()
-	if before == nil {
-		t.Fatal("expected a highlighted task")
-	}
+	blank := setUserVarSeq(termVarTask, "")
 
-	// Moving the highlight through Update publishes the new card.
+	// The board publishes nothing but the opening blank, however the highlight
+	// moves.
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	after := m.kanban.SelectedTask()
-	if after == nil || after.ID == before.ID {
-		t.Fatalf("down did not move the highlight off task %d", before.ID)
-	}
-	if want := setUserVarSeq(termVarTask, fmt.Sprintf("#%d %s", after.ID, after.Title)); !strings.Contains(last, want) {
-		t.Errorf("write = %q, want it to contain %q", last, want)
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if len(writes) != 1 || !strings.Contains(writes[0], blank) {
+		t.Fatalf("on the board, writes = %q, want one blanking write", writes)
 	}
 
-	// The detail view reports the open task, whatever the board highlights.
-	m.currentView = ViewDetail
-	m.selectedTask = before
+	// Opening a task's detail view names it.
+	open := tasks[1]
+	m.currentView, m.selectedTask, m.detailView = ViewDetail, open, &DetailModel{}
 	m.reportTerminalTask()
-	if want := setUserVarSeq(termVarTask, fmt.Sprintf("#%d %s", before.ID, before.Title)); !strings.Contains(last, want) {
-		t.Errorf("in detail view, write = %q, want it to contain %q", last, want)
+	want := setUserVarSeq(termVarTask, fmt.Sprintf("#%d %s", open.ID, open.Title))
+	if len(writes) != 2 || !strings.Contains(writes[1], want) {
+		t.Fatalf("in detail view, writes = %q, want one containing %q", writes, want)
+	}
+
+	// A modal over the detail view is not leaving it: the detail view is still
+	// behind it, and blanking the variables would only flicker a tab title.
+	m.currentView = ViewChangeStatus
+	m.reportTerminalTask()
+	if len(writes) != 2 {
+		t.Fatalf("a modal over the detail view wrote %q, want nothing", writes[2:])
+	}
+
+	// Backing out to the board blanks them again, even though the detail model
+	// is still attached — some paths back to the board leave one behind.
+	m.currentView = ViewDashboard
+	m.reportTerminalTask()
+	if len(writes) != 3 || !strings.Contains(writes[2], blank) {
+		t.Fatalf("back on the board, writes = %q, want a third blanking write", writes)
+	}
+	for _, name := range []string{termVarTaskID, termVarTaskTitle} {
+		if w := setUserVarSeq(name, ""); !strings.Contains(writes[2], w) {
+			t.Errorf("leaving the detail view left %s set: %q", name, writes[2])
+		}
 	}
 }
 
@@ -223,6 +244,9 @@ func TestOpenTaskOnLoadPublishesTaskAfterAttach(t *testing.T) {
 	}
 	m.OpenTaskOnLoad(1234)
 	m.Update(tasksLoadedMsg{tasks: tasks})
+	// The detail load tasksLoadedMsg asked for lands: `ty open` is in the task.
+	m.currentView, m.selectedTask, m.detailView = ViewDetail, tasks[1], &DetailModel{}
+	m.Update(tickMsg(clock))
 
 	// Everything so far went into a session with no client: tmux dropped it.
 	last = ""

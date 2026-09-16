@@ -173,20 +173,43 @@ func (m *AppModel) ClearTerminalTask() {
 	}
 }
 
-// reportTerminalTask publishes the task the user is looking at: the open task
-// in the detail view, otherwise the highlighted card on the board.
+// reportTerminalTask publishes the task the user is working in: the task whose
+// detail view is open, and nothing at all anywhere else. Called from Update, so
+// every way into and out of a detail view publishes without having to remember
+// to.
 func (m *AppModel) reportTerminalTask() {
 	if m.terminalTask == nil {
 		return
 	}
-	var task *db.Task
-	switch {
-	case m.currentView == ViewDetail && m.selectedTask != nil:
-		task = m.selectedTask
-	case m.kanban != nil:
-		task = m.kanban.SelectedTask()
+	m.terminalTask.report(m.openDetailTask())
+}
+
+// openDetailTask is the task whose detail view is on screen, or nil when the
+// user is not in one.
+//
+// The board publishes nothing on purpose. Naming the highlighted card there left
+// the variables pointing at the last task visited for the rest of the session —
+// a tab titled after a task the user had already backed out of — and the
+// highlight follows the cursor rather than anything the user is working in.
+//
+// A modal opened over the detail view (change status, retry, attachments, the
+// command palette) still counts as being in it: the detail view is behind the
+// modal, and blanking the variables for its lifetime would only make a tab title
+// flicker. The board is excluded even when a detail model is still attached,
+// because some paths back to it leave one behind.
+func (m *AppModel) openDetailTask() *db.Task {
+	if m.selectedTask == nil {
+		return nil
 	}
-	m.terminalTask.report(task)
+	switch {
+	case m.currentView == ViewDetail:
+		return m.selectedTask
+	case m.currentView == ViewDashboard:
+		return nil
+	case m.detailView != nil:
+		return m.selectedTask
+	}
+	return nil
 }
 
 // writeTTY writes to /dev/tty directly, like ringBellNow, so the sequence
