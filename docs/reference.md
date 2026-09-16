@@ -34,7 +34,7 @@ The terminal UI is TaskYou's primary interface — everything ships here first. 
 
 ### Show the focused task in your tab title
 
-The TUI publishes the task you are looking at (the open task in the detail view, otherwise the highlighted card) as iTerm2 user variables:
+The TUI publishes the task you have open in the detail view as iTerm2 user variables, and blanks them the moment you leave it — so the board never names the task you last visited:
 
 | Variable | Example |
 |---|---|
