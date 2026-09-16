@@ -103,9 +103,12 @@ func newCompleteCmd() *cobra.Command {
 				if outcome.PRURL != "" {
 					fmt.Println(dimStyle.Render("  " + outcome.PRURL))
 				}
-				fmt.Println("It is now 'blocked' awaiting a human merge, and moves to 'done' automatically once the PR merges or closes.")
+				fmt.Println("It is now 'blocked' — merge the PR, then close the task.")
+			case completion.KindReview:
+				fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d finished.", taskID)))
+				fmt.Println("It is now 'blocked' awaiting a human to review and close it.")
 			default:
-				fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d marked done.", taskID)))
+				fmt.Println(successStyle.Render(fmt.Sprintf("Workflow step #%d marked done; the next steps can start.", taskID)))
 			}
 			return nil
 		},

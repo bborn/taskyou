@@ -14,15 +14,16 @@ import (
 	"github.com/bborn/workflow/internal/executor"
 )
 
-// The TUI's half of the bypass test. The other three entry points — the real
+// The TUI's half of the entry-point tests. The other entry points — the real
 // `ty` binary, the HTTP handlers, and the agent-facing completion path — are
-// attacked in cmd/task/status_gate_entrypoints_test.go; the board's own
+// checked in cmd/task/status_gate_entrypoints_test.go; the board's own
 // commands are only reachable from inside this package.
 //
-// Two claims here, and the second is the one that used to fail: the gate
-// refuses the close, AND the board tells the user why. A refusal that only
-// reloads the board reads as a dropped keypress, which is how people learned
-// to press close twice.
+// Two claims here. A person moving a card to Done is the decision, so it goes
+// through even when the cached PR badge still says OPEN (it can lag a merge by
+// minutes). And when a status write IS refused, the board tells the user why:
+// a refusal that only reloads the board reads as a dropped keypress, which is
+// how people learned to press close twice.
 
 func gatedBoardTask(t *testing.T) (*db.DB, *AppModel, *db.Task) {
 	t.Helper()
@@ -56,26 +57,26 @@ func gatedBoardTask(t *testing.T) (*db.DB, *AppModel, *db.Task) {
 	return database, model, reloaded
 }
 
-// TestOpenPRGate_TUIEntryPoint: the board's close command is refused for a
-// task whose PR is still open, and the refusal is a fact in the log.
-func TestOpenPRGate_TUIEntryPoint(t *testing.T) {
+// TestTUIMoveToDoneWithStaleOpenPR: dragging a card into Done is a person's
+// close, and a cached OPEN PR state does not overrule it. The close is a fact
+// in the log, attributed to the board.
+//
+// (closeTask is not driven here: on success it kills the task's tmux window in
+// the daemon session, which in a test would reach the live daemon's windows.)
+func TestTUIMoveToDoneWithStaleOpenPR(t *testing.T) {
 	database, model, task := gatedBoardTask(t)
 
-	msg := model.closeTask(task.ID)()
-	closed, ok := msg.(taskClosedMsg)
+	msg := model.changeTaskStatus(task.ID, db.StatusDone)()
+	changed, ok := msg.(taskStatusChangedMsg)
 	if !ok {
-		t.Fatalf("closeTask returned %T, want taskClosedMsg", msg)
+		t.Fatalf("changeTaskStatus returned %T", msg)
 	}
-	if closed.err == nil {
-		t.Fatal("the board closed a task with an open PR")
+	if changed.err != nil {
+		t.Fatalf("the board refused a person's close on a stale OPEN PR: %v", changed.err)
 	}
-	if !db.IsRefused(closed.err) || db.RefusalGate(closed.err) != db.GateOpenPR {
-		t.Fatalf("want an open-pr refusal, got %v", closed.err)
-	}
-
 	reloaded, _ := database.GetTask(task.ID)
-	if reloaded.Status == db.StatusDone {
-		t.Fatalf("the task moved to %q anyway", reloaded.Status)
+	if reloaded.Status != db.StatusDone {
+		t.Fatalf("status is %q, want done", reloaded.Status)
 	}
 
 	events, err := database.GetStatusEvents(task.ID)
@@ -83,8 +84,8 @@ func TestOpenPRGate_TUIEntryPoint(t *testing.T) {
 		t.Fatalf("status events: %v", err)
 	}
 	last := events[len(events)-1]
-	if last.Outcome != db.OutcomeRefused || last.Actor != db.ActorTUI || last.Gate != db.GateOpenPR {
-		t.Fatalf("the TUI's refused close is not in the log: %+v", last)
+	if last.Outcome != db.OutcomeApplied || last.Actor != db.ActorTUI || last.Evidence.Human == "" {
+		t.Fatalf("the TUI's close is not in the log as a human's: %+v", last)
 	}
 }
 
@@ -93,8 +94,8 @@ func TestOpenPRGate_TUIEntryPoint(t *testing.T) {
 func TestRefusedCloseTellsTheUserWhy(t *testing.T) {
 	_, model, task := gatedBoardTask(t)
 
-	msg := model.closeTask(task.ID)()
-	model.Update(msg)
+	model.Update(taskClosedMsg{err: &db.RefusedError{TaskID: task.ID, From: db.StatusBlocked,
+		To: db.StatusDone, Gate: db.GateOpenPR, Detail: "PR #512 is still open"}})
 
 	if model.notification == "" {
 		t.Fatal("a refused close showed the user nothing")
@@ -110,25 +111,13 @@ func TestRefusedCloseTellsTheUserWhy(t *testing.T) {
 	}
 }
 
-// TestTUIMoveToDoneIsGatedToo: dragging a card into Done is the same write as
-// pressing close, and inherits the same gate.
-func TestTUIMoveToDoneIsGatedToo(t *testing.T) {
-	database, model, task := gatedBoardTask(t)
+// TestRefusedBoardMoveTellsTheUserWhy: a refused card move surfaces the reason
+// the same way a refused close does.
+func TestRefusedBoardMoveTellsTheUserWhy(t *testing.T) {
+	_, model, task := gatedBoardTask(t)
 
-	msg := model.changeTaskStatus(task.ID, db.StatusDone)()
-	changed, ok := msg.(taskStatusChangedMsg)
-	if !ok {
-		t.Fatalf("changeTaskStatus returned %T", msg)
-	}
-	if db.RefusalGate(changed.err) != db.GateOpenPR {
-		t.Fatalf("moving a card to Done skipped the open-PR gate: %v", changed.err)
-	}
-	reloaded, _ := database.GetTask(task.ID)
-	if reloaded.Status == db.StatusDone {
-		t.Fatal("the card landed in Done anyway")
-	}
-
-	model.Update(msg)
+	model.Update(taskStatusChangedMsg{err: &db.RefusedError{TaskID: task.ID, From: db.StatusBlocked,
+		To: db.StatusDone, Gate: db.GateOpenPR, Detail: "PR #512 is still open"}})
 	if !strings.Contains(model.notification, "512") {
 		t.Errorf("a refused board move showed no reason: %q", model.notification)
 	}

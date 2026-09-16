@@ -1561,13 +1561,6 @@ func (e *Executor) worker(ctx context.Context) {
 	}
 }
 
-// shouldPromoteReviewTask reports whether a PR's state means its task is finished
-// and should move to 'done' — i.e. the PR has merged or been closed. An open or
-// draft PR is still awaiting the human, so the task stays in 'blocked'.
-func shouldPromoteReviewTask(info *github.PRInfo) bool {
-	return info != nil && (info.State == github.PRStateMerged || info.State == github.PRStateClosed)
-}
-
 // refreshPRStatus is the one background loop that keeps PR status current. The
 // TUI, web and desktop all read what it stores in pr_info_json, so they agree
 // with each other and a TUI left open doesn't spend GitHub budget of its own.
@@ -1580,8 +1573,9 @@ func shouldPromoteReviewTask(info *github.PRInfo) bool {
 // network or an exhausted rate limit leaves the last good badge in place
 // instead of blanking it.
 //
-// It also finishes the completion flow: taskyou_complete parks PR-bearing tasks
-// in 'blocked', and once their PR merges or closes this promotes them to 'done'.
+// It never changes a task's status. A merged PR used to move its task to done,
+// which yanked tasks out from under agents still working on them; only a human
+// closes a task now.
 func (e *Executor) refreshPRStatus(ctx context.Context) {
 	if e.prPoller == nil {
 		return
@@ -1596,9 +1590,7 @@ func (e *Executor) refreshPRStatus(ctx context.Context) {
 		task := tasks[r.Target.TaskID]
 		if err := e.db.UpdateTaskPRInfo(task.ID, r.Info.URL, r.Info.Number, github.MarshalPRInfo(r.Info)); err != nil {
 			e.logger.Warn("refreshPRStatus: failed to persist PR info", "task", task.ID, "error", err)
-			continue
 		}
-		e.promoteReviewTask(task, r.Info)
 	}
 }
 
@@ -1622,11 +1614,7 @@ func (e *Executor) prTargets() ([]github.PRTarget, map[int64]*db.Task) {
 			known := github.UnmarshalPRInfo(task.PRInfoJSON)
 			terminal := known != nil && github.PollInterval(known) == 0
 			if terminal {
-				// Nothing left to ask GitHub, but a blocked task may still be
-				// waiting on a merge that was stored by someone else (or before a
-				// restart) and never promoted.
-				e.promoteReviewTask(task, known)
-				continue
+				continue // nothing left to ask GitHub
 			}
 			if status == db.StatusDone && known == nil {
 				continue
@@ -1646,45 +1634,6 @@ func (e *Executor) prTargets() ([]github.PRTarget, map[int64]*db.Task) {
 		}
 	}
 	return targets, tasks
-}
-
-// promoteReviewTask moves a blocked "PR ready for review" task to 'done' once its
-// PR has merged or closed.
-//
-// Idempotency: each promotion is recorded against the PR number via
-// MarkPRAutoCompleted. If a human reopens an already-completed task to keep working
-// against the same merged/closed PR, it will not bounce straight back to 'done' —
-// only a genuinely new PR (different number) can auto-complete it again.
-func (e *Executor) promoteReviewTask(task *db.Task, info *github.PRInfo) {
-	if task.Status != db.StatusBlocked || task.PRNumber <= 0 || !shouldPromoteReviewTask(info) {
-		return
-	}
-	if done, _ := e.db.WasPRAutoCompleted(task.ID, info.Number); done {
-		return
-	}
-
-	verb := "merged"
-	if info.State == github.PRStateClosed {
-		verb = "closed"
-	}
-	if err := e.db.MarkPRAutoCompleted(task.ID, info.Number); err != nil {
-		e.logger.Warn("promoteReviewTask: failed to record auto-done marker", "task", task.ID, "error", err)
-	}
-	e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("PR #%d %s — task auto-completed.", info.Number, verb))
-	// The PR reaching a terminal state is the ONLY evidence that gets a
-	// done-write past the open-PR gate — and this reconciler is the only caller
-	// that has actually looked at GitHub to obtain it.
-	if err := e.db.SetTaskStatus(task.ID, db.StatusDone, db.ActorDaemon,
-		fmt.Sprintf("PR #%d was %s by a human, which finishes this task", info.Number, verb),
-		db.Evidence{
-			Observed: fmt.Sprintf("GitHub reports PR #%d in state %s", info.Number, info.State),
-			PRNumber: info.Number,
-			PRState:  string(info.State),
-		}); err != nil {
-		e.logger.Error("promoteReviewTask: failed to mark task done", "task", task.ID, "error", err)
-		return
-	}
-	e.logger.Info("Auto-completed reviewed task", "task", task.ID, "pr", info.Number, "state", verb)
 }
 
 // suspendIdleBlockedTasks finds blocked tasks that have been idle and suspends their Claude processes.
@@ -2705,9 +2654,9 @@ Project context:
 
 Completion signaling (REQUIRED — nothing else watches for completion):
 - When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand. If taskyou_complete isn't in your active toolset, it is deferred behind tool search (see above) — load it and call it; do not stop with an apology that the tool is unavailable.
-  - If you opened a PR: the task moves to 'blocked' and waits for a human to review and merge it. It is promoted to 'done' automatically once the PR is merged or closed — so calling taskyou_complete does NOT mean the work shipped, you must NOT wait for the merge yourself, and you must NOT call taskyou_complete more than once.
-  - If the task produced no PR (e.g. a quick config change or moving a file): it moves straight to 'done'.
-  - If taskyou_complete is genuinely uncallable after you tried to load it, finish with the CLI instead: ty complete --summary "<your summary>". It runs the IDENTICAL logic (same verify gate, same gate parking, same PR routing). Do NOT substitute 'ty close' — that is a plain status write which skips those rules and can mark work done that never passed its checks.
+  - The task moves to 'blocked' and waits for a human, who reviews it (and merges the PR, if you opened one) and closes it. Only that human moves a task to 'done' — so calling taskyou_complete does NOT mean the work shipped, you must NOT wait for a merge yourself, and you must NOT call taskyou_complete more than once.
+  - Exception: a workflow step that later steps depend on moves straight to 'done', which starts the next steps.
+  - If taskyou_complete is genuinely uncallable after you tried to load it, finish with the CLI instead: ty complete --summary "<your summary>". It runs the IDENTICAL logic (same verify gate, same gate parking, same PR routing). Do NOT substitute 'ty close' — that is a plain status write which skips those rules and is not yours to run: only a human closes a task.
 - When you need clarification, call taskyou_needs_input with the question. This moves the task to 'blocked' so a human is notified. Do not prompt in the terminal — the task system can't see TTY prompts.`)
 
 	if e.taskUsesWorktrees(task) {

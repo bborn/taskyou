@@ -85,7 +85,8 @@ func TestVerifyGateRejectsOnFailure(t *testing.T) {
 }
 
 // TestVerifyGatePassesOnSuccess proves a passing verify command lets completion
-// through: the task reaches 'done'.
+// through: the task leaves 'processing' and parks in 'blocked' for a human to
+// close (a plain task is never moved to done by automation).
 func TestVerifyGatePassesOnSuccess(t *testing.T) {
 	database := testDB(t)
 	task := verifyGateStep(t, database, "exit 0")
@@ -93,7 +94,7 @@ func TestVerifyGatePassesOnSuccess(t *testing.T) {
 	completeTask(t, database, task.ID)
 
 	reloaded, _ := database.GetTask(task.ID)
-	if reloaded.Status != db.StatusDone {
-		t.Errorf("task status = %q, want done after passing verify", reloaded.Status)
+	if reloaded.Status != db.StatusBlocked {
+		t.Errorf("task status = %q, want blocked for review after passing verify", reloaded.Status)
 	}
 }
