@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bborn/workflow/internal/agentsend"
 )
 
 const annotationsMaxBody = 20 << 20 // 20 MB (screenshots)
@@ -99,12 +102,18 @@ func (s *Server) handleTaskAnnotations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The nudge is deferred until the coalesce window closes, so `nudged`
-	// reports that a live executor is there to receive it rather than that
-	// send-keys has already run.
+	// reports that a live executor is there to receive it rather than that the
+	// prompt has already been delivered. "Live" means a pane carrying this
+	// task's tmux tag — the same question the delivery itself will ask.
+	live := false
+	if s.runner != nil {
+		_, err := s.agentSender().AgentPane(task.ID)
+		live = err == nil
+	}
 	jsonOK(w, map[string]interface{}{
 		"ok":     true,
 		"path":   relPath,
-		"nudged": task.ClaudePaneID != "" && s.runner != nil,
+		"nudged": live,
 	})
 }
 
@@ -197,9 +206,9 @@ func (s *Server) flushAnnotations(taskID int64) {
 		return
 	}
 
-	// Re-read the task: the pane can change while the window is open.
+	// Re-read the task: it can change while the window is open.
 	task, err := s.db.GetTask(taskID)
-	if err != nil || task == nil || task.ClaudePaneID == "" || s.runner == nil {
+	if err != nil || task == nil || s.runner == nil {
 		return
 	}
 
@@ -222,13 +231,54 @@ func (s *Server) flushAnnotations(taskID int64) {
 		nudge += " The user's live browser is connected — read .taskyou/browser/HOWTO.md to view and interact with the page directly."
 	}
 
-	// One nudge at a time: the literal text and its Enter must stay adjacent.
-	s.nudgeMu.Lock()
-	defer s.nudgeMu.Unlock()
-	if err := s.runner.Run("tmux", "send-keys", "-t", task.ClaudePaneID, "-l", nudge); err != nil {
-		return
+	s.nudgeAgent(taskID, nudge, p.relPath)
+}
+
+// How long a nudge keeps waiting for a working agent, and how often it looks
+// again. Annotations are a reply to work in progress, so "busy right now" is
+// usually "free in a moment" — but the prompt is never forced into a pane that
+// is mid-turn, and it gives up rather than waiting forever. The server's
+// nudgeWindow/nudgeRetry override these, so tests do not wait in real time.
+const (
+	annotationNudgeWindow = 2 * time.Minute
+	annotationNudgeRetry  = 2 * time.Second
+)
+
+// nudgeAgent delivers the bundle's prompt to the task's agent, waiting out a
+// busy agent and reporting on the task's own log when it cannot be delivered at
+// all. The bundle is already on disk either way: a lost nudge costs the prompt,
+// not the user's work.
+func (s *Server) nudgeAgent(taskID int64, nudge, relPath string) {
+	window, retry := s.nudgeWindow, s.nudgeRetry
+	if window <= 0 {
+		window = annotationNudgeWindow
 	}
-	_ = s.runner.Run("tmux", "send-keys", "-t", task.ClaudePaneID, "Enter")
+	if retry <= 0 {
+		retry = annotationNudgeRetry
+	}
+
+	sender := s.agentSender()
+	deadline := time.Now().Add(window)
+	var err error
+	for {
+		err = sender.Send(agentsend.Prompt{TaskID: taskID, Text: nudge, Submit: true})
+		if !errors.Is(err, agentsend.ErrBusy) || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(retry)
+	}
+
+	switch {
+	case errors.Is(err, agentsend.ErrBusy):
+		s.db.AppendTaskLog(taskID, "system",
+			"[ty-chrome] Annotations saved to "+relPath+", but the agent never stopped long enough to be told. Ask it to read that file.")
+	case errors.Is(err, agentsend.ErrNoPane):
+		s.db.AppendTaskLog(taskID, "system",
+			"[ty-chrome] Annotations saved to "+relPath+". No agent is running for this task, so nothing was notified.")
+	case err != nil:
+		s.db.AppendTaskLog(taskID, "system",
+			"[ty-chrome] Annotations saved to "+relPath+", but the agent could not be reached: "+err.Error())
+	}
 }
 
 func decodeScreenshot(raw string) []byte {

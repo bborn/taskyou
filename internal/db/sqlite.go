@@ -212,7 +212,7 @@ const modelClaudeSlugMigrationKey = "migration:clear_model_claude_slug_v1"
 // handshake.Protocol must be bumped whenever a schema change means a daemon and
 // a client of different builds would disagree about a row — see
 // internal/handshake.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // SchemaVersionKey is where SchemaVersion is stamped in the settings table.
 const SchemaVersionKey = "schema_version"
@@ -399,6 +399,20 @@ func (db *DB) migrate() error {
 			outcome TEXT NOT NULL DEFAULT 'applied',
 			gate TEXT NOT NULL DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// Per-task turn counters, advanced by the agent's own hooks
+		// (UserPromptSubmit starts a turn, Stop finishes one). A caller that sends a
+		// prompt and waits for the answer watches these rather than status, which
+		// cannot tell "replied to me" from "finished what it was already doing".
+		// A table of its own, not columns on tasks: this is hook bookkeeping with a
+		// write on every prompt, and it has no business widening the row every
+		// board query scans.
+		`CREATE TABLE IF NOT EXISTS task_turns (
+			task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+			started INTEGER NOT NULL DEFAULT 0,
+			completed INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_status_events_task ON task_status_events(task_id, id)`,

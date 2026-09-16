@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	osExec "os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/muesli/termenv"
 
+	"github.com/bborn/workflow/internal/agentsend"
 	"github.com/bborn/workflow/internal/ai"
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
@@ -5632,10 +5634,12 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 			}
 		}
 
-		// Check if tmux session is still alive
-		sessionName := executor.TmuxSessionName(id)
-		if err := agentTmux(context.Background(), "has-session", "-t", sessionName).Run(); err == nil {
-			// Session alive - prepare attachments and send feedback via send-keys
+		// Is the agent still there? Ask tmux which pane carries this task's tag
+		// rather than trusting a session name or a stored pane id — a live agent
+		// is a tagged pane, and nothing else is safe to type into.
+		sender := agentSender(database)
+		if _, paneErr := sender.AgentPane(id); paneErr == nil {
+			// Agent alive - prepare attachments and send the feedback to its pane
 			feedbackToSend := feedback
 
 			// If there are new attachments, write them to files and include paths in feedback
@@ -5677,8 +5681,23 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 			}
 
 			if feedbackToSend != "" {
+				err := sender.Send(agentsend.Prompt{TaskID: id, Text: feedbackToSend, Submit: true})
+				if errors.Is(err, agentsend.ErrNoPane) {
+					// The agent went away between the check and the send: fall
+					// through and resume it with the feedback instead.
+					err = database.RetryTask(id, feedback)
+					if err == nil {
+						exec.TriggerProcessing()
+					}
+					return taskRetriedMsg{err: err}
+				}
+				if errors.Is(err, agentsend.ErrBusy) {
+					return taskRetriedMsg{err: fmt.Errorf("%s is still working — wait for it to stop, then retry", taskExecutorDisplayName(task))}
+				}
+				if err != nil {
+					return taskRetriedMsg{err: err}
+				}
 				database.AppendTaskLog(id, "text", "Feedback: "+feedbackToSend)
-				agentTmux(context.Background(), "send-keys", "-t", sessionName, feedbackToSend, "Enter").Run()
 			}
 			// Update status to processing
 			database.SetTaskStatus(id, db.StatusProcessing, db.ActorTUI,
@@ -5687,7 +5706,7 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 			return taskRetriedMsg{err: nil}
 		}
 
-		// Session dead - re-queue for executor to pick up with --resume
+		// No live agent - re-queue for executor to pick up with --resume
 		err := database.RetryTask(id, feedback)
 		if err == nil {
 			// Trigger immediate processing so executor starts without waiting for next poll

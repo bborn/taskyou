@@ -51,6 +51,14 @@ CLAUDE_PANE=$(tmux display-message -t "$WIN.0" -p '#{pane_id}')
 SHELL_PANE=$(tmux display-message -t "$WIN.1" -p '#{pane_id}')
 WIN_ID=$(tmux display-message -t "$WIN" -p '#{window_id}')
 
+# Tag the panes exactly as the executor does (see internal/tmuxctl): everything
+# that delivers a prompt finds a task's pane by asking tmux whose it is, so a
+# harness that skipped the tags would be testing a window no executor produces.
+tmux set-option -p -t "$CLAUDE_PANE" @ty_task "$TASK_ID"
+tmux set-option -p -t "$CLAUDE_PANE" @ty_role agent
+tmux set-option -p -t "$SHELL_PANE" @ty_task "$TASK_ID"
+tmux set-option -p -t "$SHELL_PANE" @ty_role shell
+
 sqlite3 "$WORKTREE_DB_PATH" "UPDATE tasks SET \
   status='processing', worktree_path='$WT', daemon_session='$TY_DAEMON_SESSION', \
   tmux_window_id='$WIN_ID', claude_pane_id='$CLAUDE_PANE', shell_pane_id='$SHELL_PANE' \

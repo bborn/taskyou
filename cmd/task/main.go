@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/bborn/workflow/internal/agentsend"
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -2623,6 +2625,9 @@ If no message is provided, reads from stdin (useful for piping).
 Use --enter to just send Enter (for confirming TUI prompts).
 Use --key to send special keys like "Up", "Down", "Tab", "Escape".
 
+A message is refused while the agent is still working, so it cannot land
+half-way through the agent's own output; pass --force to interrupt it anyway.
+
 Examples:
   task input 42 "yes"                # Type "yes" and submit
   task input 42 "Try a different approach"
@@ -2641,6 +2646,7 @@ Examples:
 			justEnter, _ := cmd.Flags().GetBool("enter")
 			specialKey, _ := cmd.Flags().GetString("key")
 			noSubmit, _ := cmd.Flags().GetBool("no-submit")
+			force, _ := cmd.Flags().GetBool("force")
 
 			var message string
 			if len(args) > 1 {
@@ -2681,46 +2687,40 @@ Examples:
 				os.Exit(1)
 			}
 
-			// Get the pane ID
-			paneID := task.ClaudePaneID
-			if paneID == "" {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d has no executor pane (not running?)", taskID)))
-				os.Exit(1)
-			}
+			// Everything below goes through the one delivery path (see
+			// internal/agentsend): the pane is found by the task's tmux tag rather
+			// than by the pane id on the row, which tmux may since have handed to
+			// another task's pane.
+			sender := agentsend.New(&execCommandRunner{}, database)
 
-			// Build and send tmux send-keys commands
-			// If --key specified, send that first
+			// If --key specified, send that first.
 			if specialKey != "" {
-				keyCmd := agentTmuxCmd("send-keys", "-t", paneID, specialKey)
-				if err := keyCmd.Run(); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending key to pane %s: %v", paneID, err)))
+				if err := sender.SendKeys(taskID, specialKey); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending key: "+err.Error()))
 					os.Exit(1)
 				}
 			}
 
-			// Send the message text (literally, so a message that looks like a tmux
-			// key name such as "Enter" or "Up" isn't interpreted as a keypress).
-			if message != "" {
-				sendCmd := agentTmuxCmd("send-keys", "-t", paneID, "-l", message)
-				if err := sendCmd.Run(); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending input to pane %s (task may have finished): %v", paneID, err)))
-					os.Exit(1)
-				}
-			}
-
-			// Submit by pressing Enter unless --no-submit was passed. Enter is sent
-			// as a SEPARATE keypress after the text: agentic TUIs (Claude Code, etc.)
-			// use bracketed-paste / input debouncing, so an Enter bundled into the
-			// same send-keys call as the text gets absorbed as a newline instead of
-			// submitting. The brief pause lets the TUI register the text first.
 			submit := shouldSubmitInput(message, justEnter, noSubmit)
-			if submit {
-				if message != "" {
-					time.Sleep(100 * time.Millisecond)
+			if message != "" {
+				err := sender.Send(agentsend.Prompt{
+					TaskID: taskID,
+					Text:   message,
+					Force:  force,
+					Submit: submit,
+				})
+				if errors.Is(err, agentsend.ErrBusy) {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(err.Error()+
+						"\nWait for it to finish, or pass --force to interrupt it."))
+					os.Exit(1)
 				}
-				sendCmd := agentTmuxCmd("send-keys", "-t", paneID, "Enter")
-				if err := sendCmd.Run(); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending Enter to pane %s (task may have finished): %v", paneID, err)))
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending input: "+err.Error()))
+					os.Exit(1)
+				}
+			} else if submit {
+				if err := sender.SendKeys(taskID, "Enter"); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending Enter: "+err.Error()))
 					os.Exit(1)
 				}
 			}
@@ -2735,6 +2735,7 @@ Examples:
 	inputCmd.Flags().Bool("enter", false, "Just send Enter key (for confirming prompts)")
 	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
 	inputCmd.Flags().Bool("no-submit", false, "Type the text but don't press Enter (leave it in the input field)")
+	inputCmd.Flags().Bool("force", false, "Send even while the agent is working (interrupts it)")
 	rootCmd.AddCommand(inputCmd)
 
 	// Pi Wrapper subcommand - internal use for RPC mode
@@ -5299,6 +5300,17 @@ func logForeignHookOnce(database *db.DB, taskID int64, hookEvent, owner, foreign
 // This hook must stay silent on stdout: whatever a UserPromptSubmit hook prints
 // is injected into the agent's context as additional instructions.
 func handleUserPromptSubmitHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	// Open the turn before anything else. A caller waiting on this task's reply
+	// (see db.WaitForAgentReply) needs the counter to move even for a task whose
+	// status this hook will decline to touch — the wait is about the agent, not
+	// about what the board says.
+	//
+	// Best effort on purpose: status is load-bearing and the counter is not, so a
+	// failed counter write must never cost the transition below. A hook opens the
+	// database without migrating it (see db.OpenOptions), so on a database ty has
+	// not brought up to date this is the write that fails.
+	_, _ = database.BeginAgentTurn(taskID)
+
 	task, err := database.GetTask(taskID)
 	if err != nil {
 		return err
@@ -5478,6 +5490,15 @@ func noteProviderError(database *db.DB, taskID int64, input *ClaudeHookInput) {
 //   - "tool_use": Claude finished with a tool call that's about to execute → task stays "processing"
 //     (PreToolUse/PostToolUse hooks handle the actual tool execution state tracking)
 func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	// Close the turn before anything else. A caller waiting on this task's reply
+	// (see db.WaitForAgentReply) needs the counter to move even for a task whose
+	// status this hook will decline to touch — and a Stop that only means "a tool
+	// is about to run" is not the end of a turn at all. Best effort, for the same
+	// reason as the matching write in handleUserPromptSubmitHook.
+	if input.StopReason != "tool_use" {
+		_, _ = database.CompleteAgentTurn(taskID)
+	}
+
 	task, err := database.GetTask(taskID)
 	if err != nil {
 		return err

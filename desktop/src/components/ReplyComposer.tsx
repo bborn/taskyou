@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { SendHorizonal } from "lucide-react";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import type { Task } from "../api/types";
 import { store } from "../store";
 import { useIsCoarsePointer } from "../hooks/use-mobile";
@@ -39,6 +39,9 @@ export function ReplyComposer({ task }: { task: Task }) {
     }
   }
   const [sending, setSending] = useState(false);
+  // The message the API refused because the agent was mid-turn, held so the
+  // user can send it anyway rather than retyping it.
+  const [busyText, setBusyText] = useState<string | null>(null);
   const touch = useIsCoarsePointer();
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -55,22 +58,29 @@ export function ReplyComposer({ task }: { task: Task }) {
 
   const live = task.status === "processing" || task.status === "blocked";
 
-  async function send(text: string) {
+  async function send(text: string, force = false) {
     const body = text.trim();
     if (!body || sending) return;
     setSending(true);
     try {
-      await api.sendInput(task.id, body);
+      await api.sendInput(task.id, body, force);
       // A quick answer must not discard a different reply being composed.
       if (text === message) updateMessage("");
+      setBusyText(null);
       store.toast({ title: "Sent to the agent", kind: "success" });
       void store.refreshTasks();
     } catch (e) {
-      store.toast({
-        title: "Could not reach the agent",
-        body: e instanceof Error ? e.message : String(e),
-        kind: "error",
-      });
+      // A busy agent is not a failure: the message is held, and the bar below
+      // offers to interrupt. Anything else is worth a toast.
+      if (e instanceof ApiError && e.code === "agent_busy") {
+        setBusyText(body);
+      } else {
+        store.toast({
+          title: "Could not reach the agent",
+          body: e instanceof Error ? e.message : String(e),
+          kind: "error",
+        });
+      }
     } finally {
       setSending(false);
     }
@@ -103,6 +113,29 @@ export function ReplyComposer({ task }: { task: Task }) {
       style={liftForKeyboard}
       className="shrink-0 px-3 pt-2 pb-[max(0.625rem,var(--ty-safe-area-bottom,env(safe-area-inset-bottom)))]"
     >
+      {busyText !== null && (
+        <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[13px]">
+          <span className="flex-1 text-muted-foreground">
+            The agent is working, so it wasn't interrupted.
+          </span>
+          <Button
+            variant="ghost"
+            className="h-8 px-2 text-[13px]"
+            disabled={sending}
+            onClick={() => void send(busyText, true)}
+          >
+            Send anyway
+          </Button>
+          <Button
+            variant="ghost"
+            className="h-8 px-2 text-[13px] text-muted-foreground"
+            onClick={() => setBusyText(null)}
+          >
+            Wait
+          </Button>
+        </div>
+      )}
+
       {/* bb: group/promptbox relative w-full rounded-xl border bg-background */}
       <div className="relative w-full rounded-xl border bg-background shadow-sm">
         {/* bb's editor scroll region: pr-14 reserves the send button's column

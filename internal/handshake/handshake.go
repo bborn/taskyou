@@ -44,11 +44,16 @@ import (
 // SessionEnd, and hook payloads are now checked against the session that owns
 // the task. A daemon that installs those hooks against a client too old to
 // handle them loses the transitions they carry.
-const Protocol = 2
+//
+// 3: per-task turn counters (task_turns, db.SchemaVersion 2). The hooks that
+// advance them run the DAEMON's binary, so a daemon from before this writes no
+// counters — and a newer client that sends a prompt and waits for the reply then
+// waits for something that cannot happen. It has to be able to say so.
+const Protocol = 3
 
 // ContractFingerprint pins the contract inputs Protocol covers. See
 // contract_test.go; it prints the replacement value when the inputs move.
-const ContractFingerprint = "0525e1796950e2a5"
+const ContractFingerprint = "6f6ce470baec9838"
 
 // Severity ranks a finding. The zero value is intentionally invalid so a
 // finding always carries an explicit one.
