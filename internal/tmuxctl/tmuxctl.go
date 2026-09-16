@@ -75,6 +75,38 @@ func Socket() string {
 	return s
 }
 
+// Peek returns the agent server this install uses, WITHOUT recording a choice.
+// The second result says whether a choice had already been recorded.
+//
+// Socket() records one the first time it is asked, which is right for anything
+// that is about to run an agent and wrong for `ty doctor`: a read-only report
+// must not be the thing that decides, permanently, which tmux server this
+// install's agents live on.
+func Peek() (socket string, recorded bool) {
+	if v, ok := os.LookupEnv(EnvSocket); ok {
+		return normalize(v), true
+	}
+	if underTest {
+		return "", true
+	}
+	path := filepath.Join(filepath.Dir(db.DefaultPath()), choiceFileName)
+	choiceMu.Lock()
+	cached, ok := choiceCache[path]
+	choiceMu.Unlock()
+	if ok {
+		return cached, true
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		return normalize(strings.TrimSpace(string(b))), true
+	}
+	// Nothing recorded yet: report what readOrChoose would pick, and leave the
+	// choosing to whoever actually needs it.
+	if defaultServerHasAgents() {
+		return "", false
+	}
+	return normalize(PrivateSocket), false
+}
+
 // readOrChoose returns the recorded choice, or makes and records one: the
 // default server if agents already run there, the private one otherwise.
 func readOrChoose(path string) string {

@@ -75,6 +75,34 @@ When you add a TUI feature:
 
 Do not weaken the parity test to get CI green.
 
+## The daemon↔client contract (CI-enforced)
+
+The daemon, the TUI and every CLI invocation are the same program in different
+processes, and several past incidents were two of them running different builds
+or environments: an old daemon binary still executing tasks after a fix was
+built, a daemon that had inherited a different `CLAUDE_CONFIG_DIR`. Each looked
+like a mysterious runtime bug.
+
+`internal/handshake` makes that say so. The daemon writes its build, protocol
+and resolved environment to `daemon.pid.info` beside its pid file; clients read
+it at startup and report a protocol mismatch as an error, a build mismatch as a
+warning, and a diverging config dir / database / tmux server as a warning naming
+both values.
+
+**`handshake.Protocol` is a hand-written integer, and `TestContractFingerprint`
+is what keeps it honest.** It fingerprints the three things the two processes
+must agree on — `db.SchemaVersion`, `executor.ClaudeHookEvents`, and the tmux
+conventions in `internal/tmuxctl`. Change one of those and the test fails,
+printing the fingerprint to paste back in. If the change means two builds would
+now disagree with each other, bump `Protocol` by one at the same time.
+
+Do not update the fingerprint without reading what moved: that constant is the
+only thing standing between a schema change and a silent cross-build failure.
+
+`ty doctor` reports the same comparison plus the rest of the install, and is
+strictly read-only — it opens the database read-only and never starts, stops or
+repairs anything. See [docs/diagnostics.md](docs/diagnostics.md).
+
 ## Repository Structure
 
 ```

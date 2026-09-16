@@ -770,6 +770,18 @@ func (m *AppModel) SetTasks(tasks []*db.Task) {
 	m.kanban.SetTasks(m.collapseForBoard(tasks))
 }
 
+// ShowStartupNotice seeds the board's notification banner before the program
+// starts, for something the user needs to see that happened before the TUI did
+// — chiefly a daemon running a different build (see internal/handshake).
+// stderr is not an option there: the alt screen wipes it on the first frame.
+func (m *AppModel) ShowStartupNotice(text string, d time.Duration) {
+	if text == "" {
+		return
+	}
+	m.notification = text
+	m.notifyUntil = time.Now().Add(d)
+}
+
 // SetDebugStatePath sets the path for dumping debug state.
 func (m *AppModel) SetDebugStatePath(path string) {
 	m.debugStatePath = path

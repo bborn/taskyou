@@ -48,8 +48,7 @@ func (o *OpenCodeExecutor) Name() string {
 
 // IsAvailable checks if the opencode CLI is installed.
 func (o *OpenCodeExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("opencode")
-	return err == nil
+	return binaryOnPath("opencode")
 }
 
 // Execute runs a task using the OpenCode CLI.
