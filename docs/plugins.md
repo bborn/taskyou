@@ -12,23 +12,73 @@ namespaces its scripts in its own directory and declares what it handles in a
 manifest, so **any number of plugins can handle the same event** and all of them
 run.
 
-## Installing
+## Finding one
 
-The community collection lives at
-**[github.com/taskyou/plugins](https://github.com/taskyou/plugins)** — browse it,
-review a plugin, then install the whole collection (or a single plugin) with:
+You should not have to know that a repo of plugins exists to install one. ty
+carries a **catalog**: a small JSON index of installable plugins, compiled into
+the binary (so search works offline, on a fresh install) and refreshed in the
+background from [taskyou.dev/registry.json](https://taskyou.dev/registry.json).
+
+Every surface searches the same catalog:
+
+| Surface | How |
+|---|---|
+| **TUI** | press `m` on the board — type to search, `enter` installs, `ctrl+d` removes, `tab` cycles All / Installed / Available |
+| **GUI / browser** | the **Plugins** view (`m`, ⌘M, or the menu) |
+| **CLI** | `ty plugins browse` · `ty plugins search <term>` · `ty plugins info <id>` |
 
 ```bash
-ty plugins add https://github.com/taskyou/plugins   # clone & install the collection
-ty plugins list                                     # see what it provides
+ty plugins search slack      # → slack   Slack notifications   Posts task updates to…
+ty plugins info slack        # what it does, what it needs, where it comes from
+ty plugins add slack         # install it by name
 ```
 
-`ty plugins add` clones a repo into your plugins dir; a repo can hold one plugin at
-its root or many nested in subdirectories, and every plugin inside becomes active.
-Re-running `add` on the same source updates it in place (`git pull`). You can also
-just drop a directory into `~/.config/task/plugins/` by hand — see [Examples](#examples).
+## Installing
+
+```bash
+ty plugins add slack                                # by catalog name (see above)
+ty plugins add taskyou/plugins                      # owner/repo shorthand
+ty plugins add https://github.com/taskyou/plugins   # a git URL
+ty plugins add ./my-plugin                          # a local path
+```
+
+Installing **by catalog name** takes just that plugin, even when it lives inside a
+collection repo alongside nine others — the repo is cloned to a staging dir and only
+that subdirectory is copied in, so the installed plugin is a plain directory with no
+dependency on the collection.
+
+Installing **a whole repo** clones it into your plugins dir; a repo can hold one
+plugin at its root or many nested in subdirectories, and every plugin inside becomes
+active.
+
+Either way, re-running `add` on something already installed updates it in place.
+
+```bash
+ty plugins update            # update everything installed
+ty plugins update rpi        # or just one
+```
+
+ty records where each plugin came from (in `<plugins-dir>/.sources.json`) at install
+time, so `update` works for a plugin lifted out of a collection as well as for a
+whole checkout — where there is no git remote to ask.
+
+You can also just drop a directory into `~/.config/task/plugins/` by hand — see
+[Examples](#examples). A hand-copied plugin still shows up in the browser (marked
+`local`), so you can see and remove it there.
+
+### Pointing at a different catalog
+
+`TY_PLUGIN_REGISTRY` replaces the catalog URL list (comma-separated). Setting it to
+an empty string disables remote catalogs entirely and uses only the snapshot
+compiled into the binary — which is what an air-gapped install and the test suite
+want. Remote catalogs overlay the bundled snapshot by entry ID, so a published
+catalog can correct or extend what a shipped binary knows without a release; a
+failed fetch degrades to the on-disk cache, then to the bundle, and never to an
+error.
 
 ## Removing
+
+From the browser: `ctrl+d` in the TUI, the trash button in the GUI. From the CLI:
 
 ```bash
 ty plugins remove <name>   # aliases: rm, uninstall
@@ -492,3 +542,46 @@ For ready-made, reviewable plugins, see the community collection at
 [github.com/taskyou/plugins](https://github.com/taskyou/plugins) (see
 [Installing](#installing)). For more ideas, see the
 [plugin idea gallery](plugin-ideas.md).
+
+## Getting into the catalog
+
+The catalog is one JSON document, kept in the main repo at
+[`internal/registry/catalog.json`](../internal/registry/catalog.json) and published
+at [`docs/registry.json`](registry.json) → <https://taskyou.dev/registry.json>. The
+two copies must be byte-identical — `make sync-registry` copies one over the other
+and a test fails the build if they drift.
+
+To list a plugin, add an entry and open a PR:
+
+```json
+{
+  "id": "slack",
+  "name": "Slack notifications",
+  "description": "Posts task updates to a Slack channel through an incoming webhook.",
+  "author": "taskyou",
+  "source": "https://github.com/bborn/taskyou",
+  "subdir": "examples/plugins/slack",
+  "homepage": "https://github.com/bborn/taskyou/tree/main/examples/plugins/slack",
+  "category": "notifications",
+  "tags": ["notifications", "slack", "chat", "webhook"],
+  "provides": ["hook"],
+  "requires": ["a Slack incoming-webhook URL in config.env"]
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `id` | yes | the handle users type (`ty plugins add <id>`); unique, and the directory it installs into |
+| `name` | — | human-facing title; defaults to the id |
+| `description` | yes | one or two sentences aimed at someone deciding whether to install |
+| `source` | yes | the git URL to clone |
+| `subdir` | — | the plugin's path inside `source`, for a collection repo. Omit when the repo root *is* the plugin |
+| `author`, `homepage` | — | display only |
+| `category` | — | groups the browse listing (`workflows`, `notifications`, `routing`, `development`, …) |
+| `tags` | — | free-form search keywords |
+| `provides` | — | `workflow`, `hook`, `action`, `service`, `routine` — what you get |
+| `requires` | — | prerequisites in plain words (`"jq or python3"`, `"an ARC API key"`), shown as a warning before install |
+
+Entries missing `id`, `source`, or `description` are dropped at parse time rather
+than shown as broken rows. Nothing is installed automatically: the catalog only
+says what *can* be installed.

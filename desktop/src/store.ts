@@ -10,7 +10,8 @@ export type View =
   | { kind: "board" }
   | { kind: "detail"; taskId: number }
   | { kind: "settings" }
-  | { kind: "routines" };
+  | { kind: "routines" }
+  | { kind: "plugins" };
 
 export type Dialog =
   | { kind: "confirm"; title: string; message: string; danger?: boolean; onConfirm: () => void }
@@ -206,6 +207,10 @@ class Store {
 
   openRoutines() {
     this.set({ view: { kind: "routines" } });
+  }
+
+  openPlugins() {
+    this.set({ view: { kind: "plugins" } });
   }
 
   selectTask(taskId: number | null) {

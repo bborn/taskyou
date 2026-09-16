@@ -1,5 +1,8 @@
 import type {
   Attachment,
+  CatalogPlugin,
+  InstalledPlugin,
+  PluginCatalog,
   ChatMessage,
   Placement,
   PlacementHost,
@@ -197,6 +200,29 @@ export const api = {
     ),
   runRoutine: (name: string) =>
     request<{ started: boolean }>("POST", `/api/routines/${encodeURIComponent(name)}/run`, {}),
+
+  // Plugins
+  listPlugins: () => request<InstalledPlugin[]>("GET", "/api/plugins"),
+  pluginCatalog: (opts: { q?: string; scope?: string; refresh?: boolean } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.q) params.set("q", opts.q);
+    if (opts.scope && opts.scope !== "all") params.set("scope", opts.scope);
+    if (opts.refresh) params.set("refresh", "1");
+    const qs = params.toString();
+    return request<PluginCatalog>("GET", `/api/plugins/catalog${qs ? `?${qs}` : ""}`);
+  },
+  installPlugin: (plugin: Pick<CatalogPlugin, "id"> | { source: string; subdir?: string; name?: string }) =>
+    request<{ ok: boolean; updated?: boolean; plugins?: string[]; error?: string }>(
+      "POST",
+      "/api/plugins/install",
+      plugin,
+    ),
+  removePlugin: (name: string) =>
+    request<{ ok: boolean; dir?: string; in_collection_checkout?: boolean; error?: string }>(
+      "POST",
+      "/api/plugins/remove",
+      { name },
+    ),
 
   status: () => request<{ status: string; tasks: Record<string, number> }>("GET", "/api/status"),
 };

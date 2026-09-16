@@ -158,10 +158,13 @@ func main() {
 	}
 
 	rootCmd := &cobra.Command{
-		Use:     "ty",
-		Short:   "Task queue manager",
-		Long:    "A beautiful terminal UI for managing your task queue.",
-		Version: version,
+		Use:   "ty",
+		Short: "Task queue manager",
+		Long:  "A beautiful terminal UI for managing your task queue.",
+		// main() already prints a styled "Error: …" and exits 1; without this,
+		// cobra prints its own copy first and every failure appears twice.
+		SilenceErrors: true,
+		Version:       version,
 		Run: func(cmd *cobra.Command, args []string) {
 			focusTaskID, _ := cmd.Flags().GetInt64("task")
 			launchTUI(cmd, tuiLaunch{taskID: focusTaskID})

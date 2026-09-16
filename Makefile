@@ -1,7 +1,7 @@
 .PHONY: build build-no-restart build-ty build-taskd restart-daemon build-linux \
        install clean test vet vuln audit coverage run daemon \
        deploy deploy-service deploy-full status logs connect tag fmt lint \
-       install-ty-on uninstall-ty-on
+       install-ty-on uninstall-ty-on sync-registry
 
 # Configuration
 SERVER ?= root@cloud-claude
@@ -133,6 +133,11 @@ install:
 	go build -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/ty ./cmd/task
 	ln -sf ty $(shell go env GOBIN)/taskyou
 	go build -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/taskd ./cmd/taskd
+
+# Publish the plugin catalog compiled into the binary to the docs site, which is
+# where installs fetch their updates from. A test fails if the two drift.
+sync-registry:
+	cp internal/registry/catalog.json docs/registry.json
 
 # Clean build artifacts
 clean:

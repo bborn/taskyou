@@ -117,8 +117,8 @@ func TestPluginNudgeTextByState(t *testing.T) {
 	if got := pluginNudgeText(false, false); !strings.Contains(got, "starter pack") || !strings.Contains(got, "taskyou/plugins") {
 		t.Errorf("no-workflows copy should pitch the starter pack: %q", got)
 	}
-	if got := pluginNudgeText(true, false); !strings.Contains(got, "plugins now") || !strings.Contains(got, "ty plugins add") {
-		t.Errorf("existing-user copy should announce plugins: %q", got)
+	if got := pluginNudgeText(true, false); !strings.Contains(got, "plugin catalog") || !strings.Contains(got, "press m") {
+		t.Errorf("existing-user copy should point at the browser: %q", got)
 	}
 }
 

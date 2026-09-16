@@ -250,6 +250,14 @@ func viewName(v View) string {
 		return "change_status"
 	case ViewCommandPalette:
 		return "command_palette"
+	case ViewRoutines:
+		return "routines"
+	case ViewActionPicker:
+		return "action_picker"
+	case ViewPluginBrowser:
+		return "plugin_browser"
+	case ViewWelcome:
+		return "welcome"
 	default:
 		return "unknown"
 	}
