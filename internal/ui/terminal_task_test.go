@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -100,5 +101,136 @@ func TestReportTerminalTaskFollowsFocus(t *testing.T) {
 	m.reportTerminalTask()
 	if want := setUserVarSeq(termVarTask, fmt.Sprintf("#%d %s", before.ID, before.Title)); !strings.Contains(last, want) {
 		t.Errorf("in detail view, write = %q, want it to contain %q", last, want)
+	}
+}
+
+// Inside tmux, a sequence written while no client is attached is thrown away.
+// `ty open <task>` publishes its task in exactly that gap, and the task on
+// screen never changes afterwards — so publishing on change alone left the tab
+// title blank for the whole session.
+func TestTerminalTaskReporterRepublishesWhenAClientAttaches(t *testing.T) {
+	var writes []string
+	attached := false
+	clock := time.Now()
+	r := &terminalTaskReporter{
+		inTmux:   true,
+		write:    func(s string) { writes = append(writes, s) },
+		attached: func() bool { return attached },
+		now:      func() time.Time { return clock },
+	}
+	task := &db.Task{ID: 1234, Title: "Fix login"}
+	want := setUserVarSeq(termVarTask, "#1234 Fix login")
+
+	// Published into a detached session: written, and dropped by tmux.
+	r.report(task)
+	if len(writes) != 1 || !strings.Contains(writes[0], want) {
+		t.Fatalf("first report wrote %q, want it to contain %q", writes, want)
+	}
+
+	// Nothing has changed and nobody is watching yet: no point rewriting.
+	clock = clock.Add(2 * attachProbeInterval)
+	r.report(task)
+	if len(writes) != 1 {
+		t.Fatalf("got %d writes while still detached, want 1: %q", len(writes), writes)
+	}
+
+	// A client attaches. The next report republishes the task it already sent,
+	// because that send went nowhere.
+	attached = true
+	clock = clock.Add(2 * attachProbeInterval)
+	r.report(task)
+	if len(writes) != 2 || !strings.Contains(writes[1], want) {
+		t.Fatalf("after attach, writes = %q, want a republish containing %q", writes, want)
+	}
+
+	// And it is published once, not on every Update from then on.
+	clock = clock.Add(2 * attachProbeInterval)
+	r.report(task)
+	r.report(task)
+	if len(writes) != 2 {
+		t.Errorf("got %d writes after the republish, want 2: %q", len(writes), writes)
+	}
+}
+
+// tmux is asked at most once per interval while nobody is attached: report runs
+// on every key, mouse and tick message, and each answer costs a round trip.
+func TestTerminalTaskReporterRateLimitsAttachProbe(t *testing.T) {
+	probes := 0
+	clock := time.Now()
+	r := &terminalTaskReporter{
+		inTmux:   true,
+		write:    func(string) {},
+		attached: func() bool { probes++; return false },
+		now:      func() time.Time { return clock },
+	}
+	task := &db.Task{ID: 7, Title: "Seven"}
+	for i := 0; i < 20; i++ {
+		r.report(task)
+		clock = clock.Add(attachProbeInterval / 10)
+	}
+	if probes > 3 {
+		t.Errorf("asked tmux %d times over %v, want at most 3", probes, 2*attachProbeInterval)
+	}
+	if probes == 0 {
+		t.Error("never asked tmux whether a client had attached")
+	}
+}
+
+// Outside tmux the write reaches the terminal directly, so nothing is ever
+// republished and tmux is never consulted.
+func TestTerminalTaskReporterOutsideTmuxNeverProbes(t *testing.T) {
+	var writes []string
+	r := &terminalTaskReporter{
+		write:    func(s string) { writes = append(writes, s) },
+		attached: func() bool { t.Fatal("asked tmux about a reporter outside tmux"); return false },
+	}
+	task := &db.Task{ID: 3, Title: "Three"}
+	r.report(task)
+	r.report(task)
+	if len(writes) != 1 {
+		t.Errorf("got %d writes, want 1: %q", len(writes), writes)
+	}
+}
+
+// End to end for the reported bug: `ty open <id>` must leave the terminal naming
+// the task, even though the board and the detail view both loaded before the
+// tmux client attached.
+func TestOpenTaskOnLoadPublishesTaskAfterAttach(t *testing.T) {
+	tasks := []*db.Task{
+		{ID: 1, Title: "One", Status: db.StatusBacklog},
+		{ID: 1234, Title: "Fix login", Status: db.StatusBacklog},
+	}
+	var last string
+	attached := false
+	clock := time.Now()
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{},
+		tasksNeedingInput: map[int64]bool{},
+		executorPrompts:   map[int64]string{},
+		questionPrompts:   map[int64]bool{},
+		promptRevisions:   map[int64]uint64{},
+		terminalTask: &terminalTaskReporter{
+			inTmux:   true,
+			write:    func(s string) { last = s },
+			attached: func() bool { return attached },
+			now:      func() time.Time { return clock },
+		},
+	}
+	m.OpenTaskOnLoad(1234)
+	m.Update(tasksLoadedMsg{tasks: tasks})
+
+	// Everything so far went into a session with no client: tmux dropped it.
+	last = ""
+	attached = true
+	clock = clock.Add(2 * attachProbeInterval)
+	m.Update(tickMsg(clock))
+
+	if want := setUserVarSeq(termVarTask, "#1234 Fix login"); !strings.Contains(last, want) {
+		t.Errorf("after attach, write = %q, want it to contain %q", last, want)
 	}
 }

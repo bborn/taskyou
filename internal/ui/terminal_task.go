@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,13 +24,28 @@ const (
 	termVarTaskTitle = "taskyouTaskTitle" // "Fix login"
 )
 
+// attachProbeInterval bounds how often a reporter asks tmux whether anyone is
+// attached yet. The answer costs a tmux round trip and only changes once.
+const attachProbeInterval = time.Second
+
 // terminalTaskReporter publishes the focused task to the terminal, writing only
 // when it changes: Update runs on every key and mouse event.
+//
+// "When it changes" is not enough on its own inside tmux, which drops a
+// passthrough sequence written while no client is attached: see clientAppeared.
 type terminalTaskReporter struct {
 	inTmux bool
 	write  func(string)
-	last   string
-	sent   bool
+	// attached reports whether a tmux client can receive a passthrough
+	// sequence now. nil means the question cannot be asked, and a write is
+	// assumed to land.
+	attached func() bool
+	now      func() time.Time // nil: time.Now
+
+	last      string
+	sent      bool
+	watched   bool      // a client has been seen; every write from now on lands
+	nextProbe time.Time // earliest time to ask tmux again
 }
 
 func (r *terminalTaskReporter) report(task *db.Task) {
@@ -40,7 +56,9 @@ func (r *terminalTaskReporter) report(task *db.Task) {
 		label = "#" + id + " " + title
 	}
 	// The first report always goes out, clearing values left by a previous run.
-	if r.sent && label == r.last {
+	// So does the first report after a client appears, whose predecessors tmux
+	// threw away.
+	if r.sent && label == r.last && !r.clientAppeared() {
 		return
 	}
 	r.sent = true
@@ -52,6 +70,72 @@ func (r *terminalTaskReporter) report(task *db.Task) {
 		seq = tmuxPassthrough(seq)
 	}
 	r.write(seq)
+}
+
+// clientAppeared reports whether a tmux client has just become able to see the
+// sequences this reporter writes, meaning the task has to be published again.
+//
+// tmux hands a passthrough sequence to the clients attached to the pane's
+// session and drops it when there are none. `ty open <task>` publishes its task
+// in the gap between `new-session -d` and `attach-session`, so every variable it
+// set went into a session nobody was watching — and because the task on screen
+// never changed afterwards, the change-only write above never published it
+// again. The tab title stayed blank for the whole session unless the selection
+// was moved by hand — which is why opening a task from the board named it and
+// `ty open` did not.
+//
+// Asked at most once per attachProbeInterval, and never again once answered:
+// this runs on the UI thread, and a tmux round trip per task switch would be a
+// poor trade for a fact that stops changing after startup.
+func (r *terminalTaskReporter) clientAppeared() bool {
+	if r.watched {
+		return false
+	}
+	if !r.inTmux || r.attached == nil {
+		// Outside tmux the write goes straight to the terminal: nothing to wait
+		// for, and nothing published so far was lost.
+		r.watched = true
+		return false
+	}
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	if now.Before(r.nextProbe) {
+		return false
+	}
+	r.nextProbe = now.Add(attachProbeInterval)
+	if !r.attached() {
+		return false
+	}
+	r.watched = true
+	// Nothing published yet? The caller's own first-report rule covers it.
+	return r.sent
+}
+
+// tmuxClientAttached reports whether any client is attached to the session
+// holding this process's pane. Scoped to that pane for the same reason
+// ownSessionName is: an unscoped query answers about the foremost client's
+// session, which may belong to another ty.
+//
+// Unanswerable counts as attached, so a reporter that cannot ask degrades to
+// publishing on change rather than shelling out to tmux forever.
+func tmuxClientAttached() bool {
+	pane := ownPaneID()
+	if pane == "" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	out, err := uiTmux(ctx, "display-message", "-t", pane, "-p", "#{session_attached}").Output()
+	if err != nil {
+		return true
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return true
+	}
+	return n > 0
 }
 
 // setUserVarSeq is iTerm2's OSC 1337 SetUserVar; the value is base64 so any
@@ -78,7 +162,7 @@ func (m *AppModel) EnableTerminalTaskReport() {
 		uiTmux(ctx, "set-option", "-p", "-t", pane, "allow-passthrough", "on").Run()
 		cancel()
 	}
-	m.terminalTask = &terminalTaskReporter{inTmux: inTmux, write: writeTTY}
+	m.terminalTask = &terminalTaskReporter{inTmux: inTmux, write: writeTTY, attached: tmuxClientAttached}
 }
 
 // ClearTerminalTask blanks the published variables so a tab title does not keep
