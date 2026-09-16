@@ -669,7 +669,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 
 	// Setup filter input
 	filterInput := textinput.New()
-	filterInput.Placeholder = "Filter text, #id, or [project..."
+	filterInput.Placeholder = "Filter text, #id, [project, or @host..."
 	filterInput.CharLimit = 50
 
 	// Get available executors for form filtering and warnings
@@ -2094,12 +2094,16 @@ func (m *AppModel) renderFilterBar() string {
 	if m.filterActive {
 		// Show different help based on whether autocomplete dropdown is showing
 		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
-			parts = append(parts, helpStyle.Render("  (Tab: select project, ↑↓: navigate)"))
+			what := "project"
+			if m.filterAutocomplete.IsHostMode() {
+				what = "host"
+			}
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (Tab: select %s, ↑↓: navigate)", what)))
 		} else {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
 			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
 			// so advertise the short alias (is:wf) rather than the full token.
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf: workflows only)", navHelp)))
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, @: host, is:wf: workflows only)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
@@ -2398,14 +2402,18 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Accept autocomplete if showing
 		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
 			if name := m.filterAutocomplete.Select(); name != "" {
-				// Replace from the last "[" onward with "[name] "
+				// Replace the chip being typed with the completed one: "[name] "
+				// for a project, "@name " for a host.
 				current := m.filterInput.Value()
-				lastBracket := strings.LastIndex(current, "[")
-				prefix := ""
-				if lastBracket > 0 {
-					prefix = current[:lastBracket]
+				start, chip := strings.LastIndex(current, "["), "["+name+"] "
+				if m.filterAutocomplete.IsHostMode() {
+					start, chip = openHostToken(current), "@"+name+" "
 				}
-				m.filterInput.SetValue(prefix + "[" + name + "] ")
+				prefix := current
+				if start >= 0 {
+					prefix = current[:start]
+				}
+				m.filterInput.SetValue(prefix + chip)
 				m.filterInput.SetCursor(len(m.filterInput.Value()))
 				m.filterText = m.filterInput.Value()
 				cmd := m.applyFilter()
@@ -2469,24 +2477,50 @@ func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterText = newText
 		cmd = tea.Batch(cmd, m.applyFilter())
 
-		// Update autocomplete: show when the last "[" is unclosed (no matching "]")
-		if lastBracket := strings.LastIndex(newText, "["); lastBracket >= 0 {
-			afterBracket := newText[lastBracket+1:]
-			if !strings.Contains(afterBracket, "]") {
-				// Still typing a project name after the last "["
-				query := afterBracket
-				m.filterAutocomplete.SetQuery(query)
-				m.showFilterDropdown = m.filterAutocomplete.HasResults()
-			} else {
-				m.showFilterDropdown = false
-				m.filterAutocomplete.Reset()
-			}
-		} else {
-			m.showFilterDropdown = false
-			m.filterAutocomplete.Reset()
-		}
+		m.updateFilterAutocomplete(newText)
 	}
 	return m, cmd
+}
+
+// updateFilterAutocomplete opens the dropdown on whichever chip is still being
+// typed: an unclosed "[" is a project, an "@" starting the last word is a host.
+// Only the later of the two can hold the cursor, so it wins.
+func (m *AppModel) updateFilterAutocomplete(text string) {
+	projectStart := strings.LastIndex(text, "[")
+	if projectStart >= 0 && strings.Contains(text[projectStart+1:], "]") {
+		projectStart = -1 // closed chip: nothing left to complete
+	}
+	hostStart := openHostToken(text)
+
+	switch {
+	case hostStart > projectStart:
+		m.filterAutocomplete.SetHostQuery(text[hostStart+1:])
+	case projectStart >= 0:
+		m.filterAutocomplete.SetQuery(text[projectStart+1:])
+	default:
+		m.showFilterDropdown = false
+		m.filterAutocomplete.Reset()
+		return
+	}
+	m.showFilterDropdown = m.filterAutocomplete.HasResults()
+}
+
+// openHostToken returns the index of the "@" that starts the host chip being
+// typed at the end of the query, or -1 when there is none. The "@" has to start
+// a word (so an address in a keyword is left alone) and the word has to be the
+// last one — once a space follows, the chip is finished.
+func openHostToken(text string) int {
+	at := strings.LastIndex(text, "@")
+	if at < 0 {
+		return -1
+	}
+	if at > 0 && text[at-1] != ' ' {
+		return -1
+	}
+	if strings.ContainsAny(text[at+1:], " \t") {
+		return -1
+	}
+	return at
 }
 
 // resolveProjectAliases replaces project names in bracket tags with their canonical names.
@@ -2575,9 +2609,17 @@ func (m *AppModel) filteredBoardTasks() []*db.Task {
 	// stripped from the query before fuzzy matching so it never pollutes scoring.
 	kind, filterText := parseFilterKind(m.filterText)
 
+	// `@host` narrows the board to the machine a task ran on, using the same
+	// syntax as the badge on the card. Like `is:`, it is stripped from the query
+	// before fuzzy matching so a host name never scores against titles.
+	hosts, filterText := parseFilterHosts(filterText)
+	narrow := func(tasks []*db.Task) []*db.Task {
+		return filterTasksByHost(filterTasksByKind(tasks, kind), hosts, localHostname())
+	}
+
 	if filterText == "" {
-		// No keyword left: show everything, or just the requested kind.
-		return filterTasksByKind(m.tasks, kind)
+		// No keyword left: show everything, or just the requested kind and hosts.
+		return narrow(m.tasks)
 	}
 
 	queryLower := strings.ToLower(filterText)
@@ -2634,7 +2676,7 @@ func (m *AppModel) filteredBoardTasks() []*db.Task {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	return filterTasksByKind(filtered, kind)
+	return narrow(filtered)
 }
 
 // filterKind values for the `is:` filter token.
