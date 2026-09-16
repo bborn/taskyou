@@ -4,15 +4,27 @@ import type { LogLine, Task, TaskStatus } from "../api/types";
 import { ageHint, referenceTime, shortDuration } from "../lib/board";
 import { buildSections, PINNED_GROUP, type ListSection, type ListOptions } from "../lib/list";
 import { store, useAppSelector } from "../store";
-import { PRBadge, cardSubLine, useSpinner } from "./Board";
+import { CardSlot, PRBadge, cardSubLine, useSpinner } from "./Board";
 import { cn } from "@/lib/utils";
 
-// The list view: the same board, one line per task instead of four columns.
+// The list view: the same board as one flat, sectioned list instead of four
+// columns. This is the ONLY list renderer — the phone board uses it too.
+//
+// The one thing that differs by viewport is the row itself. A dense five-column
+// line (dot / id / project / title / badges / age) does not survive 390px, and
+// a 13px row is not a touch target, so the phone renders the same sections as
+// cards. Everything above the row — which sections exist, what order they are
+// in, what is capped — is shared, because that is where the two surfaces used
+// to disagree for no reason.
 //
 // Row height is decided, not configured (parity with the TUI): a row is one
 // line, and grows a second only when the task has something live to say — the
 // agent's current step, or the stand a blocked task is waiting on. A backlog
 // item has nothing to report, so a second line there would buy nothing.
+
+/** How a task is drawn. "row" is the dense desktop line; "card" is the phone's
+ * tappable card. */
+export type ListVariant = "row" | "card";
 
 /** Rows rendered per section before a "N more" button. The store loads every
  * task including done, so an uncapped Done section is thousands of rows — the
@@ -164,12 +176,16 @@ function Section({
   section,
   selectedTaskId,
   showProject,
+  showHeader,
+  variant,
   projectColorFor,
   latestFor,
 }: {
   section: ListSection;
   selectedTaskId: number | null;
   showProject: boolean;
+  showHeader: boolean;
+  variant: ListVariant;
   projectColorFor: (task: Task) => string;
   latestFor: (task: Task) => LogLine | undefined;
 }) {
@@ -181,23 +197,40 @@ function Section({
   const hidden = section.tasks.length - visible.length;
 
   return (
-    <div>
-      {section.title && (
+    <div className={variant === "card" ? "flex flex-col gap-2" : undefined}>
+      {showHeader && section.title && (
         <SectionHeader title={section.title} status={section.status} count={section.tasks.length} />
       )}
-      {visible.map((task) => (
-        <TaskRow
-          key={task.id}
-          task={task}
-          selected={task.id === selectedTaskId}
-          projectColor={projectColorFor(task)}
-          latest={latestFor(task)}
-          showProject={showProject}
-        />
-      ))}
+      {visible.map((task) =>
+        variant === "card" ? (
+          <CardSlot
+            key={task.id}
+            task={task}
+            selected={false}
+            tapToOpen
+            showProject={showProject}
+            projectColor={projectColorFor(task)}
+            latest={latestFor(task)}
+          />
+        ) : (
+          <TaskRow
+            key={task.id}
+            task={task}
+            selected={task.id === selectedTaskId}
+            projectColor={projectColorFor(task)}
+            latest={latestFor(task)}
+            showProject={showProject}
+          />
+        ),
+      )}
       {hidden > 0 && (
         <button
-          className="w-full rounded-md py-1.5 text-center text-[11px] text-muted-foreground hover:bg-surface-2"
+          className={cn(
+            "w-full rounded-md text-center text-muted-foreground",
+            variant === "card"
+              ? "py-3 text-[13px] active:bg-surface-2"
+              : "py-1.5 text-[11px] hover:bg-surface-2",
+          )}
           onClick={() => setShowAll(true)}
         >
           {hidden} more…
@@ -232,7 +265,17 @@ function SectionHeader({
   );
 }
 
-export function TaskList({ tasks, options }: { tasks: Task[]; options: ListOptions }) {
+export function TaskList({
+  tasks,
+  options,
+  variant = "row",
+  emptyMessage = "No tasks match this filter.",
+}: {
+  tasks: Task[];
+  options: ListOptions;
+  variant?: ListVariant;
+  emptyMessage?: string;
+}) {
   const selectedTaskId = useAppSelector((s) => s.selectedTaskId);
   const projects = useAppSelector((s) => s.projects);
   const latestLogs = useAppSelector((s) => s.latestLogs);
@@ -241,23 +284,35 @@ export function TaskList({ tasks, options }: { tasks: Task[]; options: ListOptio
   // Grouping by project makes the per-row project column pure repetition of the
   // section header, so it comes off and the width goes to titles.
   const showProject = options.groupBy !== "project";
+  // A lone section's header says nothing the filter above it has not already
+  // said — "Blocked" under a control that reads "Needs you · 5".
+  const showHeaders = sections.length > 1;
 
   if (sections.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        No tasks match this filter.
+      <div className="flex flex-1 items-center justify-center px-4 py-12 text-center text-sm text-muted-foreground">
+        {emptyMessage}
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-y-auto rounded-xl border bg-surface-1 p-2">
+    <div
+      className={cn(
+        "flex-1 overflow-y-auto",
+        variant === "card"
+          ? "flex flex-col gap-2 overscroll-contain px-3 pt-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+          : "rounded-xl border bg-surface-1 p-2",
+      )}
+    >
       {sections.map((section) => (
         <Section
           key={section.key || "all"}
           section={section}
           selectedTaskId={selectedTaskId}
           showProject={showProject}
+          showHeader={showHeaders}
+          variant={variant}
           projectColorFor={(task) =>
             projects.find((p) => p.name === task.project)?.color || "var(--muted-foreground)"
           }

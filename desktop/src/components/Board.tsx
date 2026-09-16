@@ -138,6 +138,10 @@ interface CardProps {
   /** Phone layout: a single tap opens the task (touch has no double-click or
    * drag-and-drop), with larger text and a taller touch target. */
   tapToOpen?: boolean;
+  /** Drop the project name from the card. Set when the list is already grouped
+   * by project, where the name on every card only repeats the section header —
+   * the same rule the dense row follows. */
+  showProject?: boolean;
 }
 
 /** Field-level equality: API refreshes return fresh objects every time, so
@@ -149,6 +153,7 @@ function cardPropsEqual(prev: CardProps, next: CardProps): boolean {
     prev.selected === next.selected &&
     prev.projectColor === next.projectColor &&
     prev.tapToOpen === next.tapToOpen &&
+    prev.showProject === next.showProject &&
     prev.latest?.id === next.latest?.id &&
     a.id === b.id &&
     a.title === b.title &&
@@ -205,6 +210,7 @@ export const CardSlot = memo(function CardSlot({
   projectColor,
   latest,
   tapToOpen = false,
+  showProject = true,
 }: CardProps) {
   const ref = useRef<HTMLDivElement>(null);
   const spinner = useSpinner(task.status === "processing");
@@ -266,12 +272,12 @@ export const CardSlot = memo(function CardSlot({
               </span>
             </div>
             <div className="truncate text-[12px] text-muted-foreground">
-              {task.project && (
+              {task.project && showProject && (
                 <span className="font-medium" style={{ color: projectColor }}>
                   {task.project}
                 </span>
               )}
-              {task.project && subLine.text && " · "}
+              {task.project && showProject && subLine.text && " · "}
               <span title={subLine.title}>{subLine.text}</span>
             </div>
           </>
@@ -291,7 +297,7 @@ export const CardSlot = memo(function CardSlot({
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {task.pinned && <Pin className="size-3 text-amber-500 dark:text-amber-300" />}
-          {task.project && (
+          {task.project && showProject && (
             <span className="text-[10px] font-medium" style={{ color: projectColor }}>
               {task.project}
             </span>
