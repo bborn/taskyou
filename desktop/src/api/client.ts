@@ -9,6 +9,8 @@ import type {
   ExecutorInfo,
   LogLine,
   Project,
+  SavedView,
+  SavedViewResult,
   Task,
   TaskDetail,
   TaskType,
@@ -175,6 +177,16 @@ export const api = {
 
   // Executors / settings / autocomplete
   listExecutors: () => request<ExecutorInfo[]>("GET", "/api/executors"),
+  // Saved views — named filter queries, resolved server-side so the query
+  // grammar has exactly one implementation.
+  listViews: () => request<SavedView[]>("GET", "/api/views"),
+  getView: (name: string) =>
+    request<SavedViewResult>("GET", `/api/views/${encodeURIComponent(name)}`),
+  saveView: (name: string, query: string) =>
+    request<SavedView>("POST", "/api/views", { name, query }),
+  deleteView: (name: string) =>
+    request<{ ok: boolean }>("DELETE", `/api/views/${encodeURIComponent(name)}`),
+
   getSettings: () => request<Record<string, string>>("GET", "/api/settings"),
   updateSettings: (patch: Record<string, string>) =>
     request<{ ok: boolean }>("PATCH", "/api/settings", patch),

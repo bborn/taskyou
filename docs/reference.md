@@ -47,7 +47,9 @@ Press `O`. Two choices, previewed live as you cycle them:
 
 The current arrangement is always on screen under the header, so it is never a
 setting you have to remember you changed. It persists with the rest of the board
-state (`list_group_by`, `list_sort`).
+state (`list_group_by`, `list_sort`), and is shared with the GUI: the desktop
+app and `ty serve` read the same keys, so the board you left in one is the board
+you come back to in the other.
 
 Whatever the grouping, **pinned tasks lead the list** in their own section:
 pinning means "keep this in sight", and scattering pinned tasks through project
@@ -492,7 +494,14 @@ ty list --filter "has:pr status:blocked"      # waiting on review
 Views are exposed over the HTTP API too: `GET`/`POST /api/views` and
 `GET`/`PATCH`/`DELETE /api/views/{name}`. `GET /api/views/{name}` returns the
 view plus the tasks it currently matches, so a client never has to reimplement
-the query grammar.
+the query grammar — which is exactly how the GUI applies a view.
+
+### In the GUI
+
+The desktop app and `ty serve` have the same three controls: `v` toggles the
+list, `V` opens the saved views, and `O` arranges it — plus clickable
+equivalents in the toolbar above the list. Grouping, sort and the applied view
+persist to the same settings keys the TUI uses.
 
 Because agents can send input to running executors via `ty input`, they can answer prompts, confirm dialogs, navigate menus, and fully control tasks mid-execution—no human intervention required.
 
