@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check, ChevronDown, ChevronRight, ListFilter, X } from "lucide-react";
 import type { Column } from "../lib/board";
-import { parseFilter, referenceTime } from "../lib/board";
+import { applyFilter, parseFilter, referenceTime } from "../lib/board";
 import { store, useAppSelector } from "../store";
 import { CardSlot } from "./Board";
 import { cn } from "@/lib/utils";
@@ -73,6 +73,9 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
   const filter = useAppSelector((s) => s.filter);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  // Keep keystrokes verbatim: the serialized filter trims whitespace, which
+  // otherwise eats the space before the user can type the next word.
+  const [searchInput, setSearchInput] = useState("");
   // Fold state is deliberately not persisted — deck does the same; it is a
   // glance-level toggle, not a preference.
   const [pinnedFolded, setPinnedFolded] = useState(false);
@@ -85,14 +88,13 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
   // Unfiltered: every column flattened and ordered by the same rule the columns
   // use internally, so a mixed list still reads newest-first with pins on top.
   const listTasks = useMemo(() => {
-    if (activeStatus) return columns.find((c) => c.status === activeStatus)?.tasks ?? [];
     return columns
       .flatMap((c) => c.tasks)
       .sort((a, b) => {
         if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
         return referenceTime(b) - referenceTime(a);
       });
-  }, [columns, activeStatus]);
+  }, [columns]);
 
   // Pins lead in their own group, as bb's deck does: scattering them through
   // the list is what makes pinning pointless. The render cap applies to the
@@ -104,24 +106,21 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
 
   // Counts ignore the dimension they describe: status counts span every status,
   // project counts sit within the chosen one (or all of them when none is set).
-  const { statusCounts, projectChips, grandTotal } = useMemo(() => {
-    const text = searchText.toLowerCase();
-    const matchesText = (t: (typeof tasks)[number]) =>
-      !text || t.title.toLowerCase().includes(text) || t.body.toLowerCase().includes(text);
-
+  const { statusCounts, projectChips, grandTotal, projectTotal } = useMemo(() => {
+    const names = projects.map((p) => p.name);
+    const visibleTasks = tasks.filter((t) => t.status !== "archived");
+    // Use the board's parser for IDs, fuzzy project names and status aliases.
+    // Each count removes only the dimension it describes.
+    const statusTasks = applyFilter(visibleTasks, filter.replace(STATUS_TOKEN, ""), names);
+    const projectTasks = applyFilter(visibleTasks, filter.replace(PROJECT_TOKEN, ""), names);
     const byStatus = new Map<string, number>();
     const byProject = new Map<string, number>();
-    let total = 0;
-    for (const t of tasks) {
-      if (t.status === "archived" || !matchesText(t)) continue;
+    for (const t of statusTasks) {
       const status = t.status === "queued" ? "backlog" : t.status;
-      if (!activeProject || t.project === activeProject) {
-        byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
-        total++;
-      }
-      if (!activeStatus || status === activeStatus) {
-        byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
-      }
+      byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+    }
+    for (const t of projectTasks) {
+      byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
     }
 
     const chips = projects
@@ -129,12 +128,12 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
       .filter((c) => c.count > 0 || c.project.name === activeProject)
       .sort((a, b) => b.count - a.count || a.project.name.localeCompare(b.project.name));
 
-    return { statusCounts: byStatus, projectChips: chips, grandTotal: total };
-  }, [tasks, projects, activeStatus, activeProject, searchText]);
+    return { statusCounts: byStatus, projectChips: chips, grandTotal: statusTasks.length, projectTotal: projectTasks.length };
+  }, [tasks, projects, filter, activeProject]);
 
   // "All projects" sits above rows counted within the chosen status, so it has
   // to be that status's total — or everything when no status is chosen.
-  const totalForProjects = activeStatus ? (statusCounts.get(activeStatus) ?? 0) : grandTotal;
+  const totalForProjects = projectTotal;
 
   // Picking a status or a project is a decision; close the sheet so you land
   // back on the list. Typing is not, so the text field leaves it open.
@@ -150,6 +149,7 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
     setSheetOpen(false);
   }
   function setText(next: string) {
+    setSearchInput(next);
     const status = filter.match(STATUS_TOKEN)?.[0];
     const project = filter.match(PROJECT_TOKEN)?.[0];
     store.setFilter([status, project, next.trim()].filter(Boolean).join(" "));
@@ -168,7 +168,10 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
       {/* One control: status, project and text in a single field. */}
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <button
-          onClick={() => setSheetOpen(true)}
+          onClick={() => {
+            setSearchInput(textOf(filter));
+            setSheetOpen(true);
+          }}
           className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border bg-surface-1 px-3 text-left text-[13px]"
         >
           <ListFilter className="size-4 shrink-0 text-muted-foreground" />
@@ -276,7 +279,7 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
 
           {/* 16px text: iOS Safari zooms the page when focusing anything smaller. */}
           <Input
-            value={searchText}
+            value={searchInput}
             className="h-11 text-base md:text-base"
             placeholder="Search title, body, or #123"
             onChange={(e) => setText(e.target.value)}

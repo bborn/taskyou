@@ -366,3 +366,11 @@ with `--no-execute`; the local remote keeps that side effect inside the check.
 
 Rebuild the practice archive after editing `examples/storefront`:
 `python3 scripts/package-practice-project.py`.
+
+## Mobile web regression checks
+
+`check-mobile-web.py` drives the browser UI against an already-running QA instance.
+See [the mobile dogfood report](../../docs/qa/mobile-web-2026-09-16.md) for setup,
+coverage, known limits, and the distinction between viewport and native iOS testing.
+It uses `enable-mobile-touch.mjs` because the agent-browser device preset alone
+sets viewport and user agent but does not enable a coarse touch pointer.

@@ -21,7 +21,23 @@ const QUICK = ["yes", "continue"];
  * the controls sitting inside the card along the bottom edge.
  */
 export function ReplyComposer({ task }: { task: Task }) {
-  const [message, setMessage] = useState("");
+  const draftKey = `ty-reply-draft-${task.id}`;
+  const [message, setMessage] = useState(() => {
+    try { return sessionStorage.getItem(draftKey) ?? ""; }
+    catch { return ""; }
+  });
+
+  // Write on each edit, rather than on unmount: mobile tabs can be discarded
+  // without running cleanup. A successful send (or clearing the field) removes it.
+  function updateMessage(value: string) {
+    setMessage(value);
+    try {
+      if (value) sessionStorage.setItem(draftKey, value);
+      else sessionStorage.removeItem(draftKey);
+    } catch {
+      // Storage may be unavailable; composing and sending must still work.
+    }
+  }
   const [sending, setSending] = useState(false);
   const touch = useIsCoarsePointer();
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -45,7 +61,8 @@ export function ReplyComposer({ task }: { task: Task }) {
     setSending(true);
     try {
       await api.sendInput(task.id, body);
-      setMessage("");
+      // A quick answer must not discard a different reply being composed.
+      if (text === message) updateMessage("");
       store.toast({ title: "Sent to the agent", kind: "success" });
       void store.refreshTasks();
     } catch (e) {
@@ -98,7 +115,7 @@ export function ReplyComposer({ task }: { task: Task }) {
           enterKeyHint={touch ? "enter" : "send"}
           style={{ minHeight: "68px", maxHeight: "calc(50dvh - 3rem)" }}
           className="w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 pr-14 pb-1 text-sm leading-relaxed outline-none max-md:text-base"
-          onChange={(e) => setMessage(e.target.value)}
+          onChange={(e) => updateMessage(e.target.value)}
           onKeyDown={(e) => {
             // A touch keyboard has no usable Shift+Enter, so Enter-to-send
             // would make multi-line replies impossible. There, Return inserts

@@ -86,6 +86,10 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const [ghost, setGhost] = useState("");
 
   const titleRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Retain the saved ID if a later attachment upload fails: retry must not
+  // create a second task, and must keep the files that still need uploading.
+  const savedTaskId = useRef<number | null>(editing?.id ?? null);
   const ghostTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Which machines are candidates depends on the project (a host needs a
@@ -147,13 +151,19 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   }
 
   async function submit(dangerous = false) {
+    if (saving) return;
+    if (form.kind === "edit" && savedTaskId.current === null) {
+      store.toast({ title: "This task is no longer available", kind: "error" });
+      return;
+    }
     if (!title.trim() && !body.trim()) {
       store.toast({ title: "Title or description required", kind: "warning" });
       return;
     }
     setSaving(true);
+    let taskSaved = false;
     try {
-      if (form.kind === "new") {
+      if (savedTaskId.current === null) {
         const created = await api.createTask({
           title: title.trim(),
           body,
@@ -165,14 +175,11 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           placement: fromSelect(host),
           placement_workdir: hosts.find((h) => h.target === host)?.workdir ?? "",
         });
-        if (effort) await api.updateTask(created.id, { effort_level: effort }).catch(() => {});
-        for (const file of files) {
-          const data = await fileToBase64(file);
-          await api.addAttachment(created.id, file.name, data, file.type || undefined).catch(() => {});
-        }
-        store.toast({ title: `Created #${created.id}`, kind: "success", taskId: created.id });
-      } else if (editing) {
-        await api.updateTask(editing.id, {
+        savedTaskId.current = created.id;
+        taskSaved = true;
+        if (effort) await api.updateTask(created.id, { effort_level: effort });
+      } else {
+        await api.updateTask(savedTaskId.current, {
           title: title.trim(),
           body,
           type,
@@ -181,17 +188,24 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           effort_level: effort,
           permission_mode: permission,
         });
-        for (const file of files) {
-          const data = await fileToBase64(file);
-          await api.addAttachment(editing.id, file.name, data, file.type || undefined).catch(() => {});
-        }
-        store.toast({ title: `Updated #${editing.id}`, kind: "success" });
       }
+      taskSaved = true;
+      const taskId = savedTaskId.current;
+      for (const file of files) {
+        const data = await fileToBase64(file);
+        await api.addAttachment(taskId, file.name, data, file.type || undefined);
+        setFiles((pending) => pending.filter((f) => f !== file));
+      }
+      store.toast({
+        title: `${form.kind === "new" ? "Created" : "Updated"} #${taskId}`,
+        kind: "success",
+        taskId,
+      });
       close();
       await store.refreshTasks();
     } catch (e) {
       store.toast({
-        title: "Save failed",
+        title: taskSaved ? "Task saved; some changes still need saving" : "Save failed",
         body: e instanceof Error ? e.message : String(e),
         kind: "error",
       });
@@ -255,9 +269,10 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           </div>
 
           <div className="grid gap-1.5">
-            <Label>Title</Label>
+            <Label htmlFor="task-title">Title</Label>
             <div className="relative">
               <Input
+                id="task-title"
                 ref={titleRef}
                 value={title}
                 placeholder="What needs doing?"
@@ -285,8 +300,25 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           </div>
 
           <div className="grid gap-1.5">
-            <Label>Description (markdown)</Label>
-            <Textarea rows={7} value={body} onChange={(e) => setBody(e.target.value)} />
+            <Label htmlFor="task-body">Description (markdown)</Label>
+            <Textarea id="task-body" rows={7} value={body} onChange={(e) => setBody(e.target.value)} />
+          </div>
+
+          <div>
+            <Button variant="outline" disabled={saving} onClick={() => fileInputRef.current?.click()}>
+              Add files
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              aria-label="Attach files"
+              onChange={(e) => {
+                if (e.target.files) setFiles((prev) => [...prev, ...Array.from(e.target.files!)]);
+                e.target.value = "";
+              }}
+            />
           </div>
 
           {files.length > 0 && (
@@ -295,11 +327,13 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
               <div className="flex flex-col gap-1">
                 {files.map((f, i) => (
                   <div key={`${f.name}-${i}`} className="flex items-center gap-2 text-xs">
-                    <span>{f.name}</span>
+                    <span className="min-w-0 flex-1 break-all">{f.name}</span>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="size-5"
+                      className="size-5 shrink-0 max-md:size-11"
+                      aria-label={`Remove ${f.name}`}
+                      disabled={saving}
                       onClick={() => setFiles(files.filter((_, j) => j !== i))}
                     >
                       <X className="size-3" />
@@ -347,7 +381,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           </div>
 
           <button
-            className="self-start text-xs text-muted-foreground hover:text-foreground"
+            className="self-start text-xs text-muted-foreground hover:text-foreground max-md:min-h-11"
             onClick={() => setShowAdvanced(!showAdvanced)}
           >
             {showAdvanced ? "▾" : "▸"} Advanced
