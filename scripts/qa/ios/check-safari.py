@@ -106,8 +106,8 @@ def main():
     def assert_input_visible(selector):
         assert js('''const e=document.querySelector(arguments[0]); if(!e)return false;
           const r=e.getBoundingClientRect(),v=visualViewport;
-          return r.top>=v.offsetTop-2 && r.bottom<=v.offsetTop+v.height+2
-            && r.left>=-2 && r.right<=innerWidth+2 && Math.abs(v.scale-1)<.02;''', selector), 'Focused input is clipped or Safari zoomed'
+          return document.activeElement===e && r.top>=v.offsetTop-2 && r.bottom<=v.offsetTop+v.height+2
+            && r.left>=-2 && r.right<=innerWidth+2 && Math.abs(v.scale-1)<.02;''', selector), 'Expected input is not focused, is clipped, or Safari zoomed'
 
     try:
         with tempfile.TemporaryDirectory(prefix='taskyou-ios-') as temp:
@@ -126,12 +126,12 @@ def main():
             runtime, device = sorted(choices, key=lambda pair: (pair[1]['name'] != 'iPhone 16', pair[1]['name']))[0]
             print(f'Starting {device["name"]} on {runtime}', flush=True)
             (artifacts / 'device.json').write_text(json.dumps({'runtime': runtime, 'device': device}, indent=2))
+            start(['appium', '--address', '127.0.0.1', '--port', '4723', '--log-level', 'info'], 'appium')
+            wait_for(lambda: request('GET', appium + '/status'), 'Appium', 120)
             if device['state'] != 'Booted':
                 subprocess.run(['xcrun', 'simctl', 'boot', device['udid']], check=True, timeout=30)
             subprocess.run(['xcrun', 'simctl', 'bootstatus', device['udid'], '-b'], check=True, timeout=150)
             print('Simulator boot complete; starting Safari automation', flush=True)
-            start(['appium', '--address', '127.0.0.1', '--port', '4723', '--log-level', 'info'], 'appium')
-            wait_for(lambda: request('GET', appium + '/status'), 'Appium', 45)
             result = request('POST', appium + '/session', {'capabilities': {'alwaysMatch': {
                 'platformName': 'iOS', 'browserName': 'Safari',
                 'appium:automationName': 'XCUITest', 'appium:udid': device['udid'],

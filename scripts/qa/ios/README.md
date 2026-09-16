@@ -11,14 +11,14 @@ installed-PWA certification.
 
 - Only runs when the repository's visibility is **public**, where standard
   GitHub-hosted macOS compute is free. A private repository skips the job.
-- Standard `macos-15` only; no larger/paid runner, matrix, cron, or PR trigger.
+- Standard `macos-15-intel` only; no larger/paid runner, matrix, cron, or PR trigger.
 - Manual dispatch after this workflow is on the default branch. Before then,
   push to `codex/ios-safari-qa` with `[ios-qa]` in the HEAD commit message.
   Ordinary pushes to that branch create a skipped run.
 - 25-minute job limit, bounded steps, one concurrent run (new run cancels old).
 - No automatic retries and no Actions caches. Only preinstalled simulator
   runtimes matching the selected Xcode SDK are used; absence fails instead of
-  downloading a runtime. Appium uses its official prebuilt arm64 helper (pinned
+  downloading a runtime. Appium uses its official prebuilt x86_64 helper (pinned
   version and SHA-256), avoiding a fresh Xcode helper build on every run.
 - Evidence is capped at 15 MB/run, logs at 1 MB/file, retained for one day.
   Artifact storage is separate from compute billing; delete downloaded artifacts
