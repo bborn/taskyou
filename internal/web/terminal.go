@@ -312,6 +312,18 @@ func (terminal paneTerminal) run(args ...string) error {
 	return terminal.runner.Command(ctx, "", "tmux", terminal.tmuxArgs(args)...).Run()
 }
 
+// terminalRunner adapts paneTerminal to agentsend.Runner, so a task on another
+// host is written to through the same delivery path as a local one. The command
+// name is always "tmux"; paneTerminal already knows which server it is talking
+// to and how to reach it.
+type terminalRunner struct{ terminal paneTerminal }
+
+func (r terminalRunner) Run(_ string, args ...string) error { return r.terminal.run(args...) }
+
+func (r terminalRunner) Output(_ string, args ...string) ([]byte, error) {
+	return r.terminal.output(args...)
+}
+
 // tmuxArgs addresses the agent server when the terminal is local (see tmuxctl).
 func (terminal paneTerminal) tmuxArgs(args []string) []string {
 	if terminal.runner.Target() == "" {

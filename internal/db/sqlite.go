@@ -212,7 +212,7 @@ const modelClaudeSlugMigrationKey = "migration:clear_model_claude_slug_v1"
 // handshake.Protocol must be bumped whenever a schema change means a daemon and
 // a client of different builds would disagree about a row — see
 // internal/handshake.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // SchemaVersionKey is where SchemaVersion is stamped in the settings table.
 const SchemaVersionKey = "schema_version"

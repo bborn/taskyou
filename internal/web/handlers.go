@@ -597,6 +597,10 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A remote task's pane is on another machine's tmux server, so it is found
+	// by the code that owns that connection rather than by a tag lookup here —
+	// but the delivery itself is the same one every other surface uses, so a
+	// remote agent is no more likely to be typed over mid-turn than a local one.
 	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		info := s.remoteTerminalInfo(ctx, task, false)
@@ -610,28 +614,8 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		terminal := paneTerminal{ctx: r.Context(), runner: executor.RemoteRunner{Host: info.RemoteHost}}
-		if req.Key != "" {
-			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, req.Key); err != nil {
-				jsonErr(w, "failed to send key to remote agent", http.StatusBadGateway)
-				return
-			}
-		}
-		if req.Message != "" {
-			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, "-l", req.Message); err != nil {
-				jsonErr(w, "failed to send input to remote agent", http.StatusBadGateway)
-				return
-			}
-			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, "Enter"); err != nil {
-				jsonErr(w, "failed to submit input to remote agent", http.StatusBadGateway)
-				return
-			}
-		} else if req.Enter {
-			if err := terminal.run("send-keys", "-t", info.ClaudePaneID, "Enter"); err != nil {
-				jsonErr(w, "failed to send enter to remote agent", http.StatusBadGateway)
-				return
-			}
-		}
-		jsonOK(w, map[string]bool{"ok": true})
+		sender := agentsend.NewForHost(terminalRunner{terminal}, s.db, info.RemoteHost)
+		s.writeInput(w, r, sender, inputTarget{task: task, pane: info.ClaudePaneID}, req)
 		return
 	}
 
@@ -639,16 +623,46 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
 		return
 	}
-	sender := s.agentSender()
+	s.writeInput(w, r, s.agentSender(), inputTarget{task: task}, req)
+}
 
-	paneID := task.ClaudePaneID
-	if paneID == "" {
-		jsonErr(w, "task has no executor pane", http.StatusBadRequest)
-		return
+// inputTarget is where one input request is going: a task, and — for a remote
+// task — the pane already resolved on its host. An empty pane means "resolve it
+// by tag", which is what a local task does.
+type inputTarget struct {
+	task *db.Task
+	pane string
+}
+
+func (t inputTarget) send(sender *agentsend.Sender, p agentsend.Prompt) error {
+	if t.pane != "" {
+		return sender.SendToPane(t.pane, p)
 	}
+	return sender.Send(p)
+}
+
+// sendAndWait delivers and then waits for the agent's answer to THIS prompt.
+func (t inputTarget) sendAndWait(ctx context.Context, sender *agentsend.Sender, p agentsend.Prompt, timeout time.Duration) (db.AgentTurn, error) {
+	if t.pane != "" {
+		return sender.SendToPaneAndWait(ctx, t.pane, p, timeout)
+	}
+	return sender.SendAndWait(ctx, p, timeout)
+}
+
+func (t inputTarget) sendKeys(sender *agentsend.Sender, keys ...string) error {
+	if t.pane != "" {
+		return sender.SendKeysToPane(t.pane, keys...)
+	}
+	return sender.SendKeys(t.task.ID, keys...)
+}
+
+// writeInput performs one input request and writes its response. Local and
+// remote differ only in how the pane was found.
+func (s *Server) writeInput(w http.ResponseWriter, r *http.Request, sender *agentsend.Sender, target inputTarget, req inputRequest) {
+	task := target.task
 
 	if req.Key != "" {
-		if err := sender.SendKeys(task.ID, req.Key); err != nil {
+		if err := target.sendKeys(sender, req.Key); err != nil {
 			writeSendErr(w, err, "failed to send key")
 			return
 		}
@@ -667,7 +681,7 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 			if req.TimeoutMs > 0 {
 				timeout = time.Duration(req.TimeoutMs) * time.Millisecond
 			}
-			turn, err := sender.SendAndWait(r.Context(), prompt, timeout)
+			turn, err := target.sendAndWait(r.Context(), sender, prompt, timeout)
 			if err != nil {
 				writeSendErr(w, err, "failed to send input")
 				return
@@ -675,12 +689,12 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, map[string]interface{}{"ok": true, "turn": turn.Started})
 			return
 		}
-		if err := sender.Send(prompt); err != nil {
+		if err := target.send(sender, prompt); err != nil {
 			writeSendErr(w, err, "failed to send input")
 			return
 		}
 	case req.Enter:
-		if err := sender.SendKeys(task.ID, "Enter"); err != nil {
+		if err := target.sendKeys(sender, "Enter"); err != nil {
 			writeSendErr(w, err, "failed to send enter")
 			return
 		}

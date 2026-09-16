@@ -85,12 +85,25 @@ func (e *BusyError) Is(target error) bool { return target == ErrBusy }
 type Sender struct {
 	runner Runner
 	store  Store
+	// host namespaces the per-pane lock. Pane ids are only unique within one
+	// tmux server, so a remote host's "%3" and this machine's "%3" must not
+	// queue behind each other.
+	host string
 }
 
-// New returns a Sender. store may be nil, which disables the busy check and the
-// turn wait — for callers that have a tmux runner and nothing else.
+// New returns a Sender for this machine's agent server. store may be nil, which
+// disables the busy check and the turn wait — for callers that have a tmux
+// runner and nothing else.
 func New(runner Runner, store Store) *Sender {
 	return &Sender{runner: runner, store: store}
+}
+
+// NewForHost returns a Sender whose runner reaches another machine's tmux, for a
+// task placed on a remote host. Its panes are resolved there by whoever holds
+// the connection (see SendToPane); everything else — the busy check, the single
+// paste, the lock — is the same.
+func NewForHost(runner Runner, store Store, host string) *Sender {
+	return &Sender{runner: runner, store: store, host: host}
 }
 
 // Prompt is one delivery.
@@ -117,6 +130,18 @@ func (s *Sender) Send(p Prompt) error {
 	if err != nil {
 		return err
 	}
+	return s.SendToPane(pane, p)
+}
+
+// SendToPane is Send for a pane the caller has already resolved. It exists for
+// remote tasks, whose pane lives on another machine's tmux server and is found
+// by the code that owns that connection — the busy check, the single paste and
+// the per-pane lock are the same, so a remote task gets the same guarantees as a
+// local one instead of its own hand-rolled send.
+func (s *Sender) SendToPane(pane string, p Prompt) error {
+	if pane == "" {
+		return &NoPaneError{TaskID: p.TaskID}
+	}
 	if err := s.checkIdle(p); err != nil {
 		return err
 	}
@@ -131,6 +156,16 @@ func (s *Sender) Send(p Prompt) error {
 // db.ErrReplyTimeout if the agent does not answer in time — the prompt was still
 // delivered.
 func (s *Sender) SendAndWait(ctx context.Context, p Prompt, timeout time.Duration) (db.AgentTurn, error) {
+	return s.sendAndWait(ctx, "", p, timeout)
+}
+
+// SendToPaneAndWait is SendAndWait for a pane the caller has already resolved.
+// See SendToPane.
+func (s *Sender) SendToPaneAndWait(ctx context.Context, pane string, p Prompt, timeout time.Duration) (db.AgentTurn, error) {
+	return s.sendAndWait(ctx, pane, p, timeout)
+}
+
+func (s *Sender) sendAndWait(ctx context.Context, pane string, p Prompt, timeout time.Duration) (db.AgentTurn, error) {
 	if s.store == nil {
 		return db.AgentTurn{}, errors.New("agentsend: waiting for a reply needs a store")
 	}
@@ -138,7 +173,11 @@ func (s *Sender) SendAndWait(ctx context.Context, p Prompt, timeout time.Duratio
 	if err != nil {
 		return db.AgentTurn{}, err
 	}
-	if err := s.Send(p); err != nil {
+	send := s.Send
+	if pane != "" {
+		send = func(p Prompt) error { return s.SendToPane(pane, p) }
+	}
+	if err := send(p); err != nil {
 		return db.AgentTurn{}, err
 	}
 	return s.store.WaitForAgentReply(ctx, p.TaskID, before, timeout)
@@ -150,14 +189,23 @@ func (s *Sender) SendAndWait(ctx context.Context, p Prompt, timeout time.Duratio
 // resolved by tag, because a keypress into a stranger's pane is no better than
 // a prompt into one.
 func (s *Sender) SendKeys(taskID int64, keys ...string) error {
-	if len(keys) == 0 {
-		return nil
-	}
 	pane, err := s.AgentPane(taskID)
 	if err != nil {
 		return err
 	}
-	unlock := lockPane(pane)
+	return s.SendKeysToPane(pane, keys...)
+}
+
+// SendKeysToPane is SendKeys for a pane the caller has already resolved. See
+// SendToPane.
+func (s *Sender) SendKeysToPane(pane string, keys ...string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if pane == "" {
+		return &NoPaneError{}
+	}
+	unlock := lockPane(s.host, pane)
 	defer unlock()
 	return s.runner.Run("tmux", append([]string{"send-keys", "-t", pane}, keys...)...)
 }
@@ -227,7 +275,7 @@ var bufferSeq atomic.Int64
 // seam every surface shares has no stdin, and both commands feed the same
 // paste.
 func (s *Sender) deliver(pane, text string, submit bool) error {
-	unlock := lockPane(pane)
+	unlock := lockPane(s.host, pane)
 	defer unlock()
 
 	if text != "" {
@@ -270,15 +318,17 @@ type paneLock struct {
 	refs int
 }
 
-// lockPane takes the pane's lock and returns the release. The entry is dropped
-// once the last waiter is gone, so a long-lived process does not accumulate one
-// mutex per pane id tmux has ever issued.
-func lockPane(pane string) func() {
+// lockPane takes the pane's lock and returns the release. host namespaces the
+// key, because pane ids are only unique within one tmux server. The entry is
+// dropped once the last waiter is gone, so a long-lived process does not
+// accumulate one mutex per pane id tmux has ever issued.
+func lockPane(host, pane string) func() {
+	key := host + "\x00" + pane
 	paneLocksMu.Lock()
-	l := paneLocks[pane]
+	l := paneLocks[key]
 	if l == nil {
 		l = &paneLock{}
-		paneLocks[pane] = l
+		paneLocks[key] = l
 	}
 	l.refs++
 	paneLocksMu.Unlock()
@@ -289,7 +339,7 @@ func lockPane(pane string) func() {
 		paneLocksMu.Lock()
 		l.refs--
 		if l.refs == 0 {
-			delete(paneLocks, pane)
+			delete(paneLocks, key)
 		}
 		paneLocksMu.Unlock()
 	}

@@ -123,9 +123,74 @@ esac
 	}
 }
 
+// A remote task's pane lives on another machine's tmux server, so it is found
+// by remoteTerminalInfo rather than by a tag lookup here — but the delivery is
+// the shared one, so what reaches the host is a single paste and its Enter.
 func TestRemoteTaskInputRoutesToRemoteAgentPane(t *testing.T) {
 	srv, database, local := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "remote input", Status: db.StatusBlocked})
+	commandsPath := remoteInputFixture(t, database, task)
+
+	body := `{"message":"continue remotely"}`
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", task.ID), strings.NewReader(body))
+	req.SetPathValue("id", fmt.Sprint(task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTaskInput(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("input: %d %s", w.Code, w.Body.String())
+	}
+	commands, _ := os.ReadFile(commandsPath)
+	got := string(commands)
+	for _, want := range []string{"test-remote-host", "set-buffer", "continue remotely", "paste-buffer", "%91", "send-keys", "Enter"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("remote delivery missing %q: %s", want, got)
+		}
+	}
+	if len(local.snapshot()) != 0 {
+		t.Fatalf("remote input touched local tmux: %v", local.snapshot())
+	}
+}
+
+// The busy check is not a local-only courtesy: an agent working on another host
+// is no more able to read a line typed into the middle of its own output.
+func TestRemoteTaskInputRefusesABusyAgent(t *testing.T) {
+	srv, database, _ := setupServer(t)
 	task := createTestTask(t, database, &db.Task{Title: "remote input", Status: db.StatusProcessing})
+	commandsPath := remoteInputFixture(t, database, task)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", task.ID), strings.NewReader(body))
+		req.SetPathValue("id", fmt.Sprint(task.ID))
+		w := httptest.NewRecorder()
+		srv.handleTaskInput(w, req)
+		return w
+	}
+
+	w := post(`{"message":"while it works"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := errCode(t, w); code != "agent_busy" {
+		t.Errorf("code = %q, want agent_busy", code)
+	}
+	if commands, _ := os.ReadFile(commandsPath); strings.Contains(string(commands), "while it works") {
+		t.Errorf("refused input reached the host anyway: %s", commands)
+	}
+
+	if w := post(`{"message":"while it works","force":true}`); w.Code != http.StatusOK {
+		t.Fatalf("forced send: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	commands, _ := os.ReadFile(commandsPath)
+	if !strings.Contains(string(commands), "while it works") {
+		t.Errorf("forced send never reached the host: %s", commands)
+	}
+}
+
+// remoteInputFixture places a task on a stubbed host and returns the file its
+// fake ssh records every command in.
+func remoteInputFixture(t *testing.T, database *db.DB, task *db.Task) string {
+	t.Helper()
 	for _, err := range []error{
 		database.SetTaskPlacement(task.ID, "test-remote-host", "test"),
 		database.SetTaskRemoteWorktree(task.ID, "/remote/worktree", "task/test"),
@@ -142,7 +207,7 @@ func TestRemoteTaskInputRoutesToRemoteAgentPane(t *testing.T) {
 printf '%s\n' "$*" >> "$TY_TEST_REMOTE_COMMANDS"
 case "$*" in
   *list-panes*) echo %91 ;;
-  *send-keys*) : ;;
+  *set-buffer*|*paste-buffer*|*send-keys*) : ;;
   *) exit 1 ;;
 esac
 `
@@ -151,22 +216,5 @@ esac
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TY_TEST_REMOTE_COMMANDS", commandsPath)
-
-	body := `{"message":"continue remotely"}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", task.ID), strings.NewReader(body))
-	req.SetPathValue("id", fmt.Sprint(task.ID))
-	w := httptest.NewRecorder()
-	srv.handleTaskInput(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("input: %d %s", w.Code, w.Body.String())
-	}
-	commands, _ := os.ReadFile(commandsPath)
-	got := string(commands)
-	if !strings.Contains(got, "test-remote-host") || !strings.Contains(got, "send-keys") || !strings.Contains(got, "%91") || !strings.Contains(got, "continue remotely") {
-		t.Fatalf("input was not sent to the placed host's agent pane: %s", got)
-	}
-	if len(local.snapshot()) != 0 {
-		t.Fatalf("remote input touched local tmux: %v", local.snapshot())
-	}
+	return commandsPath
 }
