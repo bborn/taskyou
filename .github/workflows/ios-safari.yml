@@ -21,7 +21,7 @@ jobs:
       github.event.repository.visibility == 'public' &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.head_commit.message, '[ios-qa]'))
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -59,8 +59,8 @@ jobs:
         timeout-minutes: 2
         run: |
           curl --fail --location --max-time 60 --output "$RUNNER_TEMP/wda.zip" \
-            https://github.com/appium/WebDriverAgent/releases/download/v16.12.8/WebDriverAgentRunner-Build-Sim-arm64.zip
-          echo "99bca36962e6f06bb140971f467e851f4cebf9e89c20af8d45bcd6f3bd00aab4  $RUNNER_TEMP/wda.zip" | shasum -a 256 --check
+            https://github.com/appium/WebDriverAgent/releases/download/v16.12.8/WebDriverAgentRunner-Build-Sim-x86_64.zip
+          echo "bf683d59a8ffc031031ddeeb3d5edf9556f3060692694904edcf4b8aa5ba05a2  $RUNNER_TEMP/wda.zip" | shasum -a 256 --check
           unzip -q "$RUNNER_TEMP/wda.zip" -d "$RUNNER_TEMP/wda"
           echo "QA_WDA_PATH=$RUNNER_TEMP/wda/WebDriverAgentRunner-Runner.app" >> "$GITHUB_ENV"
       - name: Exercise Safari with the software keyboard

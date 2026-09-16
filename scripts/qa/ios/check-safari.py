@@ -126,11 +126,16 @@ def main():
             runtime, device = sorted(choices, key=lambda pair: (pair[1]['name'] != 'iPhone 16', pair[1]['name']))[0]
             print(f'Starting {device["name"]} on {runtime}', flush=True)
             (artifacts / 'device.json').write_text(json.dumps({'runtime': runtime, 'device': device}, indent=2))
+            if device['state'] != 'Booted':
+                subprocess.run(['xcrun', 'simctl', 'boot', device['udid']], check=True, timeout=30)
+            subprocess.run(['xcrun', 'simctl', 'bootstatus', device['udid'], '-b'], check=True, timeout=150)
+            print('Simulator boot complete; starting Safari automation', flush=True)
             start(['appium', '--address', '127.0.0.1', '--port', '4723', '--log-level', 'info'], 'appium')
             wait_for(lambda: request('GET', appium + '/status'), 'Appium', 45)
             result = request('POST', appium + '/session', {'capabilities': {'alwaysMatch': {
                 'platformName': 'iOS', 'browserName': 'Safari',
                 'appium:automationName': 'XCUITest', 'appium:udid': device['udid'],
+                'appium:platformVersion': sdk,
                 'appium:deviceName': device['name'], 'appium:nativeWebTap': True,
                 'appium:connectHardwareKeyboard': False,
                 'appium:forceSimulatorSoftwareKeyboardPresence': True,
