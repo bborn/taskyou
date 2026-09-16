@@ -186,7 +186,7 @@ func TestPluginBrowser_IgnoresEnterWhileBusy(t *testing.T) {
 
 	m, cmd := m.Update(browserKey("enter"))
 	cmd()
-	m, second := m.Update(browserKey("enter"))
+	_, second := m.Update(browserKey("enter"))
 	if second != nil {
 		t.Error("a second enter while installing should be ignored")
 	}
@@ -229,7 +229,7 @@ func TestPluginBrowser_RemoveConfirms(t *testing.T) {
 	}
 
 	m, _ = m.Update(browserKey("ctrl+d"))
-	m, cmd = m.Update(browserKey("y"))
+	_, cmd = m.Update(browserKey("y"))
 	if cmd == nil {
 		t.Fatal("y should start the removal")
 	}
