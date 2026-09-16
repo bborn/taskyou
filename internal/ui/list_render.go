@@ -159,19 +159,12 @@ func (k *KanbanBoard) buildListBlocks(width int) []listBlock {
 
 		if group := k.listOpts.groupKeyFor(t); group != prevGroup {
 			if title := k.listOpts.sectionTitle(group); title != "" {
-				// Relaxed rows already end in a blank line, so only compact
-				// sections need one added ahead of the header.
-				spaced := i > 0 && k.listOpts.Density != DensityRelaxed
-				b.header = k.renderSectionHeader(group, title, width, spaced)
+				b.header = k.renderSectionHeader(group, title, width, i > 0)
 			}
 			prevGroup = group
 		}
 
-		if k.listOpts.Density == DensityRelaxed {
-			b.body = k.renderRelaxedRow(t, width, cols, selected)
-		} else {
-			b.body = []string{k.renderCompactRow(t, width, cols, selected)}
-		}
+		b.body = k.renderListRow(t, width, cols, selected)
 		blocks = append(blocks, b)
 	}
 	return blocks
@@ -235,13 +228,18 @@ func (k *KanbanBoard) listRowTrailer(t *db.Task, selected bool) string {
 	return right
 }
 
-// renderCompactRow is one aligned line per task.
+// renderListRow renders one task.
 //
 // The status word lives in the section header rather than on every row, but the
 // glyph stays: the Pinned section mixes statuses, and grouping by project mixes
 // them everywhere, so a row that said nothing about state would be unreadable
 // in exactly the arrangements people reach for.
-func (k *KanbanBoard) renderCompactRow(t *db.Task, width int, cols listColumns, selected bool) string {
+//
+// A running or blocked task gets a second line — the same live sub-line the
+// kanban card shows, so both faces of the board say the same thing. Nothing
+// else does: there is no activity to report on a backlog item, and a blank
+// second line would be worse than no line at all.
+func (k *KanbanBoard) renderListRow(t *db.Task, width int, cols listColumns, selected bool) []string {
 	cursor := " "
 	if selected {
 		cursor = Icon("▌", ">")
@@ -258,8 +256,8 @@ func (k *KanbanBoard) renderCompactRow(t *db.Task, width int, cols listColumns, 
 	right := k.listRowTrailer(t, selected)
 
 	inner := width - 4
-	titleWidth := inner - lipgloss.Width(cursor) - 1 - lipgloss.Width(glyph) - 1 -
-		cols.id - 1 - cols.project - lipgloss.Width(right) - 2
+	lead := lipgloss.Width(cursor) + 1 + lipgloss.Width(glyph) + 1
+	titleWidth := inner - lead - cols.id - 1 - cols.project - lipgloss.Width(right) - 2
 	if titleWidth < 10 {
 		titleWidth = 10
 	}
@@ -283,64 +281,32 @@ func (k *KanbanBoard) renderCompactRow(t *db.Task, width int, cols listColumns, 
 	if gap < 1 {
 		gap = 1
 	}
-	return k.listRowStyle(width, selected).Render(left + strings.Repeat(" ", gap) + right)
+	style := k.listRowStyle(width, selected)
+	lines := []string{style.Render(left + strings.Repeat(" ", gap) + right)}
+
+	if k.rowHasActivity(t) {
+		// Indent to the id, so the two lines read as one block.
+		indent := strings.Repeat(" ", lead)
+		lines = append(lines, style.Render(indent+k.cardSubLine(t, inner-lead+2, selected)))
+	}
+	return lines
 }
 
-// renderRelaxedRow is the kanban card at full width: the same three lines a
-// card carries (id and badges, title, live sub-line), given the whole row
-// instead of a quarter of it. This is the density for watching work happen —
-// the sub-line is where a running agent's current activity shows up.
-func (k *KanbanBoard) renderRelaxedRow(t *db.Task, width int, cols listColumns, selected bool) []string {
-	inner := width - 4
-	style := k.listRowStyle(width, selected)
-
-	cursor := " "
-	if selected {
-		cursor = Icon("▌", ">")
+// rowHasActivity reports whether a task has something live to say that is worth
+// a second row: what a running agent is doing, or the stand a blocked one is
+// waiting on.
+//
+// The check is "would the sub-line say more than the age?", not "is this task
+// running?". cardSubLine falls back to an age hint when there is no activity or
+// stand recorded, and the age is already on the right-hand side of the first
+// line — so trusting status alone grows the row to repeat a number the user can
+// already see.
+func (k *KanbanBoard) rowHasActivity(t *db.Task) bool {
+	if t.Status != db.StatusProcessing && t.Status != db.StatusBlocked {
+		return false
 	}
-	glyph := StatusIcon(t.Status)
-	id := padLeft(fmt.Sprintf("#%d", t.ID), cols.id)
-
-	// Line 1 — identity on the left, badges and age on the right.
-	meta := cursor + " "
-	if selected {
-		meta += glyph + " " + id
-	} else {
-		meta += FgStyle(StatusColor(t.Status)).Render(glyph) + " " + Dim.Render(id)
-	}
-	if t.Project != "" && k.showProjectColumn() {
-		tag := "[" + shortProjectName(t.Project) + "]"
-		if selected {
-			meta += " " + tag
-		} else {
-			meta += " " + FgStyle(ProjectColor(t.Project)).Render(tag)
-		}
-	}
-	right := k.listRowTrailer(t, selected)
-	gap := inner - lipgloss.Width(meta) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
-	metaLine := style.Render(meta + strings.Repeat(" ", gap) + right)
-
-	// Line 2 — the title, with the whole row to itself. It indents to where the
-	// id starts, so the three lines of a row read as one block rather than a
-	// ragged stack.
-	indent := strings.Repeat(" ", lipgloss.Width(cursor)+1+lipgloss.Width(glyph)+1)
-	titleStyle := lipgloss.NewStyle()
-	if selected {
-		titleStyle = titleStyle.Bold(true)
-	} else if k.NeedsInput(t.ID) {
-		titleStyle = titleStyle.Foreground(ColorWarning)
-	}
-	titleLine := style.Render(indent + titleStyle.Render(truncateRunes(k.listRowTitle(t), inner-lipgloss.Width(indent))))
-
-	// Line 3 — what the agent is doing right now, or why it is waiting. Shared
-	// with the kanban card so both faces of the board say the same thing.
-	sub := k.cardSubLine(t, inner-lipgloss.Width(indent)+2, selected)
-	subLine := style.Render(indent + sub)
-
-	return []string{metaLine, titleLine, subLine, ""}
+	text, _ := k.subLineContent(t)
+	return text != "" && text != taskAgeHint(t)
 }
 
 // listRowStyle is the shared row chrome: full width, padded, one line tall, and

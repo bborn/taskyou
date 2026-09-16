@@ -60,7 +60,7 @@ const (
 	ViewActionPicker         // modal list of plugin actions for the current task
 	ViewRepoClone            // clone a pasted repo URL, then continue as a folder
 	ViewSavedViews           // modal list of saved filter views
-	ViewListOptions          // modal for the list's grouping / sort / density
+	ViewListOptions          // modal for the list's grouping and sort
 )
 
 // KeyMap defines key bindings.
@@ -115,7 +115,7 @@ type KeyMap struct {
 	// Board display: kanban columns vs a flat list, and the saved-view picker
 	ToggleListView key.Binding
 	SavedViews     key.Binding
-	// How the list is arranged: group by, sort, density
+	// How the list is arranged: group by, sort
 	ListOptions key.Binding
 }
 

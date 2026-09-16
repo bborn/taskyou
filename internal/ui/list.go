@@ -20,15 +20,11 @@ import (
 // SetListMode carries the selected task across, so toggling never loses your
 // place and every action in app.go keeps working through SelectedTask().
 
-// listRowLines is how many lines one task occupies at each density: one for a
-// compact row, and four for a relaxed one (id, title, sub-line, spacer). The
-// scroll maths needs it to know how many tasks fit on screen.
-func (k *KanbanBoard) listRowLines() int {
-	if k.listOpts.Density == DensityRelaxed {
-		return 4
-	}
-	return 1
-}
+// listRowLines is the worst-case height of one task in lines: two, because a
+// running or blocked task grows an activity line. Used only by the scroll
+// maths, which needs a conservative floor for how many tasks fit — the exact
+// layout comes from the blocks themselves.
+func (k *KanbanBoard) listRowLines() int { return 2 }
 
 // listStatusRank orders the flat list by "how much this needs me now".
 // Anything unlisted sorts last.
@@ -126,7 +122,7 @@ func (k *KanbanBoard) clampListSelection() {
 }
 
 // listCapacity is how many TASKS fit in the viewport at the current height and
-// density. Section headers also consume lines, so this is a floor rather than
+// row height. Section headers also consume lines, so this is a floor rather than
 // an exact count — it only has to be conservative enough that the selected row
 // is always scrolled into view.
 func (k *KanbanBoard) listCapacity() int {

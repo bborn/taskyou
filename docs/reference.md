@@ -36,29 +36,28 @@ card works on a row — the selection is shared, so `v` never loses your place.
 
 #### Arranging the list
 
-Press `O`. Three independent choices, previewed live as you cycle them:
+Press `O`. Two choices, previewed live as you cycle them:
 
 | | Options | |
 |---|---|---|
 | **Group by** | `status` · `project` · `none` | Sections, with a count per section |
-| **Sort** | `urgency` · `updated` · `created` | Order inside each section |
-| **Density** | `compact` · `relaxed` | One line per task, or the kanban card at full width |
+| **Sort** | `urgency` · `updated` · `created` · `title` | Order inside each section |
 
 [![The arrange-list widget](media/list-arrange.png)](media/list-arrange.png)
 
 The current arrangement is always on screen under the header, so it is never a
 setting you have to remember you changed. It persists with the rest of the board
-state (`list_group_by`, `list_sort`, `list_density`).
+state (`list_group_by`, `list_sort`).
 
 Whatever the grouping, **pinned tasks lead the list** in their own section:
 pinning means "keep this in sight", and scattering pinned tasks through project
 sections is what pinning exists to prevent.
 
-**`relaxed` density** is the kanban card given the full width — id and badges,
-the title on its own line, and the live activity sub-line underneath. It is the
-density for watching work happen, where a running agent's current step shows up:
-
-[![Relaxed density](media/list-view-relaxed.png)](media/list-view-relaxed.png)
+**Row height is not an option.** A row is one line — except a running or blocked
+task, which grows a second, dim line carrying the same live activity the kanban
+card shows: what its agent is doing, or the stand it is waiting on. That is the
+one thing a card says that a line cannot, and it is only ever true of live tasks;
+a backlog item has nothing to report, so a second line there would buy nothing.
 
 Redundancy is dropped rather than repeated: grouping by status keeps a coloured
 status glyph on each row but moves the word to the header, and grouping by
