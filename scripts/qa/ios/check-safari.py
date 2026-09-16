@@ -73,6 +73,21 @@ def main():
         ident = wait_for(lambda: element(selector), selector)
         wd('POST', f'/element/{ident}/click', {})
 
+    def native_field(kind, label):
+        # Native accessibility avoids Appium's web-to-screen calibration, which
+        # can fail after Safari changes its toolbar or a sheet animates in.
+        context = wd('GET', '/context')
+        wd('POST', '/context', {'name': 'NATIVE_APP'})
+        try:
+            (artifacts / 'native-fields.xml').write_text(wd('GET', '/source'))
+            predicate = f"type == '{kind}' AND (label == '{label}' OR value == '{label}')"
+            target = wait_for(lambda: wd('POST', '/element', {
+                'using': '-ios predicate string', 'value': predicate}), f'native {label}')
+            ident = target['element-6066-11e4-a52e-4f735466cecf']
+            wd('POST', f'/element/{ident}/click', {})
+        finally:
+            wd('POST', '/context', {'name': context})
+
     def evidence(name):
         print(f'Capturing {name}', flush=True)
         png = wd('GET', '/screenshot')
@@ -123,7 +138,7 @@ def main():
                 'appium:webviewAtomWaitTimeout': 20000,
                 'appium:usePreinstalledWDA': True,
                 'appium:prebuiltWDAPath': os.environ['QA_WDA_PATH'],
-            }}}, timeout=240)
+            }}}, timeout=300)
             session = result['value']['sessionId']
             print('Safari session ready', flush=True)
             wd('POST', '/url', {'url': site})
@@ -151,12 +166,12 @@ def main():
             wait_for(lambda: js('return !![...document.querySelectorAll("button")].find(e=>e.textContent.trim()==="New")'), 'New task button')
             new_id = js('return [...document.querySelectorAll("button")].find(e=>e.textContent.trim()==="New")')
             wd('POST', f'/element/{new_id["element-6066-11e4-a52e-4f735466cecf"]}/click', {})
-            click('#task-title')
+            native_field('XCUIElementTypeTextField', 'What needs doing?')
             wait_for(keyboard_visible, 'task title keyboard')
             evidence('04-new-task-keyboard')
             assert_input_visible('#task-title')
             checks.append('New-task title stays visible with software keyboard')
-            click('#task-body')
+            native_field('XCUIElementTypeTextView', 'Description (markdown)')
             wait_for(keyboard_visible, 'description keyboard')
             evidence('05-description-keyboard')
             assert_input_visible('#task-body')
