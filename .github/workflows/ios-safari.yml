@@ -23,13 +23,14 @@ jobs:
        contains(github.event.head_commit.message, '[ios-qa]'))
     runs-on: macos-15
     timeout-minutes: 25
-    env:
-      APPIUM_HOME: ${{ runner.temp }}/appium-home
-      QA_ARTIFACTS: ${{ runner.temp }}/ios-evidence
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Set isolated paths
+        run: |
+          echo "APPIUM_HOME=$RUNNER_TEMP/appium-home" >> "$GITHUB_ENV"
+          echo "QA_ARTIFACTS=$RUNNER_TEMP/ios-evidence" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
