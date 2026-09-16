@@ -2175,15 +2175,24 @@ func (m *AppModel) renderFilterBar() string {
 			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (Tab: select %s, ↑↓: navigate)", what)))
 		} else {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
-			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
-			// so advertise the short alias (is:wf) rather than the full token.
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, @: host, is:wf: workflows only)", navHelp)))
+			// The hint is the first thing sacrificed when the bar runs out of
+			// room (see the truncation below), so put the keys first and the
+			// grammar reminder last.
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, @: host, status: is: has:)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, V: views, Esc: clear)"))
 	}
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+
+	// Hard-truncate rather than let it wrap. The bar is one row by construction;
+	// a wrapped hint pushes the board down and reads like a rendering fault. Now
+	// that a filter is routinely a long query ("[payments-api] status:open") this
+	// is the common case, not an edge one — the tail of the hint is what goes.
+	if m.width > 2 {
+		filterContent = lipgloss.NewStyle().MaxWidth(m.width - 2).Render(filterContent)
+	}
 
 	// No background: each part's styling ends in an ANSI reset, so a bar
 	// background only survived in the trailing padding, as a gray stub after
@@ -2204,14 +2213,19 @@ func (m *AppModel) renderFilterBar() string {
 
 func (m *AppModel) renderHelp() string {
 	// Cap the help to the terminal. The bubbles help model renders at its
-	// natural width when Width is 0, so the two bindings this change adds to
-	// ShortHelp would make the whole dashboard wider than the screen and
-	// re-wrap the board. Width is also set on resize; this covers the
-	// pre-resize render.
-	if m.width > 0 {
-		m.help.Width = m.width
+	// natural width when Width is 0, so a keymap that outgrows the terminal
+	// would make the whole dashboard wider than the screen and re-wrap the
+	// board. Width is also set on resize; this covers the pre-resize render.
+	if m.width <= 0 {
+		return m.help.View(m.keys)
 	}
-	return m.help.View(m.keys)
+	m.help.Width = m.width
+
+	// Belt and braces: bubbles honours Width at ordinary terminal sizes but
+	// returns the untruncated line at very narrow ones (measured: a 60-column
+	// Width still renders 159 columns), so clamp the result ourselves rather
+	// than trust it. Cheap, and the invariant is what the board depends on.
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(m.help.View(m.keys))
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
