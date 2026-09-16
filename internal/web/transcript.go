@@ -1,8 +1,12 @@
 package web
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -98,11 +102,170 @@ func (s *Server) handleTaskMessages(w http.ResponseWriter, r *http.Request) {
 		limit = 1000
 	}
 
-	messages := readTranscriptDir(s.transcriptDir(task), limit)
+	var (
+		messages []chatMessage
+		err      error
+	)
+	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+		workDir, _, dbErr := s.db.GetTaskRemoteWorktree(task.ID)
+		if dbErr != nil {
+			jsonErr(w, "failed to locate remote worktree", http.StatusInternalServerError)
+			return
+		}
+		if workDir == "" {
+			jsonErr(w, "remote worktree is not recorded yet", http.StatusConflict)
+			return
+		}
+		messages, err = readRemoteTranscript(r.Context(), task.PlacementTarget, workDir, limit)
+	} else {
+		messages = readTranscriptDir(s.transcriptDir(task), limit)
+	}
+	if err != nil {
+		jsonErr(w, fmt.Sprintf("cannot read conversation from %s: %v", task.PlacementTarget, err), http.StatusBadGateway)
+		return
+	}
 	if len(messages) > limit {
 		messages = messages[len(messages)-limit:]
 	}
 	jsonOK(w, messages)
+}
+
+// These scripts run through RemoteRunner, so the same outbound SSH path used
+// to launch and inspect a placed task also supplies its transcript. Only file
+// names and sizes are read on every poll; transcript bytes cross the wire only
+// when that fingerprint changes.
+const remoteTranscriptMetaScript = `# TY_TRANSCRIPT_META
+set -eu
+workdir=$1
+slug=$(printf '%s' "$workdir" | sed 's#[/.]#-#g')
+dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug
+[ -d "$dir" ] || exit 0
+for file in "$dir"/*.jsonl; do
+  [ -f "$file" ] || continue
+  name=${file##*/}
+  case "$name" in agent-*) continue ;; esac
+  size=$(wc -c < "$file" | tr -d ' ')
+  printf '%s\t%s\n' "$name" "$size"
+done
+`
+
+const remoteTranscriptArchiveScript = `# TY_TRANSCRIPT_ARCHIVE
+set -eu
+workdir=$1
+budget=$2
+slug=$(printf '%s' "$workdir" | sed 's#[/.]#-#g')
+dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug
+[ -d "$dir" ] || exit 0
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+for file in "$dir"/*.jsonl; do
+  [ -f "$file" ] || continue
+  name=${file##*/}
+  case "$name" in agent-*) continue ;; esac
+  size=$(wc -c < "$file" | tr -d ' ')
+  if [ "$size" -gt "$budget" ]; then
+    tail -c "$budget" < "$file" > "$tmp/$name"
+  else
+    cp "$file" "$tmp/$name"
+  fi
+done
+tar -cf - -C "$tmp" .
+`
+
+func readRemoteTranscript(ctx context.Context, host, workDir string, limit int) ([]chatMessage, error) {
+	runner := executor.RemoteRunner{Host: host}
+	metaCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	meta, err := runner.Command(metaCtx, "", "sh", "-c", remoteTranscriptMetaScript, "ty-transcript", workDir).Output()
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	sizes, err := parseRemoteTranscriptMeta(meta)
+	if err != nil {
+		return nil, err
+	}
+	if len(sizes) == 0 {
+		return []chatMessage{}, nil
+	}
+
+	key := "remote\x00" + host + "\x00" + workDir
+	fp := string(meta)
+	transcriptCacheMu.Lock()
+	if cached, ok := transcriptCache[key]; ok && cached.fingerprint == fp && cached.limit >= limit {
+		messages := cached.messages
+		transcriptCacheMu.Unlock()
+		return messages, nil
+	}
+	transcriptCacheMu.Unlock()
+
+	var messages []chatMessage
+	for _, budget := range tailBudgets {
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
+		archive, fetchErr := runner.Command(fetchCtx, "", "sh", "-c", remoteTranscriptArchiveScript,
+			"ty-transcript", workDir, strconv.FormatInt(budget, 10)).Output()
+		fetchCancel()
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		var truncated bool
+		messages, truncated, fetchErr = readRemoteTranscriptArchive(archive, sizes)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		if len(messages) >= limit || !truncated {
+			break
+		}
+	}
+
+	transcriptCacheMu.Lock()
+	transcriptCache[key] = transcriptCacheEntry{fingerprint: fp, limit: limit, messages: messages}
+	transcriptCacheMu.Unlock()
+	return messages, nil
+}
+
+func parseRemoteTranscriptMeta(data []byte) (map[string]int64, error) {
+	files := make(map[string]int64)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		name, rawSize, ok := strings.Cut(line, "\t")
+		if !ok || filepath.Base(name) != name || !strings.HasSuffix(name, ".jsonl") {
+			return nil, fmt.Errorf("invalid transcript metadata")
+		}
+		size, err := strconv.ParseInt(strings.TrimSpace(rawSize), 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("invalid transcript size for %s", name)
+		}
+		files[name] = size
+	}
+	return files, nil
+}
+
+func readRemoteTranscriptArchive(data []byte, sizes map[string]int64) ([]chatMessage, bool, error) {
+	reader := tar.NewReader(bytes.NewReader(data))
+	var batches [][]chatMessage
+	truncated := false
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("read remote transcript archive: %w", err)
+		}
+		name := filepath.Base(header.Name)
+		originalSize, ok := sizes[name]
+		if !ok || header.Typeflag != tar.TypeReg {
+			continue
+		}
+		fileTruncated := header.Size < originalSize
+		if fileTruncated {
+			truncated = true
+		}
+		batches = append(batches, readTranscript(reader, fileTruncated))
+	}
+	return mergeTranscriptBatches(batches), truncated, nil
 }
 
 // transcriptDir locates the Claude session directory for a task's worktree.
@@ -206,12 +369,7 @@ func readTranscriptDir(dir string, limit int) []chatMessage {
 }
 
 func readFilesWithBudget(paths []string, budget int64) ([]chatMessage, bool) {
-	type timed struct {
-		at  time.Time
-		msg chatMessage
-	}
-	var collected []timed
-	seen := make(map[string]bool)
+	var batches [][]chatMessage
 	anyTruncated := false
 
 	for _, path := range paths {
@@ -219,13 +377,26 @@ func readFilesWithBudget(paths []string, budget int64) ([]chatMessage, bool) {
 		if truncated {
 			anyTruncated = true
 		}
-		for _, m := range msgs {
-			if seen[m.ID] {
+		batches = append(batches, msgs)
+	}
+	return mergeTranscriptBatches(batches), anyTruncated
+}
+
+func mergeTranscriptBatches(batches [][]chatMessage) []chatMessage {
+	type timed struct {
+		at  time.Time
+		msg chatMessage
+	}
+	var collected []timed
+	seen := make(map[string]bool)
+	for _, messages := range batches {
+		for _, message := range messages {
+			if seen[message.ID] {
 				continue
 			}
-			seen[m.ID] = true
-			at, _ := time.Parse(time.RFC3339, m.CreatedAt)
-			collected = append(collected, timed{at: at, msg: m})
+			seen[message.ID] = true
+			at, _ := time.Parse(time.RFC3339, message.CreatedAt)
+			collected = append(collected, timed{at: at, msg: message})
 		}
 	}
 
@@ -235,7 +406,7 @@ func readFilesWithBudget(paths []string, budget int64) ([]chatMessage, bool) {
 	for _, c := range collected {
 		out = append(out, c.msg)
 	}
-	return coalesceSilentTurns(out), anyTruncated
+	return coalesceSilentTurns(out)
 }
 
 // readFileTail parses at most the final `budget` bytes of a session file. The
@@ -262,7 +433,11 @@ func readFileTail(path string, budget int64) ([]chatMessage, bool) {
 		truncated = true
 	}
 
-	scanner := bufio.NewScanner(f)
+	return readTranscript(f, truncated), truncated
+}
+
+func readTranscript(reader io.Reader, truncated bool) []chatMessage {
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLine)
 
 	var out []chatMessage
@@ -285,7 +460,7 @@ func readFileTail(path string, budget int64) ([]chatMessage, bool) {
 			out = append(out, msg)
 		}
 	}
-	return out, truncated
+	return out
 }
 
 func toChatMessage(entry transcriptEntry) (chatMessage, bool) {

@@ -122,3 +122,51 @@ esac
 		t.Fatal("remote IDs overwrote local IDs")
 	}
 }
+
+func TestRemoteTaskInputRoutesToRemoteAgentPane(t *testing.T) {
+	srv, database, local := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "remote input", Status: db.StatusProcessing})
+	for _, err := range []error{
+		database.SetTaskPlacement(task.ID, "test-remote-host", "test"),
+		database.SetTaskRemoteWorktree(task.ID, "/remote/worktree", "task/test"),
+		database.UpdateTaskDaemonSession(task.ID, "task-daemon-7"),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands")
+	stub := `#!/bin/sh
+printf '%s\n' "$*" >> "$TY_TEST_REMOTE_COMMANDS"
+case "$*" in
+  *list-panes*) echo %91 ;;
+  *send-keys*) : ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TY_TEST_REMOTE_COMMANDS", commandsPath)
+
+	body := `{"message":"continue remotely"}`
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", task.ID), strings.NewReader(body))
+	req.SetPathValue("id", fmt.Sprint(task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTaskInput(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("input: %d %s", w.Code, w.Body.String())
+	}
+	commands, _ := os.ReadFile(commandsPath)
+	got := string(commands)
+	if !strings.Contains(got, "test-remote-host") || !strings.Contains(got, "send-keys") || !strings.Contains(got, "%91") || !strings.Contains(got, "continue remotely") {
+		t.Fatalf("input was not sent to the placed host's agent pane: %s", got)
+	}
+	if len(local.snapshot()) != 0 {
+		t.Fatalf("remote input touched local tmux: %v", local.snapshot())
+	}
+}
