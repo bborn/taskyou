@@ -39,22 +39,6 @@ func (m *mockRunner) snapshot() [][]string {
 	return append([][]string(nil), m.calls...)
 }
 
-// waitForCalls polls until at least n commands have been recorded, so tests can
-// assert on work that completes asynchronously.
-func (m *mockRunner) waitForCalls(t *testing.T, n int) [][]string {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if got := m.snapshot(); len(got) >= n {
-			return got
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d tmux calls, got %v", n, m.snapshot())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func (m *mockRunner) Run(name string, args ...string) error {
 	m.mu.Lock()
 	m.calls = append(m.calls, append([]string{name}, args...))
