@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/textutil"
@@ -108,10 +109,30 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		IncludeClosed: q.Get("all") == "true",
 	}
 
+	// `filter` runs the shared query grammar (internal/taskfilter) server-side.
+	// It exists so a browser client never has to reimplement that grammar: a
+	// second parser is a second set of answers, and a saved view would then mean
+	// one thing on the board and another in the filter bar.
+	//
+	// The match happens in Go after the query, so a SQL LIMIT here would cap the
+	// rows BEFORE filtering. Widen the fetch and re-apply the limit below.
+	filterQuery := strings.TrimSpace(q.Get("filter"))
+	if filterQuery != "" {
+		opts.Limit = 0
+		opts.IncludeClosed = true
+	}
+
 	tasks, err := s.db.ListTasks(opts)
 	if err != nil {
 		jsonErr(w, "failed to list tasks", http.StatusInternalServerError)
 		return
+	}
+
+	if filterQuery != "" {
+		tasks = s.parseViewQuery(filterQuery).Filter(tasks)
+		if limit > 0 && len(tasks) > limit {
+			tasks = tasks[:limit]
+		}
 	}
 
 	result := make([]*taskJSON, len(tasks))

@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -85,22 +86,47 @@ func (s *Server) handleUpdateView(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+
 	// Renaming is a save under the new name; omitting the name edits in place.
-	name := strings.TrimSpace(req.Name)
+	name := db.NormalizeViewName(req.Name)
 	if name == "" {
 		name = view.Name
 	}
-	if name != view.Name {
-		if err := s.db.DeleteSavedView(view.Name); err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+	renaming := !strings.EqualFold(name, view.Name)
+
+	// Validate BEFORE touching anything. Deleting the old row first meant a
+	// rejected name (too long, blank) destroyed the original and returned a 500:
+	// the view was gone and the replacement never existed.
+	if err := db.ValidateViewName(name); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if renaming {
+		// SaveView upserts by name, so renaming onto another view would silently
+		// overwrite it. Refuse instead — losing a view to a rename is the same
+		// data loss in a different costume.
+		existing, err := s.db.GetSavedView(name)
+		if err != nil {
+			jsonErr(w, "failed to check the new name", http.StatusInternalServerError)
+			return
+		}
+		if existing != nil {
+			jsonErr(w, fmt.Sprintf("a view named %q already exists", existing.Name), http.StatusConflict)
 			return
 		}
 	}
 
+	// Write the replacement first; only drop the original once it exists.
 	updated, err := s.db.SaveView(name, req.Query)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if renaming {
+		if err := s.db.DeleteSavedView(view.Name); err != nil {
+			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	jsonOK(w, updated)
 }
