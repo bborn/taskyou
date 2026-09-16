@@ -11,12 +11,17 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-// How the list is arranged is three independent choices, not one baked-in
-// layout: what to group by, how to sort, and how much room each task gets.
+// How the list is arranged is two choices: what to group by, and how to sort.
 // They are a visible widget in the list header and a modal on `O`, rather than
 // hidden keybindings, because the arrangement is the thing you fiddle with —
 // "group by project today, by status tomorrow" — and a setting you cannot see
 // is a setting you forget exists.
+//
+// Row height is deliberately NOT one of them. "How should this look" is a
+// design decision, not a preference to hand the user: a row is one line, and
+// grows a second only when the task is actually doing something (see
+// renderCompactRow). Offering compact/relaxed would have been us declining to
+// decide.
 
 // ListGroupBy is the field the list breaks into sections on.
 type ListGroupBy string
@@ -39,33 +44,20 @@ const (
 	SortTitle   ListSort = "title"
 )
 
-// ListDensity is how many lines a task gets.
-type ListDensity string
-
-const (
-	// DensityCompact is one aligned line per task — the whole board on a screen.
-	DensityCompact ListDensity = "compact"
-	// DensityRelaxed is the kanban card at full width: id and badges, the title
-	// on its own line, and the live activity sub-line underneath.
-	DensityRelaxed ListDensity = "relaxed"
-)
-
 // ListOptions is the arrangement of the list view.
 type ListOptions struct {
 	GroupBy ListGroupBy
 	Sort    ListSort
-	Density ListDensity
 }
 
 // DefaultListOptions is what a board that has never been configured uses.
 func DefaultListOptions() ListOptions {
-	return ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency, Density: DensityCompact}
+	return ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency}
 }
 
 var (
 	groupByCycle = []ListGroupBy{GroupByStatus, GroupByProject, GroupByNone}
 	sortCycle    = []ListSort{SortUrgency, SortUpdated, SortCreated, SortTitle}
-	densityCycle = []ListDensity{DensityCompact, DensityRelaxed}
 )
 
 // Normalize replaces unknown values with the defaults, so a hand-edited setting
@@ -77,9 +69,6 @@ func (o ListOptions) Normalize() ListOptions {
 	}
 	if !containsSort(sortCycle, o.Sort) {
 		o.Sort = d.Sort
-	}
-	if !containsDensity(densityCycle, o.Density) {
-		o.Density = d.Density
 	}
 	return o
 }
@@ -102,20 +91,9 @@ func containsSort(all []ListSort, v ListSort) bool {
 	return false
 }
 
-func containsDensity(all []ListDensity, v ListDensity) bool {
-	for _, x := range all {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
 // Summary is the one-line widget shown under the list header.
 func (o ListOptions) Summary() string {
-	return "group: " + string(o.GroupBy) +
-		"   sort: " + string(o.Sort) +
-		"   density: " + string(o.Density)
+	return "group: " + string(o.GroupBy) + "   sort: " + string(o.Sort)
 }
 
 // LoadListOptions reads the arrangement from settings.
@@ -133,7 +111,6 @@ func LoadListOptions(get func(string) (string, error)) ListOptions {
 	return ListOptions{
 		GroupBy: ListGroupBy(read(config.SettingListGroupBy)),
 		Sort:    ListSort(read(config.SettingListSort)),
-		Density: ListDensity(read(config.SettingListDensity)),
 	}.Normalize()
 }
 
@@ -145,7 +122,6 @@ func (o ListOptions) Save(set func(string, string) error) {
 	}
 	_ = set(config.SettingListGroupBy, string(o.GroupBy))
 	_ = set(config.SettingListSort, string(o.Sort))
-	_ = set(config.SettingListDensity, string(o.Density))
 }
 
 // --- grouping and sorting --------------------------------------------------
@@ -309,9 +285,9 @@ func (m *ListOptionsModel) Update(msg tea.Msg) (*ListOptionsModel, tea.Cmd) {
 	case "enter":
 		m.done = true
 	case "up", "k":
-		m.row = (m.row + 2) % 3
+		m.row = (m.row + 1) % 2
 	case "down", "j", "tab":
-		m.row = (m.row + 1) % 3
+		m.row = (m.row + 1) % 2
 	case "left", "h":
 		m.cycle(-1)
 	case "right", "l", " ":
@@ -328,9 +304,6 @@ func (m *ListOptionsModel) cycle(delta int) {
 	case 1:
 		i := indexOfSort(m.opts.Sort)
 		m.opts.Sort = sortCycle[(i+delta+len(sortCycle))%len(sortCycle)]
-	case 2:
-		i := indexOfDensity(m.opts.Density)
-		m.opts.Density = densityCycle[(i+delta+len(densityCycle))%len(densityCycle)]
 	}
 }
 
@@ -345,15 +318,6 @@ func indexOfGroupBy(v ListGroupBy) int {
 
 func indexOfSort(v ListSort) int {
 	for i, x := range sortCycle {
-		if x == v {
-			return i
-		}
-	}
-	return 0
-}
-
-func indexOfDensity(v ListDensity) int {
-	for i, x := range densityCycle {
 		if x == v {
 			return i
 		}
@@ -388,7 +352,6 @@ func (m *ListOptionsModel) View() string {
 	}{
 		{"Group by", string(m.opts.GroupBy), groupByLabels()},
 		{"Sort", string(m.opts.Sort), sortLabels()},
-		{"Density", string(m.opts.Density), densityLabels()},
 	}
 
 	var body strings.Builder
@@ -441,14 +404,6 @@ func groupByLabels() []string {
 func sortLabels() []string {
 	out := make([]string, len(sortCycle))
 	for i, v := range sortCycle {
-		out[i] = string(v)
-	}
-	return out
-}
-
-func densityLabels() []string {
-	out := make([]string, len(densityCycle))
-	for i, v := range densityCycle {
 		out[i] = string(v)
 	}
 	return out

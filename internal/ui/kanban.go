@@ -87,7 +87,7 @@ type KanbanBoard struct {
 	listRow    int         // selected index into listTasks
 	listScroll int         // first visible index
 	listTitle  string      // active saved view / filter, shown in the header
-	listOpts   ListOptions // grouping, sort and density (see listopts.go)
+	listOpts   ListOptions // grouping and sort (see listopts.go)
 }
 
 // cardHeight is the number of vertical lines a task card occupies, including

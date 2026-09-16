@@ -45,7 +45,7 @@ func eqIDs(got []int64, want ...int64) bool {
 }
 
 func TestArrangeGroupByStatus(t *testing.T) {
-	opts := ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency, Density: DensityCompact}
+	opts := ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency}
 	// Sections in urgency order: blocked, In progress (processing + queued),
 	// backlog, done.
 	if got := arrangedIDs(opts, optsTasks()); !eqIDs(got, 2, 3, 1, 4) {
@@ -54,7 +54,7 @@ func TestArrangeGroupByStatus(t *testing.T) {
 }
 
 func TestArrangeGroupByProject(t *testing.T) {
-	opts := ListOptions{GroupBy: GroupByProject, Sort: SortUrgency, Density: DensityCompact}
+	opts := ListOptions{GroupBy: GroupByProject, Sort: SortUrgency}
 	// alpha, then beta, then the projectless task last.
 	if got := arrangedIDs(opts, optsTasks()); !eqIDs(got, 3, 1, 2, 4) {
 		t.Errorf("group by project = %v, want [3 1 2 4] (alpha, beta, no project)", got)
@@ -73,7 +73,7 @@ func TestArrangeSorts(t *testing.T) {
 		{SortUrgency, []int64{3, 2, 1, 4}},
 	}
 	for _, c := range cases {
-		opts := ListOptions{GroupBy: GroupByNone, Sort: c.sort, Density: DensityCompact}
+		opts := ListOptions{GroupBy: GroupByNone, Sort: c.sort}
 		if got := arrangedIDs(opts, optsTasks()); !eqIDs(got, c.want...) {
 			t.Errorf("sort %s = %v, want %v", c.sort, got, c.want)
 		}
@@ -87,7 +87,7 @@ func TestPinnedLeadsUnderEveryGrouping(t *testing.T) {
 	for _, group := range []ListGroupBy{GroupByStatus, GroupByProject, GroupByNone} {
 		tasks := optsTasks()
 		tasks[3].Pinned = true // the done task, which would otherwise sort last
-		opts := ListOptions{GroupBy: group, Sort: SortUrgency, Density: DensityCompact}
+		opts := ListOptions{GroupBy: group, Sort: SortUrgency}
 		if got := arrangedIDs(opts, tasks); got[0] != 4 {
 			t.Errorf("group by %s: pinned task should lead, got %v", group, got)
 		}
@@ -95,7 +95,7 @@ func TestPinnedLeadsUnderEveryGrouping(t *testing.T) {
 }
 
 func TestNormalizeRepairsUnknownValues(t *testing.T) {
-	got := ListOptions{GroupBy: "nonsense", Sort: "nope", Density: "huge"}.Normalize()
+	got := ListOptions{GroupBy: "nonsense", Sort: "nope"}.Normalize()
 	if got != DefaultListOptions() {
 		t.Errorf("Normalize() = %+v, want the defaults", got)
 	}
@@ -108,15 +108,15 @@ func TestListOptionsRoundTripThroughSettings(t *testing.T) {
 	}
 	defer database.Close()
 
-	want := ListOptions{GroupBy: GroupByProject, Sort: SortTitle, Density: DensityRelaxed}
+	want := ListOptions{GroupBy: GroupByProject, Sort: SortTitle}
 	want.Save(database.SetSetting)
 
 	if got := LoadListOptions(database.GetSetting); got != want {
 		t.Errorf("round trip = %+v, want %+v", got, want)
 	}
 	// And the keys are the documented ones, so a user can set them by hand.
-	if v, _ := database.GetSetting(config.SettingListDensity); v != "relaxed" {
-		t.Errorf("density stored as %q", v)
+	if v, _ := database.GetSetting(config.SettingListGroupBy); v != "project" {
+		t.Errorf("group by stored as %q", v)
 	}
 }
 
@@ -134,12 +134,11 @@ func TestListOptionsWidgetCycles(t *testing.T) {
 		t.Errorf("group by = %s, want status", m.Options().GroupBy)
 	}
 
-	// Down to Density, then right.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	// Down to Sort, then right.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
-	if m.Options().Density != DensityRelaxed {
-		t.Errorf("density = %s, want relaxed", m.Options().Density)
+	if m.Options().Sort != SortUpdated {
+		t.Errorf("sort = %s, want updated", m.Options().Sort)
 	}
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -151,7 +150,7 @@ func TestListOptionsWidgetCycles(t *testing.T) {
 // Esc must put back what was there, because the board is re-arranged live while
 // the user cycles — without this, backing out would silently keep the preview.
 func TestListOptionsWidgetCancelRestores(t *testing.T) {
-	start := ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency, Density: DensityCompact}
+	start := ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency}
 	m := NewListOptionsModel(start, 100, 30)
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
@@ -170,7 +169,7 @@ func TestListOptionsWidgetCancelRestores(t *testing.T) {
 
 func TestListOptionsWidgetShowsEveryChoice(t *testing.T) {
 	out := NewListOptionsModel(DefaultListOptions(), 100, 30).View()
-	for _, want := range []string{"Group by", "Sort", "Density", "status", "project", "none", "urgency", "compact", "relaxed"} {
+	for _, want := range []string{"Group by", "Sort", "status", "project", "none", "urgency", "updated"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("widget does not offer %q:\n%s", want, out)
 		}
@@ -187,36 +186,45 @@ func TestSetListOptionsKeepsSelection(t *testing.T) {
 	board.MoveDown()
 	selected := board.SelectedTask().ID
 
-	board.SetListOptions(ListOptions{GroupBy: GroupByProject, Sort: SortTitle, Density: DensityRelaxed})
+	board.SetListOptions(ListOptions{GroupBy: GroupByProject, Sort: SortTitle})
 
 	if got := board.SelectedTask(); got == nil || got.ID != selected {
 		t.Errorf("rearranging lost the selection: %v, want #%d", got, selected)
 	}
-	if board.ListOptions().Density != DensityRelaxed {
+	if board.ListOptions().GroupBy != GroupByProject {
 		t.Error("options not applied")
 	}
 }
 
-func TestRelaxedDensityRendersThreeLinesPerTask(t *testing.T) {
+// Row height is decided, not configured: a running or blocked task earns a
+// second line because it has something live to say; nothing else does.
+func TestOnlyLiveTasksGrowAnActivityLine(t *testing.T) {
 	board := NewKanbanBoard(120, 40)
 	board.SetListMode(true)
 	board.SetTasks(optsTasks())
-	board.SetListOptions(ListOptions{GroupBy: GroupByNone, Sort: SortUrgency, Density: DensityRelaxed})
 
-	out := board.View()
-	// Every task shows its id and its title on separate lines.
-	for _, task := range optsTasks() {
-		if !strings.Contains(out, task.Title) {
-			t.Errorf("relaxed row missing title %q", task.Title)
+	// Status alone does not earn a line: without a recorded stand or activity
+	// the sub-line is just the age, which is already on the right of row one.
+	for _, status := range []string{db.StatusProcessing, db.StatusBlocked, db.StatusBacklog, db.StatusQueued, db.StatusDone} {
+		if board.rowHasActivity(&db.Task{Status: status}) {
+			t.Errorf("%s with nothing to report should stay one line", status)
 		}
 	}
-	if board.listRowLines() != 4 {
-		t.Errorf("relaxed row spans %d lines, want 4", board.listRowLines())
+	// A blocked task with a stand does earn one.
+	if !board.rowHasActivity(&db.Task{Status: db.StatusBlocked, Summary: "needs a pricing decision"}) {
+		t.Error("a blocked task with a stand should grow an activity line")
+	}
+	// And so does a running task with live activity.
+	board.SetLatestActivity(map[int64]*db.TaskLog{7: {Content: "Editing internal/ui/list.go"}})
+	if !board.rowHasActivity(&db.Task{ID: 7, Status: db.StatusProcessing}) {
+		t.Error("a running task with activity should grow an activity line")
 	}
 
-	board.SetListOptions(ListOptions{GroupBy: GroupByNone, Sort: SortUrgency, Density: DensityCompact})
-	if board.listRowLines() != 1 {
-		t.Errorf("compact row spans %d lines, want 1", board.listRowLines())
+	// The live line is the card's, so both faces of the board agree.
+	blocked := &db.Task{ID: 99, Title: "Waiting", Status: db.StatusBlocked, Summary: "needs a pricing decision"}
+	board.SetTasks([]*db.Task{blocked})
+	if out := board.View(); !strings.Contains(out, "pricing decision") {
+		t.Errorf("blocked row should carry its stand:\n%s", out)
 	}
 }
 
@@ -226,7 +234,7 @@ func TestListShowsArrangementWidget(t *testing.T) {
 	board.SetTasks(optsTasks())
 
 	out := board.View()
-	for _, want := range []string{"group:", "sort:", "density:", "O: arrange"} {
+	for _, want := range []string{"group:", "sort:", "O: arrange"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list header does not advertise %q:\n%s", want, out)
 		}
@@ -240,12 +248,12 @@ func TestProjectTagDroppedWhenGroupingByProject(t *testing.T) {
 	board.SetListMode(true)
 	board.SetTasks(optsTasks())
 
-	board.SetListOptions(ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency, Density: DensityCompact})
+	board.SetListOptions(ListOptions{GroupBy: GroupByStatus, Sort: SortUrgency})
 	if !strings.Contains(board.View(), "[alpha]") {
 		t.Error("grouping by status should keep the project tag on rows")
 	}
 
-	board.SetListOptions(ListOptions{GroupBy: GroupByProject, Sort: SortUrgency, Density: DensityCompact})
+	board.SetListOptions(ListOptions{GroupBy: GroupByProject, Sort: SortUrgency})
 	out := board.View()
 	if strings.Contains(out, "[alpha]") {
 		t.Errorf("grouping by project should drop the repeated row tag:\n%s", out)
