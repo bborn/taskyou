@@ -34,6 +34,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -42,8 +45,8 @@ jobs:
         timeout-minutes: 10
         run: |
           mkdir -p "$QA_ARTIFACTS"
-          npm ci --prefix desktop --no-audit --no-fund
-          npm run build --prefix desktop
+          pnpm --dir desktop install --frozen-lockfile
+          pnpm --dir desktop build
           cp -R desktop/dist internal/web/ui/dist
           go build -tags ui -o "$RUNNER_TEMP/ty-ios-qa" ./cmd/task
       - name: Install pinned automation tools on runner only
