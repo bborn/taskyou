@@ -41,10 +41,14 @@ func annotationBody(screenshot bool) string {
 	return string(out)
 }
 
-func setupAnnotationTask(t *testing.T, database *db.DB, withPane bool) (*db.Task, string) {
+// setupAnnotationTask makes a task whose agent is waiting on the user — the
+// state a browser annotation is normally sent in. withPane tags a pane as that
+// task's agent on the fake tmux, which is the only thing the nudge will accept
+// as a delivery target.
+func setupAnnotationTask(t *testing.T, database *db.DB, runner *mockRunner, withPane bool) (*db.Task, string) {
 	t.Helper()
 	wt := t.TempDir()
-	task := &db.Task{Title: "Anno task", Status: db.StatusProcessing, Project: "personal"}
+	task := &db.Task{Title: "Anno task", Status: db.StatusBlocked, Project: "personal"}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -54,8 +58,33 @@ func setupAnnotationTask(t *testing.T, database *db.DB, withPane bool) (*db.Task
 	}
 	if withPane {
 		database.UpdateTaskPaneIDs(task.ID, "%9", "")
+		tagPaneInFakeTmux(runner, task.ID, "%9")
 	}
 	return task, wt
+}
+
+// tagPaneInFakeTmux adds a pane to the fake `tmux list-panes -a` answer.
+func tagPaneInFakeTmux(runner *mockRunner, taskID int64, pane string) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.outputByCmd == nil {
+		runner.outputByCmd = map[string][]byte{}
+	}
+	line := fmt.Sprintf("%s %d agent\n", pane, taskID)
+	runner.outputByCmd["list-panes"] = append(runner.outputByCmd["list-panes"], line...)
+}
+
+// prompts returns the recorded calls with the pane lookups dropped, so a test
+// can talk about deliveries rather than about tmux bookkeeping.
+func prompts(calls [][]string) [][]string {
+	var out [][]string
+	for _, c := range calls {
+		if len(c) > 1 && c[1] == "list-panes" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // setupAnnotationServer is setupServer with a coalesce window short enough to
@@ -78,7 +107,7 @@ func postAnnotations(t *testing.T, srv *Server, id int64, body string) *httptest
 
 func TestHandleAnnotations_WritesBundleAndNudges(t *testing.T) {
 	srv, database, runner := setupAnnotationServer(t)
-	task, wt := setupAnnotationTask(t, database, true)
+	task, wt := setupAnnotationTask(t, database, runner, true)
 
 	w := postAnnotations(t, srv, task.ID, annotationBody(true))
 	if w.Code != http.StatusOK {
@@ -121,30 +150,105 @@ func TestHandleAnnotations_WritesBundleAndNudges(t *testing.T) {
 		t.Errorf("gitignore = %q err=%v, want *", gi, err)
 	}
 
-	// Literal nudge then Enter, once the coalesce window closes.
-	calls := runner.waitForCalls(t, 2)
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 tmux calls, got %d: %v", len(calls), calls)
+	// One pasted prompt then Enter, into the tagged pane, once the coalesce
+	// window closes.
+	sent := runner.waitForPrompts(t, 3)
+	if len(sent) != 3 {
+		t.Fatalf("expected set-buffer, paste-buffer, Enter; got %v", sent)
 	}
-	first := calls[0]
-	if first[0] != "tmux" || first[1] != "send-keys" || first[2] != "-t" || first[3] != "%9" || first[4] != "-l" {
-		t.Errorf("first call = %v, want literal send-keys to %%9", first)
+	text := sent[0]
+	if text[1] != "set-buffer" {
+		t.Errorf("first call = %v, want set-buffer", text)
 	}
-	if !strings.Contains(first[5], resp.Path) {
-		t.Errorf("nudge %q missing bundle path %q", first[5], resp.Path)
+	nudge := text[len(text)-1]
+	if !strings.Contains(nudge, resp.Path) {
+		t.Errorf("nudge %q missing bundle path %q", nudge, resp.Path)
 	}
-	if strings.ContainsAny(first[5], "\n") {
+	if strings.ContainsAny(nudge, "\n") {
 		t.Error("nudge must be single-line")
 	}
-	second := calls[1]
-	if fmt.Sprint(second) != fmt.Sprint([]string{"tmux", "send-keys", "-t", "%9", "Enter"}) {
-		t.Errorf("second call = %v, want bare Enter", second)
+	if sent[1][1] != "paste-buffer" || sent[1][len(sent[1])-1] != "%9" {
+		t.Errorf("paste call = %v, want a paste into the tagged pane %%9", sent[1])
+	}
+	if fmt.Sprint(sent[2]) != fmt.Sprint([]string{"tmux", "send-keys", "-t", "%9", "Enter"}) {
+		t.Errorf("last call = %v, want bare Enter", sent[2])
+	}
+}
+
+// The pane id on the row is not evidence of anything: tmux reuses ids. Only a
+// tagged pane is a delivery target.
+func TestAnnotationNudge_IgnoresAStaleStoredPane(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, _ := setupAnnotationTask(t, database, runner, false)
+	// The row still names %9 — which now belongs to another task's agent.
+	database.UpdateTaskPaneIDs(task.ID, "%9", "")
+	tagPaneInFakeTmux(runner, task.ID+1000, "%9")
+	tagPaneInFakeTmux(runner, task.ID, "%77")
+
+	postAnnotations(t, srv, task.ID, annotationBody(false))
+
+	sent := runner.waitForPrompts(t, 3)
+	for _, call := range sent {
+		for i, arg := range call {
+			if arg == "-t" && i+1 < len(call) && call[i+1] != "%77" {
+				t.Fatalf("nudge aimed at %q, want the tagged pane %%77: %v", call[i+1], call)
+			}
+		}
+	}
+}
+
+// A working agent is not typed over. The bundle is on disk, so the nudge waits
+// for the agent to stop rather than interrupting it or giving up.
+func TestAnnotationNudge_WaitsForABusyAgent(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	srv.nudgeWindow, srv.nudgeRetry = 5*time.Second, 10*time.Millisecond
+	task, _ := setupAnnotationTask(t, database, runner, true)
+	database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorSystem, "agent is mid-turn", db.Evidence{Observed: "test fixture"})
+
+	postAnnotations(t, srv, task.ID, annotationBody(false))
+
+	// Nothing is delivered while it works.
+	time.Sleep(200 * time.Millisecond)
+	if sent := prompts(runner.snapshot()); len(sent) != 0 {
+		t.Fatalf("nudge typed into a working agent: %v", sent)
+	}
+
+	// It stops; the nudge goes out.
+	database.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorSystem, "agent finished its turn", db.Evidence{Observed: "test fixture"})
+	sent := runner.waitForPrompts(t, 3)
+	if len(sent) < 3 || sent[0][1] != "set-buffer" {
+		t.Fatalf("nudge not delivered once the agent stopped: %v", sent)
+	}
+}
+
+// An agent that never stops does not hold the nudge forever, and the task log
+// says where the annotations went.
+func TestAnnotationNudge_GivesUpOnAnAgentThatNeverStops(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	srv.nudgeWindow, srv.nudgeRetry = 30*time.Millisecond, 5*time.Millisecond
+	task, _ := setupAnnotationTask(t, database, runner, true)
+	database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorSystem, "agent is mid-turn", db.Evidence{Observed: "test fixture"})
+
+	postAnnotations(t, srv, task.ID, annotationBody(false))
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		logs, _ := database.GetTaskLogs(task.ID, 20)
+		for _, l := range logs {
+			if strings.Contains(l.Content, "never stopped long enough") {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no log line explaining the undelivered nudge; logs = %v", logs)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func TestHandleAnnotations_NoPane_StillWrites(t *testing.T) {
 	srv, database, runner := setupAnnotationServer(t)
-	task, wt := setupAnnotationTask(t, database, false)
+	task, wt := setupAnnotationTask(t, database, runner, false)
 
 	w := postAnnotations(t, srv, task.ID, annotationBody(false))
 	if w.Code != http.StatusOK {
@@ -161,10 +265,10 @@ func TestHandleAnnotations_NoPane_StillWrites(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wt, resp.Path)); err != nil {
 		t.Errorf("bundle not written: %v", err)
 	}
-	// No pane, so the flush has nothing to nudge.
+	// No tagged pane, so the flush asks tmux and then types nothing.
 	time.Sleep(200 * time.Millisecond)
-	if got := runner.snapshot(); len(got) != 0 {
-		t.Errorf("expected no tmux calls, got %v", got)
+	if got := prompts(runner.snapshot()); len(got) != 0 {
+		t.Errorf("expected nothing typed, got %v", got)
 	}
 	md, _ := os.ReadFile(filepath.Join(wt, resp.Path))
 	if strings.Contains(string(md), "screenshot.png") {
@@ -210,8 +314,8 @@ func TestHandleAnnotations_MissingRootDir(t *testing.T) {
 }
 
 func TestHandleAnnotations_EmptyAnnotations(t *testing.T) {
-	srv, database, _ := setupServer(t)
-	task, _ := setupAnnotationTask(t, database, true)
+	srv, database, runner := setupServer(t)
+	task, _ := setupAnnotationTask(t, database, runner, true)
 
 	w := postAnnotations(t, srv, task.ID, `{"url":"http://x","annotations":[]}`)
 	if w.Code != http.StatusBadRequest {
@@ -223,7 +327,7 @@ func TestHandleAnnotations_EmptyAnnotations(t *testing.T) {
 // one bundle, one prompt for the executor.
 func TestHandleAnnotations_CoalescesRapidSubmissions(t *testing.T) {
 	srv, database, runner := setupAnnotationServer(t)
-	task, wt := setupAnnotationTask(t, database, true)
+	task, wt := setupAnnotationTask(t, database, runner, true)
 
 	first := postAnnotations(t, srv, task.ID, annotationBody(true))
 	second := postAnnotations(t, srv, task.ID, annotationBody(true))
@@ -260,13 +364,13 @@ func TestHandleAnnotations_CoalescesRapidSubmissions(t *testing.T) {
 	}
 
 	// Exactly one nudge, not two.
-	calls := runner.waitForCalls(t, 2)
+	calls := runner.waitForPrompts(t, 3)
 	time.Sleep(150 * time.Millisecond)
-	if got := runner.snapshot(); len(got) != 2 {
-		t.Errorf("expected 1 nudge (2 tmux calls), got %d: %v", len(got), got)
+	if got := prompts(runner.snapshot()); len(got) != 3 {
+		t.Errorf("expected 1 nudge (3 tmux calls), got %d: %v", len(got), got)
 	}
-	if !strings.Contains(calls[0][5], "2 submissions") {
-		t.Errorf("nudge should say how many submissions: %q", calls[0][5])
+	if nudge := calls[0][len(calls[0])-1]; !strings.Contains(nudge, "2 submissions") {
+		t.Errorf("nudge should say how many submissions: %q", nudge)
 	}
 }
 
@@ -274,34 +378,77 @@ func TestHandleAnnotations_CoalescesRapidSubmissions(t *testing.T) {
 // separate nudges.
 func TestHandleAnnotations_SeparateBundlesWhenSpaced(t *testing.T) {
 	srv, database, runner := setupAnnotationServer(t)
-	task, _ := setupAnnotationTask(t, database, true)
+	task, _ := setupAnnotationTask(t, database, runner, true)
 
 	postAnnotations(t, srv, task.ID, annotationBody(false))
-	runner.waitForCalls(t, 2)
+	runner.waitForPrompts(t, 3)
 	postAnnotations(t, srv, task.ID, annotationBody(false))
-	calls := runner.waitForCalls(t, 4)
+	calls := runner.waitForPrompts(t, 6)
 
-	if calls[0][5] == calls[2][5] {
-		t.Errorf("both nudges point at the same bundle: %q", calls[0][5])
+	first, second := calls[0][len(calls[0])-1], calls[3][len(calls[3])-1]
+	if first == second {
+		t.Errorf("both nudges point at the same bundle: %q", first)
 	}
 }
 
-// The literal text and its Enter must stay adjacent: interleaved nudges would
-// concatenate two prompts into one garbled line.
-func TestAnnotationNudges_DoNotInterleave(t *testing.T) {
+// A prompt and its Enter must stay together. Two nudges racing for one agent
+// used to interleave into a single garbled line — the text of the second landing
+// between the first's text and its Enter.
+func TestAnnotationNudges_ToOneAgentDoNotInterleave(t *testing.T) {
 	srv, database, runner := setupAnnotationServer(t)
-	// Without a per-nudge cost the two calls almost never get preempted, and
-	// the test would pass even with the serialization removed.
+	// Without a per-call cost the calls are never preempted, and this would pass
+	// even with the serialization removed.
+	runner.mu.Lock()
+	runner.delay = 5 * time.Millisecond
+	runner.mu.Unlock()
+
+	task, _ := setupAnnotationTask(t, database, runner, true)
+
+	const nudges = 4
+	var wg sync.WaitGroup
+	for i := 0; i < nudges; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			srv.nudgeAgent(task.ID, fmt.Sprintf("[ty-chrome] bundle %d is ready to read", i), "path")
+		}(i)
+	}
+	wg.Wait()
+
+	calls := runner.waitForPrompts(t, nudges*3)
+	if len(calls) != nudges*3 {
+		t.Fatalf("expected %d delivery calls, got %d: %v", nudges*3, len(calls), calls)
+	}
+	for i := 0; i < len(calls); i += 3 {
+		stage, paste, enter := calls[i], calls[i+1], calls[i+2]
+		if stage[1] != "set-buffer" || paste[1] != "paste-buffer" || enter[1] != "send-keys" {
+			t.Fatalf("nudges interleaved at call %d: %v", i, calls)
+		}
+		if argAfterFlag(stage, "-b") != argAfterFlag(paste, "-b") {
+			t.Fatalf("a nudge pasted another nudge's text: %v then %v", stage, paste)
+		}
+		if paste[len(paste)-1] != enter[3] {
+			t.Errorf("paste/Enter pair split across panes: %v then %v", paste, enter)
+		}
+	}
+}
+
+// Nudges for different tasks have no reason to wait for each other; each still
+// arrives whole, in its own pane.
+func TestAnnotationNudges_ToDifferentAgentsEachArriveWhole(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
 	runner.mu.Lock()
 	runner.delay = 5 * time.Millisecond
 	runner.mu.Unlock()
 
 	const tasks = 6
 	ids := make([]int64, 0, tasks)
+	panes := map[int64]string{}
 	for i := 0; i < tasks; i++ {
-		task, _ := setupAnnotationTask(t, database, false)
-		// Distinct pane per task so interleaving is visible in the transcript.
-		database.UpdateTaskPaneIDs(task.ID, fmt.Sprintf("%%%d", 100+i), "")
+		task, _ := setupAnnotationTask(t, database, runner, false)
+		pane := fmt.Sprintf("%%%d", 100+i)
+		tagPaneInFakeTmux(runner, task.ID, pane)
+		panes[task.ID] = pane
 		ids = append(ids, task.ID)
 	}
 
@@ -315,20 +462,31 @@ func TestAnnotationNudges_DoNotInterleave(t *testing.T) {
 	}
 	wg.Wait()
 
-	calls := runner.waitForCalls(t, tasks*2)
-	if len(calls) != tasks*2 {
-		t.Fatalf("expected %d tmux calls, got %d", tasks*2, len(calls))
-	}
-	for i := 0; i < len(calls); i += 2 {
-		text, enter := calls[i], calls[i+1]
-		if text[4] != "-l" {
-			t.Fatalf("call %d is not a literal nudge: %v", i, text)
-		}
-		if enter[len(enter)-1] != "Enter" {
-			t.Errorf("nudge at %d was not immediately followed by Enter: %v", i, enter)
-		}
-		if text[3] != enter[3] {
-			t.Errorf("nudge/Enter pair split across panes: %s then %s", text[3], enter[3])
+	calls := runner.waitForPrompts(t, tasks*3)
+
+	// Per pane, the transcript must read paste, Enter, and nothing else.
+	byPane := map[string][][]string{}
+	for _, c := range calls {
+		switch c[1] {
+		case "paste-buffer":
+			byPane[c[len(c)-1]] = append(byPane[c[len(c)-1]], c)
+		case "send-keys":
+			byPane[c[3]] = append(byPane[c[3]], c)
 		}
 	}
+	for _, pane := range panes {
+		got := byPane[pane]
+		if len(got) != 2 || got[0][1] != "paste-buffer" || got[1][len(got[1])-1] != "Enter" {
+			t.Errorf("pane %s received %v, want one paste followed by Enter", pane, got)
+		}
+	}
+}
+
+func argAfterFlag(call []string, flag string) string {
+	for i, a := range call {
+		if a == flag && i+1 < len(call) {
+			return call[i+1]
+		}
+	}
+	return ""
 }

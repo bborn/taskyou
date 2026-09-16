@@ -38,6 +38,8 @@ class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** Stable machine-readable code from the API, e.g. "agent_busy". */
+    public code?: string,
   ) {
     super(message);
   }
@@ -51,13 +53,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
   if (!res.ok) {
     let message = `${method} ${path} failed (${res.status})`;
+    let code: string | undefined;
     try {
       const data = await res.json();
       if (data?.error) message = data.error;
+      if (typeof data?.code === "string") code = data.code;
     } catch {
       // non-JSON error body
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, code);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -130,8 +134,11 @@ export const api = {
   retryTask: (id: number, feedback: string) =>
     request<{ ok: boolean }>("POST", `/api/tasks/${id}/retry`, { feedback }),
   pinTask: (id: number) => request<{ pinned: boolean }>("POST", `/api/tasks/${id}/pin`, { toggle: true }),
-  sendInput: (id: number, message: string) =>
-    request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true }),
+  // force types the message even while the agent is working. Without it the API
+  // refuses with code "agent_busy" rather than dropping text into the middle of
+  // the agent's own output.
+  sendInput: (id: number, message: string, force = false) =>
+    request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true, force }),
   taskLogs: (id: number, limit = 200) => request<LogLine[]>("GET", `/api/tasks/${id}/logs?limit=${limit}`),
   // 60 turns is a long scroll on a phone and ~50KB instead of ~175KB; older
   // history is a deliberate request, not something to ship on every poll.

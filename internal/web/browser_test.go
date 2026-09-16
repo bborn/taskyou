@@ -22,8 +22,8 @@ func browserReq(t *testing.T, srv *Server, method, path string, id int64, body s
 }
 
 func TestBrowserExec_NoSession(t *testing.T) {
-	srv, database, _ := setupServer(t)
-	task, _ := setupAnnotationTask(t, database, false)
+	srv, database, runner := setupServer(t)
+	task, _ := setupAnnotationTask(t, database, runner, false)
 
 	w := browserReq(t, srv, "POST", "/api/tasks/1/browser", task.ID, `{"action":"screenshot"}`, srv.handleBrowserExec)
 	if w.Code != http.StatusServiceUnavailable {
@@ -32,8 +32,8 @@ func TestBrowserExec_NoSession(t *testing.T) {
 }
 
 func TestBrowserRelay_RoundTrip(t *testing.T) {
-	srv, database, _ := setupServer(t)
-	task, wt := setupAnnotationTask(t, database, false)
+	srv, database, runner := setupServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, false)
 
 	// Extension connects: first poll (no command yet) writes HOWTO and marks session
 	pollDone := make(chan *httptest.ResponseRecorder, 1)
@@ -98,8 +98,8 @@ func TestBrowserRelay_RoundTrip(t *testing.T) {
 }
 
 func TestBrowserRelay_ScreenshotWritesFile(t *testing.T) {
-	srv, database, _ := setupServer(t)
-	task, wt := setupAnnotationTask(t, database, false)
+	srv, database, runner := setupServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, false)
 
 	pollDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -150,8 +150,8 @@ func TestBrowserRelay_ScreenshotWritesFile(t *testing.T) {
 }
 
 func TestBrowserHowto_DocumentsTabGroupActions(t *testing.T) {
-	srv, database, _ := setupServer(t)
-	task, wt := setupAnnotationTask(t, database, false)
+	srv, database, runner := setupServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, false)
 
 	srv.ensureBrowserHowto(task)
 
@@ -178,7 +178,7 @@ func TestBrowserHowto_DocumentsTabGroupActions(t *testing.T) {
 
 func TestAnnotationNudge_MentionsBrowserWhenConnected(t *testing.T) {
 	srv, database, runner := setupAnnotationServer(t)
-	task, _ := setupAnnotationTask(t, database, true)
+	task, _ := setupAnnotationTask(t, database, runner, true)
 
 	srv.relay.touch(task.ID) // simulate connected extension
 
@@ -186,7 +186,8 @@ func TestAnnotationNudge_MentionsBrowserWhenConnected(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	nudge := runner.waitForCalls(t, 2)[0][5]
+	staged := runner.waitForPrompts(t, 1)[0]
+	nudge := staged[len(staged)-1]
 	if !strings.Contains(nudge, "HOWTO.md") {
 		t.Errorf("nudge should mention browser HOWTO when connected: %q", nudge)
 	}

@@ -3,12 +3,15 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/textutil"
+
+	"github.com/bborn/workflow/internal/agentsend"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
@@ -34,6 +37,14 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// jsonErrCode is jsonErr with a stable machine-readable code beside the prose,
+// for failures a client is expected to branch on rather than just display.
+func jsonErrCode(w http.ResponseWriter, msg, errCode string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": errCode})
 }
 
 func pathID(r *http.Request) (int64, bool) {
@@ -552,8 +563,28 @@ type inputRequest struct {
 	Message string `json:"message"`
 	Enter   bool   `json:"enter"`
 	Key     string `json:"key"`
+	// Force sends the message even while the agent is working. The GUI sets it
+	// only after telling the user the agent is busy and being told to go ahead.
+	Force bool `json:"force"`
+	// NoSubmit types the text without pressing Enter, leaving it in the agent's
+	// input box (the API twin of `ty input --no-submit`).
+	NoSubmit bool `json:"no_submit"`
+	// Wait holds the response until the agent has answered THIS message, rather
+	// than returning as soon as the text is delivered.
+	Wait      bool `json:"wait"`
+	TimeoutMs int  `json:"timeout_ms"`
 }
 
+// defaultReplyWait bounds a wait=true input request. Long enough for an agent to
+// think, short enough that a browser request does not hang on a dead session.
+const defaultReplyWait = 3 * time.Minute
+
+// handleTaskInput types into a task's live agent.
+//
+// The pane is resolved by the task's tmux tag, never from task.ClaudePaneID:
+// tmux reuses pane ids, and a stale one names whatever pane took that id next —
+// which is how one task's input once landed in another task's session. A task
+// with no tagged pane is refused.
 func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 	task, ok := s.requireTask(w, r)
 	if !ok {
@@ -608,6 +639,7 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
 		return
 	}
+	sender := s.agentSender()
 
 	paneID := task.ClaudePaneID
 	if paneID == "" {
@@ -616,25 +648,63 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Key != "" {
-		if err := s.runner.Run("tmux", "send-keys", "-t", paneID, req.Key); err != nil {
-			jsonErr(w, "failed to send key", http.StatusInternalServerError)
+		if err := sender.SendKeys(task.ID, req.Key); err != nil {
+			writeSendErr(w, err, "failed to send key")
 			return
 		}
 	}
 
-	if req.Message != "" {
-		if err := s.runner.Run("tmux", "send-keys", "-t", paneID, req.Message, "Enter"); err != nil {
-			jsonErr(w, "failed to send input", http.StatusInternalServerError)
+	switch {
+	case req.Message != "":
+		prompt := agentsend.Prompt{
+			TaskID: task.ID,
+			Text:   req.Message,
+			Force:  req.Force,
+			Submit: !req.NoSubmit,
+		}
+		if req.Wait {
+			timeout := defaultReplyWait
+			if req.TimeoutMs > 0 {
+				timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+			}
+			turn, err := sender.SendAndWait(r.Context(), prompt, timeout)
+			if err != nil {
+				writeSendErr(w, err, "failed to send input")
+				return
+			}
+			jsonOK(w, map[string]interface{}{"ok": true, "turn": turn.Started})
 			return
 		}
-	} else if req.Enter {
-		if err := s.runner.Run("tmux", "send-keys", "-t", paneID, "Enter"); err != nil {
-			jsonErr(w, "failed to send enter", http.StatusInternalServerError)
+		if err := sender.Send(prompt); err != nil {
+			writeSendErr(w, err, "failed to send input")
+			return
+		}
+	case req.Enter:
+		if err := sender.SendKeys(task.ID, "Enter"); err != nil {
+			writeSendErr(w, err, "failed to send enter")
 			return
 		}
 	}
 
 	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// writeSendErr turns a delivery failure into a response the GUI can act on. The
+// machine-readable code matters: "agent_busy" is the one the composer offers to
+// override, and it must not be told apart from a dead session by string match.
+func writeSendErr(w http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, agentsend.ErrBusy):
+		jsonErrCode(w, err.Error()+" — wait for it to finish, or send again to interrupt",
+			"agent_busy", http.StatusConflict)
+	case errors.Is(err, agentsend.ErrNoPane):
+		jsonErrCode(w, err.Error()+" (its session is not running)", "no_agent_pane", http.StatusConflict)
+	case errors.Is(err, db.ErrReplyTimeout):
+		jsonErrCode(w, "the message was delivered, but the agent did not answer in time",
+			"reply_timeout", http.StatusGatewayTimeout)
+	default:
+		jsonErr(w, fallback+": "+err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // --- Task logs ---
@@ -645,14 +715,20 @@ func (s *Server) handleTaskOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paneID := task.ClaudePaneID
-	if paneID == "" {
-		jsonErr(w, "task has no executor pane", http.StatusBadRequest)
+	if s.runner == nil {
+		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
 		return
 	}
 
-	if s.runner == nil {
-		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
+	// Read from the pane tmux says is this task's agent. The stored id is the
+	// fallback for windows made before panes were tagged; on its own it can name
+	// another task's pane and show its output as this task's.
+	paneID, err := s.agentSender().AgentPane(task.ID)
+	if err != nil {
+		paneID = task.ClaudePaneID
+	}
+	if paneID == "" {
+		jsonErr(w, "task has no executor pane", http.StatusBadRequest)
 		return
 	}
 

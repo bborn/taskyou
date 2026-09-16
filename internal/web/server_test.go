@@ -81,6 +81,22 @@ func (m *mockRunner) Output(name string, args ...string) ([]byte, error) {
 	return m.outputVal, nil
 }
 
+// waitForPrompts polls until at least n delivery calls (everything but the pane
+// lookups) have been recorded, and returns them.
+func (m *mockRunner) waitForPrompts(t *testing.T, n int) [][]string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if got := prompts(m.snapshot()); len(got) >= n {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d delivery calls, got %v", n, prompts(m.snapshot()))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func setupTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	dir := t.TempDir()
@@ -477,47 +493,199 @@ func TestHandleSetStatus_Invalid(t *testing.T) {
 	}
 }
 
-func TestHandleTaskInput_SendMessage(t *testing.T) {
+// The pane is resolved by tmux tag. A stale pane id on the row — tmux having
+// handed that id to another task's pane — must not decide where the message
+// goes.
+func TestHandleTaskInput_SendsToTheTaggedPaneNotTheStoredOne(t *testing.T) {
 	srv, database, runner := setupServer(t)
 
-	task := &db.Task{Title: "Input task", Status: db.StatusProcessing, Project: "personal"}
+	task := &db.Task{Title: "Input task", Status: db.StatusBlocked, Project: "personal"}
 	database.CreateTask(task)
-	database.UpdateTaskPaneIDs(task.ID, "%42", "")
+	database.UpdateTaskPaneIDs(task.ID, "%42", "") // stale
+	tagPaneInFakeTmux(runner, task.ID+1000, "%42") // %42 is someone else's now
+	tagPaneInFakeTmux(runner, task.ID, "%7")
 
-	body := `{"message":"hello"}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", task.ID), strings.NewReader(body))
-	req.SetPathValue("id", fmt.Sprintf("%d", task.ID))
-	w := httptest.NewRecorder()
-	srv.handleTaskInput(w, req)
-
+	w := postInput(t, srv, task.ID, `{"message":"hello"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	if len(runner.calls) != 1 {
-		t.Fatalf("expected 1 call, got %d", len(runner.calls))
+	calls := runner.waitForPrompts(t, 3)
+	if len(calls) != 3 {
+		t.Fatalf("want set-buffer, paste-buffer, Enter; got %v", calls)
 	}
-	expected := []string{"tmux", "send-keys", "-t", "%42", "hello", "Enter"}
-	if fmt.Sprint(runner.calls[0]) != fmt.Sprint(expected) {
-		t.Errorf("call = %v, want %v", runner.calls[0], expected)
+	if calls[0][1] != "set-buffer" || calls[0][len(calls[0])-1] != "hello" {
+		t.Errorf("text not staged as one buffer: %v", calls[0])
+	}
+	for _, call := range calls {
+		for i, arg := range call {
+			if arg == "-t" && i+1 < len(call) && call[i+1] != "%7" {
+				t.Fatalf("input aimed at %q, want the tagged pane %%7: %v", call[i+1], call)
+			}
+		}
 	}
 }
 
-func TestHandleTaskInput_NoPaneID(t *testing.T) {
-	srv, database, _ := setupServer(t)
+// Multi-line input is one paste, not a line per send-keys — which would submit
+// the first line and leave the rest typed at a prompt that had already moved on.
+func TestHandleTaskInput_KeepsMultiLineTextWhole(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	task := &db.Task{Title: "Multi-line", Status: db.StatusBlocked, Project: "personal"}
+	database.CreateTask(task)
+	tagPaneInFakeTmux(runner, task.ID, "%7")
+
+	body, _ := json.Marshal(map[string]string{"message": "first line\nsecond line"})
+	if w := postInput(t, srv, task.ID, string(body)); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	calls := runner.waitForPrompts(t, 3)
+	if calls[0][len(calls[0])-1] != "first line\nsecond line" {
+		t.Errorf("staged text = %q, want both lines in one buffer", calls[0][len(calls[0])-1])
+	}
+	if !hasFlag(calls[1], "-p") {
+		t.Errorf("not pasted in bracketed-paste mode: %v", calls[1])
+	}
+}
+
+// No tagged pane means no agent this message can be proved to belong to. It is
+// refused rather than typed into whatever the stored id names now.
+func TestHandleTaskInput_RefusesWhenNoPaneCarriesTheTag(t *testing.T) {
+	srv, database, runner := setupServer(t)
 
 	task := &db.Task{Title: "No pane", Status: db.StatusBacklog, Project: "personal"}
 	database.CreateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%42", "")
+	tagPaneInFakeTmux(runner, task.ID+1000, "%42")
 
-	body := `{"message":"test"}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", task.ID), strings.NewReader(body))
-	req.SetPathValue("id", fmt.Sprintf("%d", task.ID))
+	w := postInput(t, srv, task.ID, `{"message":"test"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := errCode(t, w); code != "no_agent_pane" {
+		t.Errorf("code = %q, want no_agent_pane", code)
+	}
+	if got := prompts(runner.snapshot()); len(got) != 0 {
+		t.Errorf("refused input still typed into tmux: %v", got)
+	}
+}
+
+// A working agent is not typed over unless the caller says so.
+func TestHandleTaskInput_RefusesABusyAgentUnlessForced(t *testing.T) {
+	srv, database, runner := setupServer(t)
+
+	task := &db.Task{Title: "Busy agent", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	tagPaneInFakeTmux(runner, task.ID, "%7")
+
+	w := postInput(t, srv, task.ID, `{"message":"are you there"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := errCode(t, w); code != "agent_busy" {
+		t.Errorf("code = %q, want agent_busy", code)
+	}
+	if got := prompts(runner.snapshot()); len(got) != 0 {
+		t.Errorf("refused input still typed into tmux: %v", got)
+	}
+
+	if w := postInput(t, srv, task.ID, `{"message":"are you there","force":true}`); w.Code != http.StatusOK {
+		t.Fatalf("forced send: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := runner.waitForPrompts(t, 3); len(got) != 3 {
+		t.Errorf("forced send delivered %v", got)
+	}
+}
+
+// A keypress answers a menu the agent is showing, so it is not held back by the
+// busy check — but it still goes only to the tagged pane.
+func TestHandleTaskInput_KeyGoesToTheTaggedPane(t *testing.T) {
+	srv, database, runner := setupServer(t)
+
+	task := &db.Task{Title: "Key", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%42", "")
+	tagPaneInFakeTmux(runner, task.ID, "%7")
+
+	if w := postInput(t, srv, task.ID, `{"key":"Down","enter":true}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	calls := runner.waitForPrompts(t, 2)
+	want := [][]string{{"tmux", "send-keys", "-t", "%7", "Down"}, {"tmux", "send-keys", "-t", "%7", "Enter"}}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+// wait=true holds the response until the agent answers THIS message. The Stop
+// of the turn that was already running is not that answer.
+func TestHandleTaskInput_WaitIgnoresThePreviousTurnsCompletion(t *testing.T) {
+	srv, database, runner := setupServer(t)
+
+	task := &db.Task{Title: "Wait for reply", Status: db.StatusBlocked, Project: "personal"}
+	database.CreateTask(task)
+	tagPaneInFakeTmux(runner, task.ID, "%7")
+
+	// A turn from before this request, which ends while we are waiting.
+	database.BeginAgentTurn(task.ID)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		database.CompleteAgentTurn(task.ID)
+	}()
+
+	w := postInput(t, srv, task.ID, `{"message":"status?","wait":true,"timeout_ms":300}`)
+	if w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 (the old turn's Stop is not the answer), got %d: %s", w.Code, w.Body.String())
+	}
+	if code := errCode(t, w); code != "reply_timeout" {
+		t.Errorf("code = %q, want reply_timeout", code)
+	}
+
+	// Now the agent takes the prompt and answers it.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		database.BeginAgentTurn(task.ID)
+		time.Sleep(20 * time.Millisecond)
+		database.CompleteAgentTurn(task.ID)
+	}()
+	w = postInput(t, srv, task.ID, `{"message":"status?","wait":true,"timeout_ms":5000}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Turn int64 `json:"turn"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Turn != 2 {
+		t.Errorf("turn = %d, want 2", resp.Turn)
+	}
+}
+
+func postInput(t *testing.T, srv *Server, id int64, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/input", id), strings.NewReader(body))
+	req.SetPathValue("id", fmt.Sprintf("%d", id))
 	w := httptest.NewRecorder()
 	srv.handleTaskInput(w, req)
+	return w
+}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+func errCode(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp struct {
+		Code string `json:"code"`
 	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	return resp.Code
+}
+
+func hasFlag(call []string, flag string) bool {
+	for _, a := range call {
+		if a == flag {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandleTaskOutput_JoinsWrappedLines(t *testing.T) {
@@ -537,8 +705,36 @@ func TestHandleTaskOutput_JoinsWrappedLines(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	expected := []string{"tmux", "capture-pane", "-t", "%5", "-p", "-J", "-S", "-200"}
-	if fmt.Sprint(runner.calls[0]) != fmt.Sprint(expected) {
-		t.Errorf("call = %v, want %v", runner.calls[0], expected)
+	// The pane lookup comes first; the capture follows it. An untagged window
+	// still falls back to the stored id, which is what this task has.
+	if got := prompts(runner.snapshot()); len(got) == 0 || fmt.Sprint(got[0]) != fmt.Sprint(expected) {
+		t.Errorf("call = %v, want %v", got, expected)
+	}
+}
+
+// Output must be read from the pane tmux says is this task's, not from a pane id
+// the row remembers — tmux hands ids out again.
+func TestHandleTaskOutput_PrefersTheTaggedPane(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	runner.outputVal = []byte("pane content")
+
+	task := &db.Task{Title: "Out task", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%5", "") // stale
+	tagPaneInFakeTmux(runner, task.ID+1000, "%5")
+	tagPaneInFakeTmux(runner, task.ID, "%6")
+
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/tasks/%d/output", task.ID), nil)
+	req.SetPathValue("id", fmt.Sprintf("%d", task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTaskOutput(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	got := prompts(runner.snapshot())
+	if len(got) == 0 || got[0][3] != "%6" {
+		t.Errorf("captured %v, want the tagged pane %%6", got)
 	}
 }
 

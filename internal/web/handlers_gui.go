@@ -17,6 +17,7 @@ import (
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // SessionManager is the subset of executor functionality the API needs to
@@ -587,6 +588,12 @@ func (s *Server) handleEnsureShellPane(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.runner.Run("tmux", "select-pane", "-t", shellPaneID, "-T", "Shell")
+
+	// Tag it the way the executor and the TUI tag the panes they make, so
+	// everything that looks a pane up by task finds this one too.
+	for _, args := range tmuxctl.TagPaneArgs(shellPaneID, task.ID, tmuxctl.RoleShell) {
+		_ = s.runner.Run("tmux", args...)
+	}
 
 	// Task context env vars, matching what the TUI exports in its shell pane.
 	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", task.ID, task.Port, task.WorktreePath)

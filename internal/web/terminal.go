@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/bborn/workflow/internal/agentsend"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/tmuxctl"
 )
@@ -60,6 +61,19 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			paneID = info.ShellPaneID
 		}
 		terminal.runner = executor.RemoteRunner{Host: info.RemoteHost}
+	} else if s.runner != nil {
+		// A tagged pane says whose it is; the stored id only says which id this
+		// task held last, and tmux hands ids out again. This terminal both mirrors
+		// and types into the pane, so getting it wrong shows one task's session
+		// while typing into another's. The stored id stays as the fallback for
+		// windows made before panes were tagged — those have no tag to find.
+		role := tmuxctl.RoleAgent
+		if shell {
+			role = tmuxctl.RoleShell
+		}
+		if tagged, err := agentsend.TaggedPane(s.runner, task.ID, role); err == nil {
+			paneID = tagged
+		}
 	}
 	if paneID == "" {
 		http.Error(w, "task has no requested terminal pane", http.StatusBadRequest)

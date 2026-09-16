@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bborn/workflow/internal/agentsend"
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/web/ui"
@@ -50,10 +51,18 @@ type Server struct {
 	annoMu      sync.Mutex
 	annoPending map[int64]*pendingAnnotationBundle
 	annoWindow  time.Duration // 0 uses annotationCoalesceWindow; tests shrink it
+	// How long the annotation nudge keeps waiting for a busy agent, and how
+	// often it retries. 0 uses the annotationNudge* defaults; tests shrink them.
+	nudgeWindow time.Duration
+	nudgeRetry  time.Duration
+}
 
-	// Serializes the two-call `send-keys -l <text>` + `send-keys Enter` pair.
-	// Without it, concurrent nudges interleave into one garbled prompt line.
-	nudgeMu sync.Mutex
+// agentSender delivers prompts to a task's live agent: one path, shared with the
+// TUI and the CLI, that resolves the pane by tmux tag, refuses to type over a
+// working agent, and keeps a prompt and its Enter together (see
+// internal/agentsend).
+func (s *Server) agentSender() *agentsend.Sender {
+	return agentsend.New(s.runner, s.db)
 }
 
 // cors wraps a handler with permissive CORS headers for local development.

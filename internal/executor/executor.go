@@ -3057,28 +3057,6 @@ func FormatSessionHandoff(prevExecutor, capturedContent string) string {
 	return sb.String()
 }
 
-// SendLiteralTextToPane sends literal text (using tmux -l flag) followed by Enter
-// to a task's executor tmux pane. The -l flag ensures the text is never
-// interpreted as a tmux key name (e.g. "Enter", "Escape", "Space").
-func SendLiteralTextToPane(taskID int64, text string) error {
-	sessionName := TmuxSessionName(taskID)
-
-	// Check if session exists first
-	if err := tmuxCmd(context.Background(), "has-session", "-t", sessionName).Run(); err != nil {
-		return fmt.Errorf("session not found: %w", err)
-	}
-
-	target := sessionName + ".0"
-
-	// Send text literally (won't interpret key names)
-	if err := tmuxCmd(context.Background(), "send-keys", "-t", target, "-l", text).Run(); err != nil {
-		return err
-	}
-
-	// Send Enter as a key press
-	return tmuxCmd(context.Background(), "send-keys", "-t", target, "Enter").Run()
-}
-
 // KillAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
 func KillAllWindowsByNameAllSessions(windowName string) {
@@ -3461,10 +3439,13 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 //     claimHookSession), because a `claude` the agent runs from Bash inherits
 //     WORKTREE_TASK_ID and loads these same hooks
 //   - UserPromptSubmit returns a blocked task to "processing" on the reply,
-//     rather than on the next tool call it may never make
+//     rather than on the next tool call it may never make, and starts a turn
 //   - PreToolUse / PostToolUse keep a working task on "processing"
 //   - Notification marks it "blocked" when Claude wants an answer
-//   - Stop marks it "blocked" when Claude has finished its turn
+//   - Stop marks it "blocked" when Claude has finished its turn, and ends that
+//     turn. With UserPromptSubmit this is the turn counting behind
+//     db.AgentTurn: how a surface that sends a prompt and waits tells the reply
+//     to ITS prompt from the end of whatever the agent was already doing
 //   - StopFailure marks it "blocked" when the turn ended in an error, and
 //     records what the provider actually said
 //   - SessionEnd is the agent's own report that it exited — the one exit signal
