@@ -16,7 +16,15 @@ func TestListTasksOpenPROnly(t *testing.T) {
 		if err := database.CreateTask(task); err != nil {
 			t.Fatal(err)
 		}
-		if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+		// A done task has, by definition, run first. Going through processing is
+		// what gives it a started_at, which the completion gate requires.
+		if err := database.SetTaskStatus(task.ID, StatusProcessing, ActorDaemon,
+			"test fixture: the task ran", NoEvidence); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.SetTaskStatus(task.ID, StatusDone, ActorDaemon,
+			"test fixture: the task finished",
+			Observedf("the agent signalled completion")); err != nil {
 			t.Fatal(err)
 		}
 		if prJSON != "" {

@@ -244,6 +244,14 @@ type updateTaskRequest struct {
 	PermissionMode *string `json:"permission_mode"`
 	EffortLevel    *string `json:"effort_level"`
 	Model          *string `json:"model"`
+	// Status is decoded only to REFUSE it. This route edits a task's fields;
+	// status is not a field, it is a transition, and it has exactly one entry
+	// point (POST /api/tasks/{id}/status → SetTaskStatus) where the actor, the
+	// reason and the completion gates live. Without this the field would simply
+	// not decode, and a client would get a cheerful 200 with nothing changed —
+	// the silent no-op is how a caller comes to believe it closed a task it did
+	// not close.
+	Status *string `json:"status"`
 }
 
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
@@ -288,6 +296,11 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EffortLevel != nil {
 		task.EffortLevel = *req.EffortLevel
+	}
+	if req.Status != nil {
+		jsonErr(w, "status is not editable here — POST /api/tasks/{id}/status, which records who and why and runs the completion gates",
+			http.StatusBadRequest)
+		return
 	}
 	if req.Model != nil {
 		task.Model = *req.Model
@@ -395,7 +408,17 @@ func (s *Server) handleSetStatus(w http.ResponseWriter, r *http.Request) {
 		oldStatus = existing.Status
 	}
 
-	if err := s.db.UpdateTaskStatus(id, req.Status); err != nil {
+	// A status change over HTTP is a person dragging a card or hitting a button;
+	// record that, and let the gates in SetTaskStatus decide whether it is
+	// allowed. A refusal is a 409 with the gate's own explanation, not a 500 —
+	// the request was understood and deliberately declined.
+	if err := s.db.SetTaskStatus(id, req.Status, db.ActorWeb,
+		"status changed from the web API",
+		db.ByHuman("PUT /api/tasks/%d/status → %s", id, req.Status)); err != nil {
+		if db.IsRefused(err) {
+			jsonErr(w, err.Error(), http.StatusConflict)
+			return
+		}
 		jsonErr(w, "failed to update status", http.StatusInternalServerError)
 		return
 	}
@@ -415,7 +438,9 @@ func (s *Server) handleExecuteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.db.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+	if err := s.db.SetTaskStatus(task.ID, db.StatusQueued, db.ActorWeb,
+		"execution requested from the web API",
+		db.ByHuman("POST /api/tasks/%d/execute", task.ID)); err != nil {
 		jsonErr(w, "failed to queue task", http.StatusInternalServerError)
 		return
 	}
@@ -434,7 +459,13 @@ func (s *Server) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.db.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
+	if err := s.db.SetTaskStatus(task.ID, db.StatusDone, db.ActorWeb,
+		"closed from the web API",
+		db.ByHuman("POST /api/tasks/%d/close", task.ID)); err != nil {
+		if db.IsRefused(err) {
+			jsonErr(w, err.Error(), http.StatusConflict)
+			return
+		}
 		jsonErr(w, "failed to close task", http.StatusInternalServerError)
 		return
 	}

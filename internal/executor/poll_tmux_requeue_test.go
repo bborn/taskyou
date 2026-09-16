@@ -61,7 +61,7 @@ func TestPollTmuxSessionRequeueVsBacklog(t *testing.T) {
 			if err := database.CreateTask(task); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.UpdateTaskStatus(task.ID, tt.status); err != nil {
+			if err := database.SetTaskStatus(task.ID, tt.status, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 				t.Fatal(err)
 			}
 

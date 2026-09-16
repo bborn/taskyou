@@ -48,8 +48,19 @@ func createBranchTask(t *testing.T, database *db.DB, branch, status string, stor
 	if err := database.UpdateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(task.ID, status); err != nil {
+	// Status is append-only. Everything here has a branch and so has really run;
+	// routing through 'processing' is what gives it the started_at the completion
+	// gate requires, and keeps the fixture honest about what happened.
+	if err := database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorDaemon,
+		"test fixture: the task started and got a worktree", db.NoEvidence); err != nil {
 		t.Fatal(err)
+	}
+	if status != db.StatusProcessing {
+		if err := database.SetTaskStatus(task.ID, status, db.ActorDaemon,
+			"test fixture: the task reached "+status,
+			db.Observedf("the agent finished its turn on branch %s", branch)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if stored != nil {
 		if err := database.UpdateTaskPRInfo(task.ID, stored.URL, stored.Number, github.MarshalPRInfo(stored)); err != nil {
@@ -140,7 +151,9 @@ func TestRefreshPRStatus_PromotesStoredMergeWithoutAskingGitHub(t *testing.T) {
 	}
 
 	// Reopening against the same merged PR must not bounce it back to done.
-	if err := database.UpdateTaskStatus(task.ID, db.StatusBlocked); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+		"test fixture: the PR was reopened, so the task is parked again",
+		db.Observedf("PR reopened after merge")); err != nil {
 		t.Fatal(err)
 	}
 	exec.refreshPRStatus(context.Background())

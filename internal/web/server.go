@@ -185,6 +185,15 @@ func New(cfg Config) *Server {
 	return s
 }
 
+// Handler returns the server's routed HTTP handler.
+//
+// The routing table is part of what a caller into this package gets — a test
+// that reached past it and called a handler function directly would prove the
+// handler refuses a request but not that the route reaching it does.
+func (s *Server) Handler() http.Handler {
+	return s.srv.Handler
+}
+
 // baseURLFromAddr turns a listen address like ":8080" into a URL the executor
 // can curl from inside the worktree.
 func baseURLFromAddr(addr string) string {
