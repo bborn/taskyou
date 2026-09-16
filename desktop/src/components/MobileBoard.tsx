@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Check, ListFilter, X } from "lucide-react";
 import type { Task } from "../api/types";
-import { parseFilter } from "../lib/board";
+import { applyFilter, parseFilter } from "../lib/board";
 import { GROUP_BY_OPTIONS, SORT_OPTIONS, type ListGroupBy, type ListSort } from "../lib/list";
 import { store, useAppSelector } from "../store";
 import { TaskList } from "./TaskList";
@@ -75,6 +75,8 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
   const savedViews = useAppSelector((s) => s.savedViews);
   const activeView = useAppSelector((s) => s.activeView);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // Keep keystrokes verbatim: serialized filters trim trailing spaces.
+  const [searchInput, setSearchInput] = useState("");
 
   const parsed = parseFilter(filter);
   const activeStatus: FilterKey | null = (parsed.status as FilterKey | undefined) ?? null;
@@ -83,24 +85,21 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
 
   // Counts ignore the dimension they describe: status counts span every status,
   // project counts sit within the chosen one (or all of them when none is set).
-  const { statusCounts, projectChips, grandTotal } = useMemo(() => {
-    const text = searchText.toLowerCase();
-    const matchesText = (t: (typeof tasks)[number]) =>
-      !text || t.title.toLowerCase().includes(text) || t.body.toLowerCase().includes(text);
-
+  const { statusCounts, projectChips, grandTotal, projectTotal } = useMemo(() => {
+    const names = projects.map((p) => p.name);
+    const visibleTasks = tasks.filter((t) => t.status !== "archived");
+    // Use the board's parser for IDs, fuzzy project names and status aliases.
+    // Each count removes only the dimension it describes.
+    const statusTasks = applyFilter(visibleTasks, filter.replace(STATUS_TOKEN, ""), names);
+    const projectTasks = applyFilter(visibleTasks, filter.replace(PROJECT_TOKEN, ""), names);
     const byStatus = new Map<string, number>();
     const byProject = new Map<string, number>();
-    let total = 0;
-    for (const t of tasks) {
-      if (t.status === "archived" || !matchesText(t)) continue;
+    for (const t of statusTasks) {
       const status = t.status === "queued" ? "backlog" : t.status;
-      if (!activeProject || t.project === activeProject) {
-        byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
-        total++;
-      }
-      if (!activeStatus || status === activeStatus) {
-        byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
-      }
+      byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+    }
+    for (const t of projectTasks) {
+      byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
     }
 
     const chips = projects
@@ -108,12 +107,12 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
       .filter((c) => c.count > 0 || c.project.name === activeProject)
       .sort((a, b) => b.count - a.count || a.project.name.localeCompare(b.project.name));
 
-    return { statusCounts: byStatus, projectChips: chips, grandTotal: total };
-  }, [tasks, projects, activeStatus, activeProject, searchText]);
+    return { statusCounts: byStatus, projectChips: chips, grandTotal: statusTasks.length, projectTotal: projectTasks.length };
+  }, [tasks, projects, filter, activeProject]);
 
   // "All projects" sits above rows counted within the chosen status, so it has
   // to be that status's total — or everything when no status is chosen.
-  const totalForProjects = activeStatus ? (statusCounts.get(activeStatus) ?? 0) : grandTotal;
+  const totalForProjects = projectTotal;
 
   // Picking a status or a project is a decision; close the sheet so you land
   // back on the list. Typing is not, so the text field leaves it open.
@@ -127,6 +126,7 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
     setSheetOpen(false);
   }
   function setText(next: string) {
+    setSearchInput(next);
     const status = filter.match(STATUS_TOKEN)?.[0];
     const project = filter.match(PROJECT_TOKEN)?.[0];
     store.setFilter([status, project, next.trim()].filter(Boolean).join(" "));
@@ -154,7 +154,10 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
       {/* One control: status, project and text in a single field. */}
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <button
-          onClick={() => setSheetOpen(true)}
+          onClick={() => {
+            setSearchInput(textOf(filter));
+            setSheetOpen(true);
+          }}
           className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border bg-surface-1 px-3 text-left text-[13px]"
         >
           <ListFilter className="size-4 shrink-0 text-muted-foreground" />
@@ -200,7 +203,7 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
 
           {/* 16px text: iOS Safari zooms the page when focusing anything smaller. */}
           <Input
-            value={searchText}
+            value={searchInput}
             className="h-11 text-base md:text-base"
             placeholder="Search title, body, or #123"
             onChange={(e) => setText(e.target.value)}
