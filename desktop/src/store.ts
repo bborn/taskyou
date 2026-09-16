@@ -3,7 +3,8 @@ import { toast as sonnerToast } from "sonner";
 import { CoalescedRefresh } from "./lib/refresh";
 import { api } from "./api/client";
 import { subscribeBoard } from "./api/sse";
-import type { ExecutorInfo, LogLine, Project, Task, TaskType } from "./api/types";
+import type { ExecutorInfo, LogLine, Project, SavedView, Task, TaskType } from "./api/types";
+import { DEFAULT_LIST_OPTIONS, normalizeListOptions, type ListOptions } from "./lib/list";
 import { notify } from "./tauri";
 
 export type View =
@@ -35,6 +36,9 @@ export type PermissionMode = "" | "auto" | "dangerous";
 
 export type ThemePreference = "system" | "light" | "dark";
 
+/** Kanban columns, or one flat list. */
+export type BoardMode = "board" | "list";
+
 export interface AppState {
   booted: boolean;
   bootError: string | null;
@@ -47,6 +51,16 @@ export interface AppState {
   selectedTaskId: number | null;
   filter: string;
   filterOpen: boolean;
+  boardMode: BoardMode;
+  listOptions: ListOptions;
+  savedViews: SavedView[];
+  /** Name of the applied saved view, "" when the filter was typed by hand. */
+  activeView: string;
+  /** Ids the applied view matched, resolved by the server so the query grammar
+   * is never reimplemented here. Null when no view is applied. */
+  viewTaskIds: Set<number> | null;
+  arrangeOpen: boolean;
+  viewsOpen: boolean;
   collapsed: { backlog: boolean; done: boolean };
   permissionMode: PermissionMode;
   theme: ThemePreference;
@@ -71,6 +85,13 @@ class Store {
     selectedTaskId: null,
     filter: "",
     filterOpen: false,
+    boardMode: "board",
+    listOptions: DEFAULT_LIST_OPTIONS,
+    savedViews: [],
+    activeView: "",
+    viewTaskIds: null,
+    arrangeOpen: false,
+    viewsOpen: false,
     collapsed: { backlog: false, done: false },
     permissionMode: "",
     theme: (localStorage.getItem("theme") as ThemePreference) || "system",
@@ -118,15 +139,129 @@ class Store {
   }
 
   async loadAll() {
-    const [tasks, projects, types, executors] = await Promise.all([
+    const [tasks, projects, types, executors, settings, savedViews] = await Promise.all([
       api.listTasks({ all: true }),
       api.listProjects(),
       api.listTypes(),
       api.listExecutors().catch(() => [] as ExecutorInfo[]),
+      api.getSettings().catch(() => ({}) as Record<string, string>),
+      api.listViews().catch(() => [] as SavedView[]),
     ]);
     this.detectTransitions(tasks);
-    this.set({ tasks, projects, types, executors });
+    this.set({
+      tasks,
+      projects,
+      types,
+      executors,
+      savedViews,
+      // The same settings keys the TUI writes, so the board you left in one is
+      // the board you come back to in the other.
+      boardMode: settings.board_display_mode === "list" ? "list" : "board",
+      listOptions: normalizeListOptions({
+        groupBy: settings.list_group_by as ListOptions["groupBy"],
+        sort: settings.list_sort as ListOptions["sort"],
+      }),
+    });
     await this.refreshActivity(tasks);
+    // A persisted view has to be re-resolved: its membership is the server's
+    // answer, not something we can restore from a string.
+    if (settings.board_view) {
+      void this.applyView(settings.board_view);
+    } else if (settings.board_filter) {
+      this.set({ filter: settings.board_filter });
+    }
+  }
+
+  // --- List view, saved views, arrangement ---
+
+  setBoardMode(mode: BoardMode) {
+    this.set({ boardMode: mode });
+    void api.updateSettings({ board_display_mode: mode }).catch(() => {});
+  }
+
+  toggleBoardMode() {
+    this.setBoardMode(this.state.boardMode === "list" ? "board" : "list");
+  }
+
+  setListOptions(listOptions: ListOptions) {
+    this.set({ listOptions });
+    void api
+      .updateSettings({ list_group_by: listOptions.groupBy, list_sort: listOptions.sort })
+      .catch(() => {});
+  }
+
+  setArrangeOpen(arrangeOpen: boolean) {
+    this.set({ arrangeOpen });
+  }
+
+  setViewsOpen(viewsOpen: boolean) {
+    this.set({ viewsOpen });
+  }
+
+  async refreshViews() {
+    try {
+      this.set({ savedViews: await api.listViews() });
+    } catch {
+      // the picker shows what it has
+    }
+  }
+
+  /** Apply a saved view. The server resolves the query — the GUI only records
+   * which tasks came back. */
+  async applyView(name: string) {
+    try {
+      const result = await api.getView(name);
+      this.set({
+        activeView: result.name,
+        filter: result.query,
+        viewTaskIds: new Set(result.tasks.map((t) => t.id)),
+        viewsOpen: false,
+      });
+      void api
+        .updateSettings({ board_view: result.name, board_filter: result.query })
+        .catch(() => {});
+    } catch (e) {
+      this.toast({
+        title: `Could not apply view "${name}"`,
+        body: e instanceof Error ? e.message : String(e),
+        kind: "error",
+      });
+    }
+  }
+
+  async saveCurrentAsView(name: string) {
+    const query = this.state.filter.trim();
+    if (!query) return;
+    try {
+      await api.saveView(name, query);
+      await this.refreshViews();
+      await this.applyView(name);
+    } catch (e) {
+      this.toast({
+        title: `Could not save view "${name}"`,
+        body: e instanceof Error ? e.message : String(e),
+        kind: "error",
+      });
+    }
+  }
+
+  async deleteView(name: string) {
+    try {
+      await api.deleteView(name);
+      if (this.state.activeView === name) this.clearFilter();
+      await this.refreshViews();
+    } catch (e) {
+      this.toast({
+        title: `Could not delete view "${name}"`,
+        body: e instanceof Error ? e.message : String(e),
+        kind: "error",
+      });
+    }
+  }
+
+  clearFilter() {
+    this.set({ filter: "", activeView: "", viewTaskIds: null, filterOpen: false });
+    void api.updateSettings({ board_view: "", board_filter: "" }).catch(() => {});
   }
 
   /** Debounced refresh used by the SSE change signal. */
@@ -213,7 +348,11 @@ class Store {
   }
 
   setFilter(filter: string) {
-    this.set({ filter });
+    // Typing over an applied view turns it back into an ad-hoc filter: the view
+    // is a starting point, not a lock. The server-resolved id set goes with it,
+    // so the client-side grammar takes over from here.
+    this.set({ filter, activeView: "", viewTaskIds: null });
+    void api.updateSettings({ board_view: "", board_filter: filter }).catch(() => {});
   }
 
   setFilterOpen(open: boolean) {

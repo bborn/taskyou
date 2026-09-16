@@ -205,3 +205,22 @@ export interface Placement {
  decided: boolean;
  health: { state: string; last_seen?: string; problem?: string };
 }
+
+/** A named filter query. The query grammar lives in internal/taskfilter and is
+ * resolved server-side (GET /api/views/{name} returns the matching tasks), so
+ * the GUI never has to reimplement it. */
+export interface SavedView {
+  id: number;
+  name: string;
+  query: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SavedViewResult {
+  name: string;
+  query: string;
+  task_count: number;
+  tasks: Task[];
+}

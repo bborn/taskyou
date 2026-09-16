@@ -84,7 +84,7 @@ function CheckMark({ pr }: { pr: PRStatus }) {
 
 /** Live PR badge: state, CI checks, and diff size. Falls back to a bare PR chip
  * for legacy rows that have a URL but no cached PR state yet. */
-function PRBadge({ task }: { task: Task }) {
+export function PRBadge({ task }: { task: Task }) {
   const pr = task.pr;
   if (!pr) {
     if (!task.pr_url) return null;
@@ -120,7 +120,7 @@ function PRBadge({ task }: { task: Task }) {
   );
 }
 
-function useSpinner(active: boolean): string {
+export function useSpinner(active: boolean): string {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
     if (!active) return;
@@ -186,7 +186,7 @@ function fallbackStand(log?: LogLine): string {
   return "";
 }
 
-function cardSubLine(task: Task, latest?: LogLine): { text: string; title?: string } {
+export function cardSubLine(task: Task, latest?: LogLine): { text: string; title?: string } {
   if (task.status === "processing") {
     const crumb = latest && !isNoiseLog(latest.content) ? latest.content.split("\n")[0]?.trim() : "";
     return crumb ? { text: crumb, title: crumb } : { text: ageHint(task) };
