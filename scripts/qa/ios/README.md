@@ -34,3 +34,17 @@ gh run download <run-id> --name iphone-safari-<run-id> --dir /tmp/ios-evidence
 Inspect `result.json` and the PNGs together. Failure screenshots and viewport
 measurements distinguish application layout bugs from automation setup problems.
 Appium logs are diagnostic, not proof of a passing UI test.
+
+## Verification status (2026-09-16)
+
+The workflow has reached iPhone 16 / iOS 18.5 Safari with the full software
+keyboard. Filter visibility, multiword typing, and keyboard dismissal passed.
+The new-task check exposed a dialog portal mount timing issue: its keyboard
+listener could run before the panel existed. The callback-ref fix and a local
+regression test are committed; all nine local mobile regression groups pass.
+
+A full iOS pass is **not yet established**. The follow-up run stalled installing
+WebDriverAgent before any UI checks. Standard hosted simulator startup has been
+inconsistent; there are no automatic retries. Inspect saved evidence before
+attributing a failure to the app. The portal fix still needs iOS confirmation,
+and description focus / final form dismissal have not been verified there.
