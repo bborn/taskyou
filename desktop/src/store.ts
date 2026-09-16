@@ -1,6 +1,11 @@
 import { useSyncExternalStore } from "react";
 import { toast as sonnerToast } from "sonner";
 import { CoalescedRefresh } from "./lib/refresh";
+
+/** Typing resolves against the server, so it waits for a pause first. The
+ * server is local; this is about not firing a request per keystroke, not
+ * latency. */
+const FILTER_DEBOUNCE_MS = 150;
 import { api } from "./api/client";
 import { subscribeBoard } from "./api/sse";
 import type { ExecutorInfo, LogLine, Project, SavedView, Task, TaskType } from "./api/types";
@@ -56,9 +61,14 @@ export interface AppState {
   savedViews: SavedView[];
   /** Name of the applied saved view, "" when the filter was typed by hand. */
   activeView: string;
-  /** Ids the applied view matched, resolved by the server so the query grammar
-   * is never reimplemented here. Null when no view is applied. */
-  viewTaskIds: Set<number> | null;
+  /** Ids the current filter matches, resolved by the server so the query
+   * grammar is never reimplemented here. Null when no filter is set.
+   *
+   * Every filter goes through this — typed or from a saved view — because two
+   * parsers are two sets of answers: `status:blocked` meant nothing to the
+   * browser's own matcher, so the same string filtered one way from a view and
+   * another way once you edited it. */
+  filteredIds: Set<number> | null;
   arrangeOpen: boolean;
   viewsOpen: boolean;
   collapsed: { backlog: boolean; done: boolean };
@@ -89,7 +99,7 @@ class Store {
     listOptions: DEFAULT_LIST_OPTIONS,
     savedViews: [],
     activeView: "",
-    viewTaskIds: null,
+    filteredIds: null,
     arrangeOpen: false,
     viewsOpen: false,
     collapsed: { backlog: false, done: false },
@@ -102,6 +112,10 @@ class Store {
   };
 
   private listeners = new Set<Listener>();
+  /** Guards against a slow response for an old filter landing after a fast one
+   * for the current filter. Only the newest request may write filteredIds. */
+  private filterSeq = 0;
+  private filterTimer: ReturnType<typeof setTimeout> | null = null;
   private prevStatuses = new Map<number, string>();
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeBoard: (() => void) | null = null;
@@ -110,6 +124,11 @@ class Store {
     this.detectTransitions(tasks);
     this.set({ tasks });
     await this.refreshActivity(tasks);
+    // Membership is a function of task state, so it has to be recomputed when
+    // task state changes — otherwise a task you just finished stays in "Active"
+    // and one that just became blocked never appears until the view is
+    // reapplied.
+    await this.resolveFilter({ immediate: true });
   });
 
   getState = (): AppState => this.state;
@@ -169,6 +188,7 @@ class Store {
       void this.applyView(settings.board_view);
     } else if (settings.board_filter) {
       this.set({ filter: settings.board_filter });
+      await this.resolveFilter({ immediate: true });
     }
   }
 
@@ -206,20 +226,15 @@ class Store {
     }
   }
 
-  /** Apply a saved view. The server resolves the query — the GUI only records
-   * which tasks came back. */
+  /** Apply a saved view: adopt its query and let the normal filter path resolve
+   * it. A view is nothing but a named query, so it must not take a different
+   * route to the answer than the same query typed by hand. */
   async applyView(name: string) {
     try {
-      const result = await api.getView(name);
-      this.set({
-        activeView: result.name,
-        filter: result.query,
-        viewTaskIds: new Set(result.tasks.map((t) => t.id)),
-        viewsOpen: false,
-      });
-      void api
-        .updateSettings({ board_view: result.name, board_filter: result.query })
-        .catch(() => {});
+      const view = await api.getView(name);
+      this.set({ activeView: view.name, filter: view.query, viewsOpen: false });
+      void api.updateSettings({ board_view: view.name, board_filter: view.query }).catch(() => {});
+      await this.resolveFilter({ immediate: true });
     } catch (e) {
       this.toast({
         title: `Could not apply view "${name}"`,
@@ -260,7 +275,8 @@ class Store {
   }
 
   clearFilter() {
-    this.set({ filter: "", activeView: "", viewTaskIds: null, filterOpen: false });
+    this.set({ filter: "", activeView: "", filteredIds: null, filterOpen: false });
+    this.filterSeq++; // abandon anything in flight
     void api.updateSettings({ board_view: "", board_filter: "" }).catch(() => {});
   }
 
@@ -325,6 +341,43 @@ class Store {
     }
   }
 
+  /** Resolve the current filter against the server and record what it matched.
+   *
+   * Typing debounces; anything else (applying a view, a task refresh) resolves
+   * at once. The previous result is left in place while a new one is in flight,
+   * so the list does not flash unfiltered mid-keystroke. */
+  private async resolveFilter({ immediate = false } = {}): Promise<void> {
+    if (this.filterTimer) {
+      clearTimeout(this.filterTimer);
+      this.filterTimer = null;
+    }
+    const query = this.state.filter.trim();
+    if (query === "") {
+      this.filterSeq++;
+      this.set({ filteredIds: null });
+      return;
+    }
+    if (!immediate) {
+      await new Promise<void>((resolve) => {
+        this.filterTimer = setTimeout(() => {
+          this.filterTimer = null;
+          resolve();
+        }, FILTER_DEBOUNCE_MS);
+      });
+      // The filter may have moved on while we waited.
+      if (this.state.filter.trim() !== query) return;
+    }
+
+    const seq = ++this.filterSeq;
+    try {
+      const matched = await api.listTasks({ all: true, filter: query });
+      if (seq !== this.filterSeq) return; // a newer request owns the result
+      this.set({ filteredIds: new Set(matched.map((t) => t.id)) });
+    } catch {
+      // Leave the previous result up; the next refresh or keystroke retries.
+    }
+  }
+
   // --- Navigation ---
 
   openBoard() {
@@ -348,11 +401,13 @@ class Store {
   }
 
   setFilter(filter: string) {
-    // Typing over an applied view turns it back into an ad-hoc filter: the view
-    // is a starting point, not a lock. The server-resolved id set goes with it,
-    // so the client-side grammar takes over from here.
-    this.set({ filter, activeView: "", viewTaskIds: null });
+    // Typing over an applied view detaches the name — the view is a starting
+    // point, not a lock — but NOT the way the query is answered. The same string
+    // resolves through the same grammar whether it arrived from a view or from
+    // the keyboard.
+    this.set({ filter, activeView: "" });
     void api.updateSettings({ board_view: "", board_filter: filter }).catch(() => {});
+    void this.resolveFilter();
   }
 
   setFilterOpen(open: boolean) {

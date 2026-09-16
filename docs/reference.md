@@ -7,7 +7,7 @@
 - [Terminal interface](#the-tui--first-class) and [keyboard shortcuts](#keyboard-shortcuts)
 - [Desktop and browser installation](#the-gui)
 - [Workflows](#workflows), [routines](#routines), and [plugins](#plugins)
-- [CLI commands](#full-cli-scriptability) and [daemon management](#daemon-management)
+- [CLI commands](#full-cli-scriptability), [daemon management](#daemon-management), and [diagnosing an install](#diagnosing-an-install)
 - [Executors](#task-executors) and [task lifecycle](#task-lifecycle)
 - [Project configuration](#taskyouyml-configuration) and [worktree setup](#worktree-setup-script)
 - [SSH access and deployment](#ssh-access--deployment)
@@ -123,7 +123,7 @@ silently matching nothing.
 
 ### Show the focused task in your tab title
 
-The TUI publishes the task you are looking at (the open task in the detail view, otherwise the highlighted card) as iTerm2 user variables:
+The TUI publishes the task you have open in the detail view as iTerm2 user variables, and blanks them the moment you leave it — so the board never names the task you last visited:
 
 | Variable | Example |
 |---|---|
@@ -463,6 +463,26 @@ destructive reset that kills TaskYou tmux sessions.
 
 Upgrading does this for you: when a ty daemon is running, `ty upgrade` (and the
 install script it runs) finishes with `ty restart`.
+
+### Diagnosing an install
+
+`ty doctor` checks everything a working install depends on — daemon, its build
+and environment against this binary, tmux and the agent server, a live task's
+generated Claude hooks and MCP config, the database and its schema, the status
+log, executor binaries, GitHub auth — and changes none of it. `--json` gives a
+stable machine-readable report and `--strict` exits non-zero on warnings too,
+for a fleet sweep.
+
+```bash
+ty doctor                 # human report
+ty doctor --json          # {status, checks:[{id,status,summary,details}]}
+ty doctor --strict        # exit non-zero on warnings as well as errors
+```
+
+The daemon also records its build, protocol and key environment where clients
+can read it, so a TUI or CLI on a different build says so instead of misbehaving
+quietly. See [Diagnostics](diagnostics.md) for the handshake, the protocol
+number, and what happens on a remote or placed host running an older ty.
 
 ### Maintenance commands
 

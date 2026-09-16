@@ -50,8 +50,7 @@ func (g *GrokExecutor) Name() string {
 
 // IsAvailable checks if the grok CLI is installed.
 func (g *GrokExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("grok")
-	return err == nil
+	return binaryOnPath("grok")
 }
 
 // Execute runs a task using the Grok CLI.

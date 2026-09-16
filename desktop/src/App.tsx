@@ -4,7 +4,7 @@ import { motion } from "motion/react";
 import { Plus, Search, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
-import { applyFilter, buildColumns } from "./lib/board";
+import { buildColumns } from "./lib/board";
 import { buildSections, flattenSections } from "./lib/list";
 import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
@@ -242,17 +242,12 @@ export default function App() {
     if (window.history.state?.drawer) window.history.back();
   }
 
-  const projectNames = useMemo(() => state.projects.map((p) => p.name), [state.projects]);
-  // A saved view is resolved by the server (the query grammar lives in
-  // internal/taskfilter and is not reimplemented here), so when one is applied
-  // we filter by the ids it returned. Anything typed by hand falls back to the
-  // client-side grammar, which is what keeps typing instant.
+  // Every filter — typed or from a saved view — is resolved by the server (the
+  // query grammar lives in internal/taskfilter), so the same string always
+  // means the same thing. filteredIds is null when no filter is set.
   const filteredTasks = useMemo(
-    () =>
-      state.viewTaskIds
-        ? state.tasks.filter((t) => state.viewTaskIds!.has(t.id))
-        : applyFilter(state.tasks, state.filter, projectNames),
-    [state.tasks, state.filter, state.viewTaskIds, projectNames],
+    () => (state.filteredIds ? state.tasks.filter((t) => state.filteredIds!.has(t.id)) : state.tasks),
+    [state.tasks, state.filteredIds],
   );
   const columns = useMemo(() => buildColumns(filteredTasks), [filteredTasks]);
 

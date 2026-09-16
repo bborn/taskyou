@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -145,5 +146,109 @@ func TestHandleUpdateViewRenames(t *testing.T) {
 	v, _ := database.GetSavedView("New")
 	if v == nil || v.Query != "status:done" {
 		t.Errorf("renamed view = %+v", v)
+	}
+}
+
+// A rejected rename used to destroy the original: the handler deleted the old
+// row before SaveView validated the replacement, so an over-long name returned
+// 500 and took the view with it.
+func TestHandleUpdateViewRejectsBadNameWithoutLosingTheView(t *testing.T) {
+	srv, database, _ := setupServer(t)
+	if _, err := database.SaveView("Keeper", "is:pinned"); err != nil {
+		t.Fatal(err)
+	}
+
+	long := strings.Repeat("x", db.MaxSavedViewName+1)
+	req := httptest.NewRequest("PATCH", "/api/views/Keeper",
+		strings.NewReader(`{"name":"`+long+`","query":"status:done"}`))
+	req.SetPathValue("name", "Keeper")
+	w := httptest.NewRecorder()
+	srv.handleUpdateView(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for an over-long name, got %d: %s", w.Code, w.Body.String())
+	}
+	got, err := database.GetSavedView("Keeper")
+	if err != nil || got == nil {
+		t.Fatalf("the original view must survive a rejected rename: %v %+v", err, got)
+	}
+	if got.Query != "is:pinned" {
+		t.Errorf("the original query changed: %q", got.Query)
+	}
+}
+
+// SaveView upserts by name, so renaming onto another view would overwrite it.
+// Losing a view to a rename is the same data loss in a different costume.
+func TestHandleUpdateViewRefusesToRenameOntoAnother(t *testing.T) {
+	srv, database, _ := setupServer(t)
+	for _, name := range []string{"Alpha", "Beta"} {
+		if _, err := database.SaveView(name, "is:pinned"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest("PATCH", "/api/views/Alpha", strings.NewReader(`{"name":"Beta","query":"status:done"}`))
+	req.SetPathValue("name", "Alpha")
+	w := httptest.NewRecorder()
+	srv.handleUpdateView(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, name := range []string{"Alpha", "Beta"} {
+		v, _ := database.GetSavedView(name)
+		if v == nil {
+			t.Errorf("%s should still exist", name)
+		} else if v.Query != "is:pinned" {
+			t.Errorf("%s query changed to %q", name, v.Query)
+		}
+	}
+}
+
+// The browser client filters through this parameter rather than carrying its
+// own grammar, so a saved view and a typed query mean the same thing.
+func TestHandleListTasksFilter(t *testing.T) {
+	srv, database, _ := setupServer(t)
+
+	blocked := &db.Task{Title: "Fix checkout", Project: "personal", Status: db.StatusBlocked, Pinned: true}
+	done := &db.Task{Title: "Fix checkout", Project: "personal", Status: db.StatusDone}
+	for _, task := range []*db.Task{blocked, done} {
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// CreateTask does not carry pinned through, so set it explicitly.
+	if err := database.UpdateTaskPinned(blocked.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	ids := func(query string) []int64 {
+		req := httptest.NewRequest("GET", "/api/tasks?all=true&filter="+url.QueryEscape(query), nil)
+		w := httptest.NewRecorder()
+		srv.handleListTasks(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("filter %q: expected 200, got %d: %s", query, w.Code, w.Body.String())
+		}
+		var out []*taskJSON
+		if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		var got []int64
+		for _, task := range out {
+			got = append(got, task.ID)
+		}
+		return got
+	}
+
+	// The two cases from the review: both titled the same, so only the grammar
+	// separates them.
+	if got := ids("status:in-progress status:blocked checkout"); len(got) != 1 || got[0] != blocked.ID {
+		t.Errorf("status filter + keyword = %v, want just the blocked task #%d", got, blocked.ID)
+	}
+	if got := ids("is:pinned checkout"); len(got) != 1 || got[0] != blocked.ID {
+		t.Errorf("is:pinned + keyword = %v, want just the pinned task #%d", got, blocked.ID)
+	}
+	if got := ids(""); len(got) != 2 {
+		t.Errorf("no filter should return both, got %v", got)
 	}
 }

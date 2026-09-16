@@ -26,6 +26,10 @@ type WelcomeModel struct {
 	height         int
 	detectedAgents []string // executor CLIs found on this machine (e.g. claude, codex)
 	tmuxFound      bool     // tmux binary present on PATH
+
+	missingWorkflows bool   // no workflow resolves; offer the starter pack (i)
+	installing       bool   // starter pack install in flight
+	installResult    string // outcome line once the install finishes
 }
 
 func NewWelcomeModel(width, height int, detectedAgents []string, tmuxFound bool) *WelcomeModel {
@@ -101,20 +105,32 @@ func (m *WelcomeModel) View() string {
 		btn("Set up a project", m.cursor == 0),
 		btn("Just start a task", m.cursor == 1),
 	)
-	help := HelpBar.Render(
-		HelpKey.Render("←/→") + " " + HelpDesc.Render("choose") + "  " +
-			HelpKey.Render("enter") + " " + HelpDesc.Render("select"))
+	helpText := HelpKey.Render("←/→") + " " + HelpDesc.Render("choose") + "  " +
+		HelpKey.Render("enter") + " " + HelpDesc.Render("select")
+	if m.missingWorkflows && !m.installing {
+		helpText += "  " + HelpKey.Render("i") + " " + HelpDesc.Render("starter pack")
+	}
+	help := HelpBar.Render(helpText)
 
 	hint := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(welcomeChoiceHint(m.cursor))
 	parts := []string{title, "", body, "", buttons, "", hint}
 	if agents := formatDetectedAgents(m.detectedAgents); agents != "" {
 		parts = append(parts, "", Success.Render(agents))
 	}
-	for i, notice := range missingPrereqNotices(m.tmuxFound, m.detectedAgents) {
+	notices := missingPrereqNotices(m.tmuxFound, m.detectedAgents)
+	if m.missingWorkflows && !m.installing && m.installResult == "" {
+		notices = append(notices, starterPackNotice)
+	}
+	for i, notice := range notices {
 		if i == 0 {
 			parts = append(parts, "")
 		}
 		parts = append(parts, Warning.Bold(true).Render(Icon(IconWarningUnicode, IconWarningASCII)+" "+notice))
+	}
+	if m.installing {
+		parts = append(parts, "", lipgloss.NewStyle().Foreground(ColorMuted).Render(pluginNudgeText(false, true)))
+	} else if m.installResult != "" {
+		parts = append(parts, "", m.installResult)
 	}
 	parts = append(parts, "", help)
 	content := lipgloss.JoinVertical(lipgloss.Center, parts...)

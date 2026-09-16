@@ -3452,6 +3452,38 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 	return "", fmt.Errorf("new-window failed: %v (output: %s)", err, outputStr)
 }
 
+// ClaudeHookEvents are the Claude Code hook events ty installs into a task's
+// worktree. Every one of them is load-bearing for task status, so the set is
+// named once here rather than being implied by whatever setupClaudeHooks
+// happens to write:
+//
+//   - PreToolUse / PostToolUse keep a working task on "processing"
+//   - Notification marks it "blocked" when Claude wants an answer
+//   - Stop marks it "blocked" when Claude has finished its turn
+//
+// setupClaudeHooks builds its config from this list, `ty doctor` verifies a
+// live task's settings file against it, and internal/handshake fingerprints it:
+// changing the set changes what the daemon and a client must agree on, so it
+// forces a handshake.Protocol bump.
+var ClaudeHookEvents = []string{"PreToolUse", "PostToolUse", "Notification", "Stop"}
+
+// claudeHookMatchers restricts a hook to certain events. Only Notification has
+// one: it fires for more than the two cases ty cares about.
+var claudeHookMatchers = map[string]string{
+	"Notification": "idle_prompt|permission_prompt",
+}
+
+// ClaudeSettingsPath is the settings file ty writes hooks into for a task
+// running in workDir. Exported so `ty doctor` can read back what the daemon
+// actually installed instead of guessing the path.
+func ClaudeSettingsPath(workDir string) string {
+	return filepath.Join(workDir, ".claude", "settings.local.json")
+}
+
+// WorktreeMCPConfigPath is the per-task MCP config file handed to Claude with
+// --mcp-config. Exported for `ty doctor`; see worktreeMCPConfigPath.
+func WorktreeMCPConfigPath(taskID int64) string { return worktreeMCPConfigPath(taskID) }
+
 // setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
 // The hooks call back to `task claude-hook` to update task status.
 func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(), err error) {
@@ -3461,7 +3493,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 		return nil, fmt.Errorf("create .claude dir: %w", err)
 	}
 
-	settingsPath := filepath.Join(claudeDir, "settings.local.json")
+	settingsPath := ClaudeSettingsPath(workDir)
 
 	// Find the task binary path - use absolute path for hooks
 	taskBin := resolveTaskBin()
@@ -3473,6 +3505,22 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	// - PostToolUse: Fires after tool completes - ensures task stays "processing"
 	// - Notification: Fires when Claude is idle or needs permission - marks task "blocked"
 	// - Stop: Fires when Claude finishes responding - marks task "blocked" when waiting for input
+	hookEntries := map[string]interface{}{}
+	for _, event := range ClaudeHookEvents {
+		entry := map[string]interface{}{
+			"hooks": []map[string]interface{}{
+				{
+					"type":    "command",
+					"command": fmt.Sprintf("%s claude-hook --event %s", taskBin, event),
+				},
+			},
+		}
+		if matcher, ok := claudeHookMatchers[event]; ok {
+			entry["matcher"] = matcher
+		}
+		hookEntries[event] = []map[string]interface{}{entry}
+	}
+
 	hooksConfig := map[string]interface{}{
 		// Pre-approve reading from .claude/attachments/ so Claude can access task attachments
 		// without permission prompts (attachments are written there by prepareAttachments)
@@ -3481,49 +3529,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 				"Read(.claude/attachments/**)",
 			},
 		},
-		"hooks": map[string]interface{}{
-			"PreToolUse": []map[string]interface{}{
-				{
-					"hooks": []map[string]interface{}{
-						{
-							"type":    "command",
-							"command": fmt.Sprintf("%s claude-hook --event PreToolUse", taskBin),
-						},
-					},
-				},
-			},
-			"PostToolUse": []map[string]interface{}{
-				{
-					"hooks": []map[string]interface{}{
-						{
-							"type":    "command",
-							"command": fmt.Sprintf("%s claude-hook --event PostToolUse", taskBin),
-						},
-					},
-				},
-			},
-			"Notification": []map[string]interface{}{
-				{
-					"matcher": "idle_prompt|permission_prompt",
-					"hooks": []map[string]interface{}{
-						{
-							"type":    "command",
-							"command": fmt.Sprintf("%s claude-hook --event Notification", taskBin),
-						},
-					},
-				},
-			},
-			"Stop": []map[string]interface{}{
-				{
-					"hooks": []map[string]interface{}{
-						{
-							"type":    "command",
-							"command": fmt.Sprintf("%s claude-hook --event Stop", taskBin),
-						},
-					},
-				},
-			},
-		},
+		"hooks": hookEntries,
 	}
 
 	// Check if settings.local.json already exists

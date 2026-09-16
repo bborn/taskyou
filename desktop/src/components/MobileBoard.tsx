@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, ListFilter, X } from "lucide-react";
 import type { Task } from "../api/types";
-import { applyFilter, parseFilter } from "../lib/board";
+import { api } from "../api/client";
+import { parseFilter } from "../lib/board";
 import { GROUP_BY_OPTIONS, SORT_OPTIONS, type ListGroupBy, type ListSort } from "../lib/list";
 import { store, useAppSelector } from "../store";
 import { TaskList } from "./TaskList";
@@ -14,12 +15,33 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+// The four pills must partition the board — every task answers to exactly one,
+// or tasks fall through the gaps. "In progress" is queued AND processing, the
+// same pairing the kanban column and the list section make: a queued task used
+// to belong to neither "Running" (processing only) nor "Backlog".
 const FILTERS = [
   { key: "blocked", label: "Needs you", token: "blocked" },
-  { key: "processing", label: "Running", token: "running" },
+  { key: "processing", label: "In progress", token: "in-progress" },
   { key: "backlog", label: "Backlog", token: "backlog" },
   { key: "done", label: "Done", token: "done" },
 ] as const;
+
+/** Which pill a task belongs to. */
+function pillFor(status: string): FilterKey | null {
+  switch (status) {
+    case "blocked":
+      return "blocked";
+    case "queued":
+    case "processing":
+      return "processing";
+    case "backlog":
+      return "backlog";
+    case "done":
+      return "done";
+    default:
+      return null; // archived
+  }
+}
 
 type FilterKey = (typeof FILTERS)[number]["key"];
 
@@ -75,7 +97,8 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
   const savedViews = useAppSelector((s) => s.savedViews);
   const activeView = useAppSelector((s) => s.activeView);
   const [sheetOpen, setSheetOpen] = useState(false);
-  // Keep keystrokes verbatim: serialized filters trim trailing spaces.
+  // Keep keystrokes verbatim: the serialized filter trims whitespace, which
+  // otherwise eats the space before the user can type the next word.
   const [searchInput, setSearchInput] = useState("");
 
   const parsed = parseFilter(filter);
@@ -83,20 +106,22 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
   const activeProject = parsed.project ?? null;
   const searchText = textOf(filter);
 
-  // Counts ignore the dimension they describe: status counts span every status,
-  // project counts sit within the chosen one (or all of them when none is set).
+  // Counts ignore the dimension they describe: the status counts drop the status
+  // token from the query, the project counts drop the project token. They are
+  // resolved by the server for the same reason the list is — a count produced by
+  // a different parser than the filter is a number that disagrees with the rows
+  // underneath it.
+  const statusQuery = useMemo(() => withToken(filter, STATUS_TOKEN, null), [filter]);
+  const projectQuery = useMemo(() => withToken(filter, PROJECT_TOKEN, null), [filter]);
+  const statusTasks = useFilteredTasks(statusQuery, sheetOpen, tasks);
+  const projectTasks = useFilteredTasks(projectQuery, sheetOpen, tasks);
+
   const { statusCounts, projectChips, grandTotal, projectTotal } = useMemo(() => {
-    const names = projects.map((p) => p.name);
-    const visibleTasks = tasks.filter((t) => t.status !== "archived");
-    // Use the board's parser for IDs, fuzzy project names and status aliases.
-    // Each count removes only the dimension it describes.
-    const statusTasks = applyFilter(visibleTasks, filter.replace(STATUS_TOKEN, ""), names);
-    const projectTasks = applyFilter(visibleTasks, filter.replace(PROJECT_TOKEN, ""), names);
     const byStatus = new Map<string, number>();
     const byProject = new Map<string, number>();
     for (const t of statusTasks) {
-      const status = t.status === "queued" ? "backlog" : t.status;
-      byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
+      const pill = pillFor(t.status);
+      if (pill) byStatus.set(pill, (byStatus.get(pill) ?? 0) + 1);
     }
     for (const t of projectTasks) {
       byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
@@ -107,8 +132,13 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
       .filter((c) => c.count > 0 || c.project.name === activeProject)
       .sort((a, b) => b.count - a.count || a.project.name.localeCompare(b.project.name));
 
-    return { statusCounts: byStatus, projectChips: chips, grandTotal: statusTasks.length, projectTotal: projectTasks.length };
-  }, [tasks, projects, filter, activeProject]);
+    return {
+      statusCounts: byStatus,
+      projectChips: chips,
+      grandTotal: statusTasks.length,
+      projectTotal: projectTasks.length,
+    };
+  }, [statusTasks, projectTasks, projects, activeProject]);
 
   // "All projects" sits above rows counted within the chosen status, so it has
   // to be that status's total — or everything when no status is chosen.
@@ -352,4 +382,37 @@ function Row({
       {selected && <Check className="size-4 shrink-0" />}
     </button>
   );
+}
+
+/** Tasks matching a query, resolved by the server so the sheet's counts use the
+ * same grammar as the filter itself. Only runs while the sheet is open; falls
+ * back to the unfiltered set so a count is never blank. */
+function useFilteredTasks(query: string, active: boolean, all: Task[]): Task[] {
+  const [matched, setMatched] = useState<Task[] | null>(null);
+
+  useEffect(() => {
+    if (!active) {
+      setMatched(null);
+      return;
+    }
+    if (query.trim() === "") {
+      setMatched(null);
+      return;
+    }
+    let live = true;
+    void api
+      .listTasks({ all: true, filter: query })
+      .then((tasks) => {
+        if (live) setMatched(tasks);
+      })
+      .catch(() => {
+        if (live) setMatched(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [query, active]);
+
+  const visible = useMemo(() => all.filter((t) => t.status !== "archived"), [all]);
+  return matched ?? visible;
 }
