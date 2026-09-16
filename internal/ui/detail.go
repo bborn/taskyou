@@ -2787,13 +2787,16 @@ func (m *DetailModel) renderHeader() string {
 	// right-aligned row, where the only outcomes are wrapping (which strands the
 	// tail on a line of its own) or truncating a path away to an ellipsis.
 
-	// PR link if available
+	// PR link if available. These lines are right-aligned, so the URL ends flush
+	// against the pane's padding and border — exactly where a terminal guessing a
+	// link's extent from the screen picks up the border character. linkifyURLs
+	// gives the click an explicit target instead.
 	var prLine string
 	if m.prInfo != nil && m.prInfo.URL != "" {
 		if m.focused {
-			prLine = Dim.Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
+			prLine = linkifyURLs(Dim.Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL)))
 		} else {
-			prLine = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
+			prLine = linkifyURLs(lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL)))
 		}
 	}
 
@@ -2801,9 +2804,9 @@ func (m *DetailModel) renderHeader() string {
 	var serverLine string
 	if serverURL := m.GetServerURL(); serverURL != "" {
 		if m.focused {
-			serverLine = Dim.Render(fmt.Sprintf("Server: %s", serverURL))
+			serverLine = linkifyURLs(Dim.Render(fmt.Sprintf("Server: %s", serverURL)))
 		} else {
-			serverLine = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("Server: %s", serverURL))
+			serverLine = linkifyURLs(lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("Server: %s", serverURL)))
 		}
 	}
 
