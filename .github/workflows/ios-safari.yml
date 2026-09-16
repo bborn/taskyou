@@ -55,6 +55,14 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/ios-tools" --no-audit --no-fund appium@3.7.0
           echo "$RUNNER_TEMP/ios-tools/node_modules/.bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/ios-tools/node_modules/.bin/appium" driver install xcuitest@12.12.4
+      - name: Download verified prebuilt device helper
+        timeout-minutes: 2
+        run: |
+          curl --fail --location --max-time 60 --output "$RUNNER_TEMP/wda.zip" \
+            https://github.com/appium/WebDriverAgent/releases/download/v16.12.8/WebDriverAgentRunner-Build-Sim-arm64.zip
+          echo "99bca36962e6f06bb140971f467e851f4cebf9e89c20af8d45bcd6f3bd00aab4  $RUNNER_TEMP/wda.zip" | shasum -a 256 --check
+          unzip -q "$RUNNER_TEMP/wda.zip" -d "$RUNNER_TEMP/wda"
+          echo "QA_WDA_PATH=$RUNNER_TEMP/wda/WebDriverAgentRunner-Runner.app" >> "$GITHUB_ENV"
       - name: Exercise Safari with the software keyboard
         timeout-minutes: 9
         run: python3 scripts/qa/ios/check-safari.py "$RUNNER_TEMP/ty-ios-qa"

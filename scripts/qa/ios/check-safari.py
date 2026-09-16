@@ -74,6 +74,7 @@ def main():
         wd('POST', f'/element/{ident}/click', {})
 
     def evidence(name):
+        print(f'Capturing {name}', flush=True)
         png = wd('GET', '/screenshot')
         (artifacts / f'{name}.png').write_bytes(base64.b64decode(png))
         geometry = js('''return {url:location.href, ua:navigator.userAgent,
@@ -104,7 +105,11 @@ def main():
             choices = [(runtime, d) for runtime, ds in devices['devices'].items()
                        if 'iOS' in runtime for d in ds if d['name'].startswith('iPhone') and d.get('isAvailable')]
             assert choices, 'Runner has no preinstalled iPhone simulator; do not download a runtime'
-            runtime, device = sorted(choices, key=lambda pair: (pair[0], pair[1]['name']))[-1]
+            sdk = subprocess.check_output(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True).strip()
+            choices = [(r, d) for r, d in choices if r.endswith('iOS-' + sdk.replace('.', '-'))]
+            assert choices, f'No installed simulator matching selected Xcode SDK {sdk}'
+            runtime, device = sorted(choices, key=lambda pair: (pair[1]['name'] != 'iPhone 16', pair[1]['name']))[0]
+            print(f'Starting {device["name"]} on {runtime}', flush=True)
             (artifacts / 'device.json').write_text(json.dumps({'runtime': runtime, 'device': device}, indent=2))
             start(['appium', '--address', '127.0.0.1', '--port', '4723', '--log-level', 'info'], 'appium')
             wait_for(lambda: request('GET', appium + '/status'), 'Appium', 45)
@@ -116,9 +121,11 @@ def main():
                 'appium:forceSimulatorSoftwareKeyboardPresence': True,
                 'appium:isHeadless': True, 'appium:newCommandTimeout': 90,
                 'appium:webviewAtomWaitTimeout': 20000,
-                'appium:showXcodeLog': True,
+                'appium:usePreinstalledWDA': True,
+                'appium:prebuiltWDAPath': os.environ['QA_WDA_PATH'],
             }}}, timeout=240)
             session = result['value']['sessionId']
+            print('Safari session ready', flush=True)
             wd('POST', '/url', {'url': site})
             wait_for(lambda: js('return !!document.querySelector("button svg.lucide-list-filter")'), 'board')
             before = evidence('01-board')['viewport']['height']
