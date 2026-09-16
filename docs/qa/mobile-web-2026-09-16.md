@@ -41,3 +41,15 @@ Additional observed behaviors worth a focused follow-up:
 - Agent execution, real model replies, and OS photo-picker permissions were not exercised. Reply transport outcomes were mocked; file bytes were uploaded through the real API.
 
 Changes are local; no live server has been deployed by this QA run.
+
+## Real iPhone Safari follow-up
+
+Tested the production preview on an iPhone 11 through macOS iPhone Mirroring, using the same isolated fixture API over the local network. Verified visually:
+
+- The 65-task board loads in native Safari.
+- Typing `mobile qa` retains the space and filters to one task; status and project counts agree. iOS capitalized the initial letter and displayed a correction suggestion.
+- The task detail and actions sheet open, including Edit task and Attachments.
+- The edit form fits the available Safari viewport and exposes Cancel and Save.
+- Add files opens the native Photo Library / Take Photo or Video / Choose Files menu. No personal file was selected or uploaded.
+
+**Limitation:** iPhone Mirroring suppressed the full software keyboard even with text inputs focused; only the input accessory controls appeared. This verifies a subset of native Safari behavior, not software-keyboard overlap, viewport panning, or installed-PWA behavior. Those remain unverified and need direct phone interaction with screen capture or a simulator. No agent execution was triggered.
