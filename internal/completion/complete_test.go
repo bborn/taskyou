@@ -65,9 +65,16 @@ func TestVerifyFailureRejectsCompletion(t *testing.T) {
 	}
 }
 
+// A passing verify lets completion through. The step has a dependent so the
+// completion it reaches is the done-write automation may make.
 func TestVerifyPassAllowsCompletion(t *testing.T) {
 	database := testDB(t)
-	task := mkTask(t, database, "build it", db.StatusProcessing, "", "")
+	branch := "pipeline/4-goal"
+	task := mkTask(t, database, "[build] goal", db.StatusProcessing, "pipeline", branch)
+	next := mkTask(t, database, "[ship] goal", db.StatusBlocked, "pipeline", branch)
+	if err := database.AddDependency(task.ID, next.ID, true); err != nil {
+		t.Fatalf("wire dependency: %v", err)
+	}
 	if err := database.SetStepVerify(task.ID, "true"); err != nil {
 		t.Fatalf("set verify: %v", err)
 	}
@@ -170,7 +177,9 @@ func TestTerminalTaskWithPRParksForReview(t *testing.T) {
 	}
 }
 
-func TestPlainTaskGoesDone(t *testing.T) {
+// A plain task with no PR is finished, not done: only a human closes it, so it
+// parks in 'blocked' for review.
+func TestPlainTaskParksForReview(t *testing.T) {
 	database := testDB(t)
 	task := mkTask(t, database, "move a file", db.StatusProcessing, "", "")
 
@@ -178,11 +187,34 @@ func TestPlainTaskGoesDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if outcome.Kind != KindDone {
-		t.Fatalf("kind = %q, want done", outcome.Kind)
+	if outcome.Kind != KindReview {
+		t.Fatalf("kind = %q, want %q", outcome.Kind, KindReview)
 	}
-	if got := statusOf(t, database, task.ID); got != db.StatusDone {
-		t.Errorf("status = %q, want done", got)
+	if got := statusOf(t, database, task.ID); got != db.StatusBlocked {
+		t.Errorf("status = %q, want blocked awaiting a human close", got)
+	}
+}
+
+// The last step of a workflow has nothing waiting on it, so it is the
+// workflow's result and a human closes it like any other task.
+func TestTerminalWorkflowStepParksForReview(t *testing.T) {
+	database := testDB(t)
+	branch := "pipeline/5-goal"
+	root := mkTask(t, database, "[research] goal", db.StatusProcessing, "pipeline", branch)
+	last := mkTask(t, database, "[ship] goal", db.StatusProcessing, "pipeline", branch)
+	if err := database.AddDependency(root.ID, last.ID, true); err != nil {
+		t.Fatalf("wire dependency: %v", err)
+	}
+
+	outcome, err := Complete(database, last.ID, "shipped", Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Kind != KindReview {
+		t.Fatalf("kind = %q, want %q", outcome.Kind, KindReview)
+	}
+	if got := statusOf(t, database, last.ID); got != db.StatusBlocked {
+		t.Errorf("status = %q, want blocked", got)
 	}
 }
 

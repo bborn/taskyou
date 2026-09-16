@@ -23,8 +23,17 @@ func newVerifySweepExecutor(t *testing.T) (*Executor, *db.DB) {
 
 func gatedStepTask(t *testing.T, database *db.DB, verifyCmd string) *db.Task {
 	t.Helper()
-	task := &db.Task{Title: "[model] x", Status: db.StatusProcessing, Project: "p", Tags: "pipeline"}
+	// An intermediate step — shared branch, a dependent waiting on it — which is
+	// the only kind the sweep may complete.
+	task := &db.Task{Title: "[model] x", Status: db.StatusProcessing, Project: "p", Tags: "pipeline", SourceBranch: "pipeline/1-x"}
 	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	next := &db.Task{Title: "[build] x", Status: db.StatusBlocked, Project: "p", Tags: "pipeline", SourceBranch: "pipeline/1-x"}
+	if err := database.CreateTask(next); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AddDependency(task.ID, next.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	task.WorktreePath = t.TempDir()

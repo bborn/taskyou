@@ -117,8 +117,10 @@ export function DetailView({ taskId }: { taskId: number }) {
   // (tool calls and system lines) and stays collapsed until asked for.
   const [showLogs, setShowLogs] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messageError, setMessageError] = useState("");
   const [showChat, setShowChat] = useState(true);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -165,7 +167,6 @@ export function DetailView({ taskId }: { taskId: number }) {
   useEffect(() => {
     let active = true;
     let unsubscribe: (() => void) | undefined;
-    let messageRefresh: ReturnType<typeof setTimeout> | null = null;
     historyRevision.current++;
     setTask((current) => current?.id === taskId ? current : null);
     setLogs([]);
@@ -182,32 +183,38 @@ export function DetailView({ taskId }: { taskId: number }) {
       unsubscribe = subscribeTaskLogs(taskId, since, (batch) => {
         if (!active) return;
         setLogs((prev) => mergeRecentLogs(prev, batch));
-        // Log activity means the transcript on disk has almost certainly grown
-        // too, so keep the conversation live. Throttled hard: the server
-        // re-reads and re-parses the whole session file, which must not happen
-        // once per log line.
-        if (messageRefresh === null) {
-          messageRefresh = setTimeout(() => {
-            messageRefresh = null;
-            api
-              .taskMessages(taskId)
-              .then((m) => { if (active) setMessages(m); })
-              .catch(() => {});
-          }, 4000);
-        }
       });
     }).catch((e) => {
       if (active) store.toast({title: `Failed to load #${taskId}`, body: String(e), kind: "error"});
     });
     api.deps(taskId).then((value) => { if (active) setDeps(value); }).catch(() => { if (active) setDeps(null); });
     setMessages([]);
-    api.taskMessages(taskId)
-      .then((m) => { if (active) setMessages(m); })
-      .catch(() => { if (active) setMessages([]); });
+    setMessageError("");
+    let messageBusy = false;
+    const refreshMessages = () => {
+      if (messageBusy) return;
+      messageBusy = true;
+      api.taskMessages(taskId)
+        .then((m) => {
+          if (active) {
+            setMessages(m);
+            setMessageError("");
+          }
+        })
+        .catch((e) => {
+          if (active) setMessageError(e instanceof Error ? e.message : String(e));
+        })
+        .finally(() => { messageBusy = false; });
+    };
+    refreshMessages();
+    // Remote pane activity is observed over SSH and does not append local task
+    // logs. The endpoint fingerprints session files first, so unchanged polls
+    // remain metadata-only instead of retransmitting transcript data.
+    const messagePoll = setInterval(refreshMessages, 5000);
     return () => {
       active = false;
       unsubscribe?.();
-      if (messageRefresh !== null) clearTimeout(messageRefresh);
+      clearInterval(messagePoll);
     };
   }, [taskId]);
 
@@ -245,15 +252,9 @@ export function DetailView({ taskId }: { taskId: number }) {
   //
   // `follow` on a phone: 135 turns deep, opening at the oldest message means
   // scrolling the whole history to find what the agent is waiting on.
-  // A task placed on another host keeps its transcript over there, and its
-  // local worktree_path is empty — so there is genuinely nothing to read here.
-  // Saying "hasn't started yet" about a running task would be a lie.
-  const remoteHost =
-    task.placement_target && task.placement_target !== "local" ? task.placement_target : "";
-  const chatEmptyHint =
-    remoteHost && !task.worktree_path
-      ? `This task runs on ${remoteHost}, and its transcript lives on that host — nothing to read locally.`
-      : undefined;
+  const chatEmptyHint = messageError
+    ? `Could not load the conversation: ${messageError}`
+    : undefined;
 
   const conversationSection = (
     <>
@@ -262,6 +263,11 @@ export function DetailView({ taskId }: { taskId: number }) {
         Conversation <span className="font-normal">({messages.length})</span>
       </SectionTitle>
       {showChat && <ChatList messages={messages} follow={isMobile} emptyHint={chatEmptyHint} />}
+      {showChat && messages.length > 0 && messageError && (
+        <div className="px-1 py-2 text-xs text-status-blocked">
+          Could not refresh the conversation: {messageError}
+        </div>
+      )}
     </>
   );
 
@@ -442,6 +448,13 @@ export function DetailView({ taskId }: { taskId: number }) {
               store.setForm({ kind: "edit", taskId: task.id });
             }}
           />
+          <ActionRow
+            label="Attachments"
+            onClick={() => {
+              setActionsOpen(false);
+              setAttachmentsOpen(true);
+            }}
+          />
           {task.pr_url && (
             <ActionRow
               label={task.pr_number ? `Open PR #${task.pr_number}` : "Open PR"}
@@ -476,6 +489,13 @@ export function DetailView({ taskId }: { taskId: number }) {
               )}
             </SelectContent>
           </Select>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={attachmentsOpen} onOpenChange={setAttachmentsOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Attachments</DialogTitle></DialogHeader>
+          <AttachmentsPanel taskId={task.id} />
         </DialogContent>
       </Dialog>
 

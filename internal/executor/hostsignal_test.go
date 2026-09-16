@@ -218,8 +218,9 @@ func TestDoneSignalParksAPRBearingTaskForReview(t *testing.T) {
 	}
 }
 
-// With no PR, a placed task that reports done is genuinely finished.
-func TestDoneSignalWithoutAPRCompletesTheTask(t *testing.T) {
+// With no PR, a placed task that reports done is finished but not closed: only a
+// human moves a task to done, so it parks in 'blocked' for review.
+func TestDoneSignalWithoutAPRParksForReview(t *testing.T) {
 	e, database := reconcileTestExecutor(t)
 
 	task := &db.Task{Title: "placed chore", Status: db.StatusProcessing, Project: "test"}
@@ -233,8 +234,8 @@ func TestDoneSignalWithoutAPRCompletesTheTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != db.StatusDone {
-		t.Errorf("status = %q, want done", got.Status)
+	if got.Status != db.StatusBlocked {
+		t.Errorf("status = %q, want blocked awaiting a human close", got.Status)
 	}
 }
 

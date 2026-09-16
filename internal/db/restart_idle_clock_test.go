@@ -20,9 +20,13 @@ func TestRestartIdleClock(t *testing.T) {
 			"test fixture: the task started running", NoEvidence); err != nil {
 			t.Fatalf("start task: %v", err)
 		}
-		if err := database.SetTaskStatus(task.ID, status, ActorDaemon,
-			"test fixture: the task stopped and parked",
-			Observedf("the agent finished its turn")); err != nil {
+		actor, ev := ActorDaemon, Observedf("the agent finished its turn")
+		if status == StatusDone {
+			// Only a human closes a task.
+			actor, ev = ActorCLI, ByHuman("ran `ty close %d`", task.ID)
+		}
+		if err := database.SetTaskStatus(task.ID, status, actor,
+			"test fixture: the task stopped and parked", ev); err != nil {
 			t.Fatalf("set status: %v", err)
 		}
 		// Parked well past the default six-hour idle timeout.

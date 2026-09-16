@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
-import { AnimatePresence } from "motion/react";
-import { Check, ChevronDown, ChevronRight, ListFilter, X } from "lucide-react";
-import type { Column } from "../lib/board";
-import { parseFilter, referenceTime } from "../lib/board";
+import { useEffect, useMemo, useState } from "react";
+import { Check, ListFilter, X } from "lucide-react";
+import type { Task } from "../api/types";
+import { api } from "../api/client";
+import { parseFilter } from "../lib/board";
+import { GROUP_BY_OPTIONS, SORT_OPTIONS, type ListGroupBy, type ListSort } from "../lib/list";
 import { store, useAppSelector } from "../store";
-import { CardSlot } from "./Board";
+import { TaskList } from "./TaskList";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import {
@@ -14,12 +15,33 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+// The four pills must partition the board — every task answers to exactly one,
+// or tasks fall through the gaps. "In progress" is queued AND processing, the
+// same pairing the kanban column and the list section make: a queued task used
+// to belong to neither "Running" (processing only) nor "Backlog".
 const FILTERS = [
   { key: "blocked", label: "Needs you", token: "blocked" },
-  { key: "processing", label: "Running", token: "running" },
+  { key: "processing", label: "In progress", token: "in-progress" },
   { key: "backlog", label: "Backlog", token: "backlog" },
   { key: "done", label: "Done", token: "done" },
 ] as const;
+
+/** Which pill a task belongs to. */
+function pillFor(status: string): FilterKey | null {
+  switch (status) {
+    case "blocked":
+      return "blocked";
+    case "queued":
+    case "processing":
+      return "processing";
+    case "backlog":
+      return "backlog";
+    case "done":
+      return "done";
+    default:
+      return null; // archived
+  }
+}
 
 type FilterKey = (typeof FILTERS)[number]["key"];
 
@@ -36,9 +58,6 @@ const EMPTY: Record<FilterKey, string> = {
   backlog: "Backlog is empty.",
   done: "Nothing finished yet.",
 };
-
-/** Cards rendered before a "show more" button; Done alone can hold hundreds. */
-const RENDER_CAP = 50;
 
 const STATUS_TOKEN = /\bis:[a-z-]+/gi;
 const PROJECT_TOKEN = /\[[^\]]*\]?/g;
@@ -61,67 +80,51 @@ function textOf(filter: string): string {
  * Project chips, a status pill and a search button could not share 390px —
  * every arrangement sliced a chip. They are all the same filter string
  * underneath (`is:running [offerlab] text`), so they are now one field that
- * opens a sheet.
+ * opens a sheet. Saved views and the list arrangement join that same sheet
+ * rather than growing a second control, for the same reason.
  *
- * No filter means no filter: with no `is:` token the list is every task,
- * newest first, not a status picked on your behalf.
+ * The list itself is TaskList — the same component and the same sections the
+ * desktop list uses, rendered as cards because a dense five-column row is not a
+ * touch target. This board used to hand-roll its own pinned-first, newest-first
+ * ordering, which is how it and the desktop list came to disagree about what
+ * order tasks go in.
  */
-export function MobileBoard({ columns }: { columns: Column[] }) {
+export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
   const projects = useAppSelector((s) => s.projects);
   const tasks = useAppSelector((s) => s.tasks);
-  const latestLogs = useAppSelector((s) => s.latestLogs);
   const filter = useAppSelector((s) => s.filter);
+  const listOptions = useAppSelector((s) => s.listOptions);
+  const savedViews = useAppSelector((s) => s.savedViews);
+  const activeView = useAppSelector((s) => s.activeView);
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [showAll, setShowAll] = useState(false);
-  // Fold state is deliberately not persisted — deck does the same; it is a
-  // glance-level toggle, not a preference.
-  const [pinnedFolded, setPinnedFolded] = useState(false);
+  // Keep keystrokes verbatim: the serialized filter trims whitespace, which
+  // otherwise eats the space before the user can type the next word.
+  const [searchInput, setSearchInput] = useState("");
 
   const parsed = parseFilter(filter);
   const activeStatus: FilterKey | null = (parsed.status as FilterKey | undefined) ?? null;
   const activeProject = parsed.project ?? null;
   const searchText = textOf(filter);
 
-  // Unfiltered: every column flattened and ordered by the same rule the columns
-  // use internally, so a mixed list still reads newest-first with pins on top.
-  const listTasks = useMemo(() => {
-    if (activeStatus) return columns.find((c) => c.status === activeStatus)?.tasks ?? [];
-    return columns
-      .flatMap((c) => c.tasks)
-      .sort((a, b) => {
-        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-        return referenceTime(b) - referenceTime(a);
-      });
-  }, [columns, activeStatus]);
+  // Counts ignore the dimension they describe: the status counts drop the status
+  // token from the query, the project counts drop the project token. They are
+  // resolved by the server for the same reason the list is — a count produced by
+  // a different parser than the filter is a number that disagrees with the rows
+  // underneath it.
+  const statusQuery = useMemo(() => withToken(filter, STATUS_TOKEN, null), [filter]);
+  const projectQuery = useMemo(() => withToken(filter, PROJECT_TOKEN, null), [filter]);
+  const statusTasks = useFilteredTasks(statusQuery, sheetOpen, tasks);
+  const projectTasks = useFilteredTasks(projectQuery, sheetOpen, tasks);
 
-  // Pins lead in their own group, as bb's deck does: scattering them through
-  // the list is what makes pinning pointless. The render cap applies to the
-  // remainder only — a pinned task must never fall outside the cap and vanish
-  // from the very group that exists to keep it visible.
-  const pinnedTasks = useMemo(() => listTasks.filter((t) => t.pinned), [listTasks]);
-  const restTasks = useMemo(() => listTasks.filter((t) => !t.pinned), [listTasks]);
-  const visible = showAll ? restTasks : restTasks.slice(0, RENDER_CAP);
-
-  // Counts ignore the dimension they describe: status counts span every status,
-  // project counts sit within the chosen one (or all of them when none is set).
-  const { statusCounts, projectChips, grandTotal } = useMemo(() => {
-    const text = searchText.toLowerCase();
-    const matchesText = (t: (typeof tasks)[number]) =>
-      !text || t.title.toLowerCase().includes(text) || t.body.toLowerCase().includes(text);
-
+  const { statusCounts, projectChips, grandTotal, projectTotal } = useMemo(() => {
     const byStatus = new Map<string, number>();
     const byProject = new Map<string, number>();
-    let total = 0;
-    for (const t of tasks) {
-      if (t.status === "archived" || !matchesText(t)) continue;
-      const status = t.status === "queued" ? "backlog" : t.status;
-      if (!activeProject || t.project === activeProject) {
-        byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
-        total++;
-      }
-      if (!activeStatus || status === activeStatus) {
-        byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
-      }
+    for (const t of statusTasks) {
+      const pill = pillFor(t.status);
+      if (pill) byStatus.set(pill, (byStatus.get(pill) ?? 0) + 1);
+    }
+    for (const t of projectTasks) {
+      byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
     }
 
     const chips = projects
@@ -129,46 +132,62 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
       .filter((c) => c.count > 0 || c.project.name === activeProject)
       .sort((a, b) => b.count - a.count || a.project.name.localeCompare(b.project.name));
 
-    return { statusCounts: byStatus, projectChips: chips, grandTotal: total };
-  }, [tasks, projects, activeStatus, activeProject, searchText]);
+    return {
+      statusCounts: byStatus,
+      projectChips: chips,
+      grandTotal: statusTasks.length,
+      projectTotal: projectTasks.length,
+    };
+  }, [statusTasks, projectTasks, projects, activeProject]);
 
   // "All projects" sits above rows counted within the chosen status, so it has
   // to be that status's total — or everything when no status is chosen.
-  const totalForProjects = activeStatus ? (statusCounts.get(activeStatus) ?? 0) : grandTotal;
+  const totalForProjects = projectTotal;
 
   // Picking a status or a project is a decision; close the sheet so you land
   // back on the list. Typing is not, so the text field leaves it open.
   function setStatus(key: FilterKey | null) {
     const token = key ? `is:${FILTERS.find((f) => f.key === key)!.token}` : null;
     store.setFilter(withToken(filter, STATUS_TOKEN, token));
-    setShowAll(false);
     setSheetOpen(false);
   }
   function setProject(name: string | null) {
     store.setFilter(withToken(filter, PROJECT_TOKEN, name ? `[${name}]` : null));
-    setShowAll(false);
     setSheetOpen(false);
   }
   function setText(next: string) {
+    setSearchInput(next);
     const status = filter.match(STATUS_TOKEN)?.[0];
     const project = filter.match(PROJECT_TOKEN)?.[0];
     store.setFilter([status, project, next.trim()].filter(Boolean).join(" "));
-    setShowAll(false);
   }
   function clearAll() {
-    store.setFilter("");
-    setShowAll(false);
+    store.clearFilter();
   }
 
-  const statusLabel = activeStatus ? FILTERS.find((f) => f.key === activeStatus)!.label : "All tasks";
-  const filtered = activeStatus !== null || activeProject !== null || searchText !== "";
+  const statusLabel = activeView
+    ? activeView
+    : activeStatus
+      ? FILTERS.find((f) => f.key === activeStatus)!.label
+      : "All tasks";
+  const filtered =
+    activeStatus !== null || activeProject !== null || searchText !== "" || activeView !== "";
+
+  const emptyMessage = filtered
+    ? activeStatus && !activeProject && !searchText
+      ? EMPTY[activeStatus]
+      : "No tasks match that filter."
+    : "No tasks yet.";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* One control: status, project and text in a single field. */}
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <button
-          onClick={() => setSheetOpen(true)}
+          onClick={() => {
+            setSearchInput(textOf(filter));
+            setSheetOpen(true);
+          }}
           className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border bg-surface-1 px-3 text-left text-[13px]"
         >
           <ListFilter className="size-4 shrink-0 text-muted-foreground" />
@@ -181,7 +200,7 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
             {statusLabel}
           </span>
           <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-            {listTasks.length}
+            {filteredTasks.length}
           </span>
           {activeProject && (
             <span className="min-w-0 truncate text-muted-foreground">· {activeProject}</span>
@@ -199,74 +218,12 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
         )}
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain px-3 pt-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
-        {listTasks.length === 0 ? (
-          <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-            {filtered
-              ? activeStatus && !activeProject && !searchText
-                ? EMPTY[activeStatus]
-                : "No tasks match that filter."
-              : "No tasks yet."}
-          </div>
-        ) : (
-          <>
-            {pinnedTasks.length > 0 && (
-              <>
-                <button
-                  onClick={() => setPinnedFolded(!pinnedFolded)}
-                  className="-mx-1 flex items-center gap-1.5 px-1 py-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase active:text-foreground"
-                >
-                  {pinnedFolded ? (
-                    <ChevronRight className="size-3" />
-                  ) : (
-                    <ChevronDown className="size-3" />
-                  )}
-                  Pinned
-                  <span className="tabular-nums opacity-70">{pinnedTasks.length}</span>
-                </button>
-                {!pinnedFolded && (
-                  <AnimatePresence initial={false}>
-                    {pinnedTasks.map((task) => (
-                      <CardSlot
-                        key={task.id}
-                        task={task}
-                        selected={false}
-                        tapToOpen
-                        projectColor={
-                          projects.find((p) => p.name === task.project)?.color ||
-                          "var(--muted-foreground)"
-                        }
-                        latest={latestLogs[String(task.id)]}
-                      />
-                    ))}
-                  </AnimatePresence>
-                )}
-                {restTasks.length > 0 && <div className="my-1 border-t" />}
-              </>
-            )}
-          <AnimatePresence initial={false}>
-            {visible.map((task) => (
-              <CardSlot
-                key={task.id}
-                task={task}
-                selected={false}
-                tapToOpen
-                projectColor={projects.find((p) => p.name === task.project)?.color || "var(--muted-foreground)"}
-                latest={latestLogs[String(task.id)]}
-              />
-            ))}
-          </AnimatePresence>
-          </>
-        )}
-        {restTasks.length > visible.length && (
-          <button
-            className="rounded-lg py-3 text-center text-[13px] text-muted-foreground active:bg-surface-2"
-            onClick={() => setShowAll(true)}
-          >
-            {restTasks.length - visible.length} more…
-          </button>
-        )}
-      </div>
+      <TaskList
+        tasks={filteredTasks}
+        options={listOptions}
+        variant="card"
+        emptyMessage={emptyMessage}
+      />
 
       <Dialog open={sheetOpen} onOpenChange={setSheetOpen}>
         <DialogContent className="max-w-md">
@@ -276,11 +233,28 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
 
           {/* 16px text: iOS Safari zooms the page when focusing anything smaller. */}
           <Input
-            value={searchText}
+            value={searchInput}
             className="h-11 text-base md:text-base"
             placeholder="Search title, body, or #123"
             onChange={(e) => setText(e.target.value)}
           />
+
+          {savedViews.length > 0 && (
+            <>
+              <Section title="Views" />
+              {savedViews.map((view) => (
+                <Row
+                  key={view.id}
+                  label={view.name}
+                  selected={activeView === view.name}
+                  onClick={() => {
+                    void store.applyView(view.name);
+                    setSheetOpen(false);
+                  }}
+                />
+              ))}
+            </>
+          )}
 
           <Section title="Status" />
           <Row
@@ -316,6 +290,21 @@ export function MobileBoard({ columns }: { columns: Column[] }) {
               onClick={() => setProject(project.name)}
             />
           ))}
+
+          {/* Arrangement lives in this sheet rather than a second control, for
+              the same reason everything else does: 390px only fits one. */}
+          <Section title="Group by" />
+          <Chips
+            options={GROUP_BY_OPTIONS}
+            value={listOptions.groupBy}
+            onChange={(groupBy: ListGroupBy) => store.setListOptions({ ...listOptions, groupBy })}
+          />
+          <Section title="Sort" />
+          <Chips
+            options={SORT_OPTIONS}
+            value={listOptions.sort}
+            onChange={(sort: ListSort) => store.setListOptions({ ...listOptions, sort })}
+          />
         </DialogContent>
       </Dialog>
     </div>
@@ -330,6 +319,35 @@ function Section({ title }: { title: string }) {
   );
 }
 
+function Chips<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: readonly T[];
+  value: T;
+  onChange: (next: T) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => (
+        <button
+          key={opt}
+          onClick={() => onChange(opt)}
+          className={cn(
+            "h-9 rounded-lg px-3 text-[13px] capitalize",
+            opt === value
+              ? "bg-primary font-medium text-primary-foreground"
+              : "bg-surface-2 text-muted-foreground",
+          )}
+        >
+          {opt}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Row({
   label,
   count,
@@ -338,7 +356,7 @@ function Row({
   onClick,
 }: {
   label: string;
-  count: number;
+  count?: number;
   color?: string;
   selected: boolean;
   onClick: () => void;
@@ -357,9 +375,44 @@ function Row({
           style={{ background: color || "var(--muted-foreground)" }}
         />
       )}
-      <span className="min-w-0 truncate">{label}</span>
-      <span className="ml-auto shrink-0 text-[13px] tabular-nums opacity-70">{count}</span>
+      <span className={cn("min-w-0 truncate", count === undefined && "flex-1")}>{label}</span>
+      {count !== undefined && (
+        <span className="ml-auto shrink-0 text-[13px] tabular-nums opacity-70">{count}</span>
+      )}
       {selected && <Check className="size-4 shrink-0" />}
     </button>
   );
+}
+
+/** Tasks matching a query, resolved by the server so the sheet's counts use the
+ * same grammar as the filter itself. Only runs while the sheet is open; falls
+ * back to the unfiltered set so a count is never blank. */
+function useFilteredTasks(query: string, active: boolean, all: Task[]): Task[] {
+  const [matched, setMatched] = useState<Task[] | null>(null);
+
+  useEffect(() => {
+    if (!active) {
+      setMatched(null);
+      return;
+    }
+    if (query.trim() === "") {
+      setMatched(null);
+      return;
+    }
+    let live = true;
+    void api
+      .listTasks({ all: true, filter: query })
+      .then((tasks) => {
+        if (live) setMatched(tasks);
+      })
+      .catch(() => {
+        if (live) setMatched(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [query, active]);
+
+  const visible = useMemo(() => all.filter((t) => t.status !== "archived"), [all]);
+  return matched ?? visible;
 }

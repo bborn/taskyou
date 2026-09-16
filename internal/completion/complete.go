@@ -38,10 +38,15 @@ const (
 	// KindGateParked means a human-review gate finished and parked in 'blocked'
 	// awaiting approval, holding its dependents.
 	KindGateParked Kind = "gate_parked"
-	// KindPRReview means the task produced a PR and parked in 'blocked' awaiting a
-	// human merge (the daemon promotes it to 'done' once the PR closes).
+	// KindPRReview means the task produced a PR and parked in 'blocked' for a
+	// human to merge and close. Nothing moves it to 'done' but that human.
 	KindPRReview Kind = "pr_review"
-	// KindDone means the task is genuinely finished and moved to 'done'.
+	// KindReview means the task finished with no PR and parked in 'blocked' for
+	// a human to review and close.
+	KindReview Kind = "review"
+	// KindDone means a workflow step with dependents finished and moved to
+	// 'done', releasing the next steps. It is the only completion automation
+	// may write.
 	KindDone Kind = "done"
 )
 
@@ -164,7 +169,8 @@ func isDir(path string) bool {
 //     This is the backstop against completion-by-assertion; nothing below runs.
 //  2. A non-terminal human gate parks 'blocked' (its dependents stay held).
 //  3. A terminal task with a PR parks 'blocked' for the human merge.
-//  4. Otherwise the task is done.
+//  4. Any other terminal task parks 'blocked' for the human to close.
+//  5. A workflow step with dependents is done, which advances the workflow.
 func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Outcome, error) {
 	task, err := database.GetTask(taskID)
 	if err != nil || task == nil {
@@ -230,7 +236,7 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 			db.Evidence{Observed: "the agent signalled completion", PRNumber: prNumber, PRState: "OPEN"}); err != nil {
 			return nil, fmt.Errorf("failed to move task to review: %w", err)
 		}
-		reviewMsg := fmt.Sprintf("✅ PR #%d ready for review — merge or close it to complete this task.", prNumber)
+		reviewMsg := fmt.Sprintf("✅ PR #%d ready for review — merge it, then close this task.", prNumber)
 		if prURL != "" {
 			reviewMsg += " " + prURL
 		}
@@ -239,32 +245,45 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 		return &Outcome{Kind: KindPRReview, PRNumber: prNumber, PRURL: prURL}, nil
 	}
 
-	// 4. No PR of its own — genuinely done.
-	//
-	// A non-terminal step can still carry a PR NUMBER: the steps of a workflow
-	// share one branch, so the terminal step's PR matches all of them. That is
-	// the one case where a done-write happens with an open PR on the row, and
-	// the evidence has to say so out loud rather than the gate guessing.
-	ev := doneEvidence(summary, verifiedGate)
-	if nonTerminalStep {
-		ev = ev.DisownSharedBranchPR(task.PRNumber, task.BranchName)
-	}
-	if err := database.SetTaskStatus(taskID, db.StatusDone, actorFor(opts),
-		"completion signalled and every gate passed, with no PR of its own awaiting review",
-		ev); err != nil {
-		return nil, fmt.Errorf("failed to mark task done: %w", err)
-	}
-
 	generate := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		_, _ = tasksummary.GenerateAndStore(ctx, database, taskID)
 	}
-	if opts.AsyncSummary {
-		go generate()
-	} else {
-		generate()
+	summarize := func() {
+		if opts.AsyncSummary {
+			go generate()
+		} else {
+			generate()
+		}
 	}
+
+	// 4. No PR, not a workflow step others wait on: park for the human. Only a
+	// person moves a task to done (see the human-only gate in db.SetTaskStatus).
+	if !nonTerminalStep {
+		if err := database.SetTaskStatus(taskID, db.StatusBlocked, actorFor(opts),
+			"work finished — parked for a human to review and close",
+			doneEvidence(summary, verifiedGate)); err != nil {
+			return nil, fmt.Errorf("failed to park task for review: %w", err)
+		}
+		database.AppendTaskLog(taskID, "question", "✅ Work finished — review it and close the task when you're happy.")
+		summarize()
+		return &Outcome{Kind: KindReview}, nil
+	}
+
+	// 5. A workflow step with dependents — done, so the next steps start.
+	//
+	// A non-terminal step can still carry a PR NUMBER: the steps of a workflow
+	// share one branch, so the terminal step's PR matches all of them. That is
+	// the one case where a done-write happens with an open PR on the row, and
+	// the evidence has to say so out loud rather than the gate guessing.
+	ev := doneEvidence(summary, verifiedGate).DisownSharedBranchPR(task.PRNumber, task.BranchName)
+	if err := database.SetTaskStatus(taskID, db.StatusDone, actorFor(opts),
+		"workflow step finished and every gate passed; its dependents can start",
+		ev); err != nil {
+		return nil, fmt.Errorf("failed to mark task done: %w", err)
+	}
+	summarize()
 
 	return &Outcome{Kind: KindDone}, nil
 }

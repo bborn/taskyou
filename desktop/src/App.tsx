@@ -4,7 +4,8 @@ import { motion } from "motion/react";
 import { Plus, Search, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
-import { applyFilter, buildColumns } from "./lib/board";
+import { buildColumns } from "./lib/board";
+import { buildSections, flattenSections } from "./lib/list";
 import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
@@ -21,6 +22,8 @@ import { Palette } from "./components/Palette";
 import { TaskForm } from "./components/TaskForm";
 import { Dialogs } from "./components/Dialogs";
 import { FilterBar } from "./components/FilterBar";
+import { TaskList } from "./components/TaskList";
+import { ArrangeMenu, ListToolbar, ViewsMenu } from "./components/ListMenus";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Toaster } from "@/components/ui/sonner";
@@ -244,12 +247,21 @@ export default function App() {
     if (window.history.state?.drawer) window.history.back();
   }
 
-  const projectNames = useMemo(() => state.projects.map((p) => p.name), [state.projects]);
+  // Every filter — typed or from a saved view — is resolved by the server (the
+  // query grammar lives in internal/taskfilter), so the same string always
+  // means the same thing. filteredIds is null when no filter is set.
   const filteredTasks = useMemo(
-    () => applyFilter(state.tasks, state.filter, projectNames),
-    [state.tasks, state.filter, projectNames],
+    () => (state.filteredIds ? state.tasks.filter((t) => state.filteredIds!.has(t.id)) : state.tasks),
+    [state.tasks, state.filteredIds],
   );
   const columns = useMemo(() => buildColumns(filteredTasks), [filteredTasks]);
+
+  // List mode walks one flat run in display order rather than a column grid.
+  const listTasks = useMemo(
+    () => flattenSections(buildSections(filteredTasks, state.listOptions)),
+    [filteredTasks, state.listOptions],
+  );
+  const inList = state.boardMode === "list" && !isMobile;
 
   // --- Selection helpers (shared by keyboard + board) ---
   const selectionPos = useMemo(() => {
@@ -261,6 +273,14 @@ export default function App() {
   }, [columns, state.selectedTaskId]);
 
   function moveSelection(dCol: number, dRow: number) {
+    if (inList) {
+      // One flat run: up/down step it, left/right mean nothing.
+      if (dRow === 0 || listTasks.length === 0) return;
+      const i = listTasks.findIndex((t) => t.id === state.selectedTaskId);
+      const next = i < 0 ? 0 : Math.max(0, Math.min(listTasks.length - 1, i + dRow));
+      store.selectTask(listTasks[next].id);
+      return;
+    }
     const nonEmpty = (start: number, dir: number) => {
       let c = start;
       while (c >= 0 && c < columns.length && columns[c].tasks.length === 0) c += dir;
@@ -284,6 +304,14 @@ export default function App() {
   }
 
   function jumpToColumn(status: string) {
+    if (inList) {
+      // The status keys still mean something in a flat list: jump to the first
+      // task with that status wherever the current arrangement put it.
+      const wanted = status === "processing" ? ["processing", "queued"] : [status];
+      const task = listTasks.find((t) => wanted.includes(t.status));
+      if (task) store.selectTask(task.id);
+      return;
+    }
     const c = columns.findIndex((col) => col.status === status);
     if (c >= 0 && columns[c].tasks.length > 0) store.selectTask(columns[c].tasks[0].id);
   }
@@ -298,11 +326,12 @@ export default function App() {
         if (s.paletteOpen) return void store.setPalette(false);
         if (s.dialog) return void store.setDialog(null);
         if (s.form) return void store.setForm(null);
-        if (s.filterOpen || s.filter !== "") {
-          store.setFilterOpen(false);
-          store.setFilter("");
-          return;
-        }
+        // These two prevent Radix's own Escape handling (see ListMenus), so
+        // closing them here is the only path — and it runs before the filter,
+        // so one keypress never closes a dialog and clears the filter behind it.
+        if (s.arrangeOpen) return void store.setArrangeOpen(false);
+        if (s.viewsOpen) return void store.setViewsOpen(false);
+        if (s.filterOpen || s.filter !== "") return void store.clearFilter();
         if (s.view.kind !== "board") return void store.openBoard();
         return;
       }
@@ -314,7 +343,8 @@ export default function App() {
         return;
       }
 
-      if (s.paletteOpen || s.dialog || s.form) return; // modal components handle their own keys
+      // The list's own overlays handle their keys too.
+      if (s.paletteOpen || s.dialog || s.form || s.arrangeOpen || s.viewsOpen) return;
       if (isEditableTarget(e.target)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
@@ -436,6 +466,15 @@ export default function App() {
           case "g":
             if (s.lastNotificationTaskId) store.openDetail(s.lastNotificationTaskId);
             return;
+          case "v":
+            return void store.toggleBoardMode();
+          case "V":
+            return void store.setViewsOpen(true);
+          case "O":
+            // Arranging a board that isn't drawn as a list changes nothing the
+            // user can see, so switch to the list first (parity with the TUI).
+            if (s.boardMode !== "list") store.setBoardMode("list");
+            return void store.setArrangeOpen(true);
         }
       } else if (s.view.kind === "detail") {
         switch (e.key) {
@@ -618,11 +657,20 @@ export default function App() {
       >
           {state.view.kind === "board" &&
             (isMobile ? (
-              <MobileBoard columns={columns} />
+              <MobileBoard tasks={filteredTasks} />
             ) : (
-              <div className="flex min-h-0 flex-1 flex-col">
-                {(state.filterOpen || state.filter !== "") && <FilterBar />}
-                <Board columns={columns} collapsed={state.collapsed} />
+              <div className="flex min-h-0 flex-1 flex-col gap-2">
+                {(state.filterOpen || state.filter !== "" || state.activeView !== "") && (
+                  <FilterBar />
+                )}
+                {inList ? (
+                  <div className="flex min-h-0 flex-1 flex-col gap-1 px-4 pb-4">
+                    <ListToolbar />
+                    <TaskList tasks={filteredTasks} options={state.listOptions} />
+                  </div>
+                ) : (
+                  <Board columns={columns} collapsed={state.collapsed} />
+                )}
               </div>
             ))}
           {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} />}
@@ -642,6 +690,8 @@ export default function App() {
       {state.paletteOpen && <Palette />}
       {state.form && <TaskForm form={state.form} />}
       <Dialogs />
+      <ArrangeMenu />
+      <ViewsMenu />
       <Toaster
         position={isMobile ? "top-center" : "bottom-right"}
         richColors

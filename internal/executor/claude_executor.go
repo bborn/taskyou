@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/log"
@@ -126,8 +125,7 @@ func (c *ClaudeExecutor) Name() string {
 
 // IsAvailable checks if the claude CLI is installed.
 func (c *ClaudeExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("claude")
-	return err == nil
+	return binaryOnPath("claude")
 }
 
 // Execute runs a task using Claude Code CLI.

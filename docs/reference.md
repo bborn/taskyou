@@ -7,7 +7,7 @@
 - [Terminal interface](#the-tui--first-class) and [keyboard shortcuts](#keyboard-shortcuts)
 - [Desktop and browser installation](#the-gui)
 - [Workflows](#workflows), [routines](#routines), and [plugins](#plugins)
-- [CLI commands](#full-cli-scriptability) and [daemon management](#daemon-management)
+- [CLI commands](#full-cli-scriptability), [daemon management](#daemon-management), and [diagnosing an install](#diagnosing-an-install)
 - [Executors](#task-executors) and [task lifecycle](#task-lifecycle)
 - [Project configuration](#taskyouyml-configuration) and [worktree setup](#worktree-setup-script)
 - [SSH access and deployment](#ssh-access--deployment)
@@ -19,6 +19,95 @@ The terminal UI is TaskYou's primary interface — everything ships here first. 
 ### Kanban Board
 [![Kanban Board](media/hero-board.png)](media/hero-board.png)
 *The main view showing tasks organized across Backlog, In Progress, Blocked, and Done columns*
+
+### List View
+
+Press `v` to swap the four columns for one flat line per task — the same board,
+at a quarter of the vertical cost. Pair it with a saved view and the whole
+"what am I working on right now?" answer fits on one screen:
+
+[![List view showing the Active saved view](media/list-view.png)](media/list-view.png)
+*`v` for the list, with the `Active` view applied — in progress and blocked, nothing else*
+
+Rows carry the same badges as cards (PR state and diff, running dot, permission
+mode, host, pin, dependency lock) plus an age hint. Every key that works on a
+card works on a row — the selection is shared, so `v` never loses your place.
+`B`/`P`/`L`/`D` jump to the first task of a status instead of focusing a column.
+
+#### Arranging the list
+
+Press `O`. Two choices, previewed live as you cycle them:
+
+| | Options | |
+|---|---|---|
+| **Group by** | `status` · `project` · `none` | Sections, with a count per section |
+| **Sort** | `urgency` · `updated` · `created` · `title` | Order inside each section |
+
+[![The arrange-list widget](media/list-arrange.png)](media/list-arrange.png)
+
+The current arrangement is always on screen under the header, so it is never a
+setting you have to remember you changed. It persists with the rest of the board
+state (`list_group_by`, `list_sort`), and is shared with the GUI: the desktop
+app and `ty serve` read the same keys, so the board you left in one is the board
+you come back to in the other.
+
+Whatever the grouping, **pinned tasks lead the list** in their own section:
+pinning means "keep this in sight", and scattering pinned tasks through project
+sections is what pinning exists to prevent.
+
+**Row height is not an option.** A row is one line — except a running or blocked
+task, which grows a second, dim line carrying the same live activity the kanban
+card shows: what its agent is doing, or the stand it is waiting on. That is the
+one thing a card says that a line cannot, and it is only ever true of live tasks;
+a backlog item has nothing to report, so a second line there would buy nothing.
+
+Redundancy is dropped rather than repeated: grouping by status keeps a coloured
+status glyph on each row but moves the word to the header, and grouping by
+project drops the per-row `[project]` tag entirely, giving the width to titles.
+
+### Saved Views
+
+A **view** is a name plus a filter query. Press `V` for the picker:
+
+[![The saved views picker](media/saved-views.png)](media/saved-views.png)
+
+
+| Key | Action |
+|-----|--------|
+| `enter` | Apply the highlighted view |
+| `n` | Save the current filter as a new view |
+| `d` then `y` | Delete a view |
+| `c` | Clear the filter |
+| `esc` | Cancel |
+
+The display mode, the filter, and the applied view name are persisted, so the
+board you left is the board you come back to. Typing over an applied view
+detaches it — a view is a starting point, not a lock.
+
+Three starter views ship on first run: **Active** (`status:in-progress
+status:blocked`), **Pinned** (`is:pinned`), and **In review** (`has:pr
+status:blocked`). Delete one and it stays deleted.
+
+#### Filter query grammar
+
+The same grammar works in the filter bar (`/`), in a saved view, in
+`ty list --filter`, and over the HTTP API:
+
+| Token | Matches |
+|-------|---------|
+| `status:blocked`, `is:blocked` | One status (`backlog`, `queued`, `processing`, `blocked`, `done`, `archived`) |
+| `status:in-progress` | Queued **and** processing |
+| `status:open` | Anything not done or archived |
+| `is:pinned` / `is:unpinned` | Pin state |
+| `is:workflow` / `is:task` | Workflow steps vs standalone tasks |
+| `has:pr` / `no:pr` | Tasks with / without a pull request |
+| `tag:release` | Tasks carrying a tag |
+| `[offerlab]` | A project, by name or alias (repeatable; OR'd together) |
+| anything else | Free-text fuzzy search |
+
+Repeating `status:` ORs the statuses together; every other token ANDs. An
+unrecognised `word:value` is not a token — it stays searchable text rather than
+silently matching nothing.
 
 ### Task Detail View
 [![Task Detail View](media/task-review-tui.png)](media/task-review-tui.png)
@@ -34,7 +123,7 @@ The terminal UI is TaskYou's primary interface — everything ships here first. 
 
 ### Show the focused task in your tab title
 
-The TUI publishes the task you are looking at (the open task in the detail view, otherwise the highlighted card) as iTerm2 user variables:
+The TUI publishes the task you have open in the detail view as iTerm2 user variables, and blanks them the moment you leave it — so the board never names the task you last visited:
 
 | Variable | Example |
 |---|---|
@@ -84,6 +173,7 @@ The same UI is also served in your browser at `http://localhost:8080` whenever `
 ## Features
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
+- **List View & Saved Views** - `v` swaps the columns for a flat one-line-per-task list; `V` manages named filter views (`status:in-progress status:blocked`, `is:pinned`, `[offerlab]`). The filter and display mode persist across restarts (see [List View](#list-view))
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
 - **Workflows** - Turn one goal into a multi-step DAG (e.g. plan → code → parallel review → collect), each step on its own executor/model, advancing automatically (see [Workflows](#workflows))
@@ -374,6 +464,26 @@ destructive reset that kills TaskYou tmux sessions.
 Upgrading does this for you: when a ty daemon is running, `ty upgrade` (and the
 install script it runs) finishes with `ty restart`.
 
+### Diagnosing an install
+
+`ty doctor` checks everything a working install depends on — daemon, its build
+and environment against this binary, tmux and the agent server, a live task's
+generated Claude hooks and MCP config, the database and its schema, the status
+log, executor binaries, GitHub auth — and changes none of it. `--json` gives a
+stable machine-readable report and `--strict` exits non-zero on warnings too,
+for a fleet sweep.
+
+```bash
+ty doctor                 # human report
+ty doctor --json          # {status, checks:[{id,status,summary,details}]}
+ty doctor --strict        # exit non-zero on warnings as well as errors
+```
+
+The daemon also records its build, protocol and key environment where clients
+can read it, so a TUI or CLI on a different build says so instead of misbehaving
+quietly. See [Diagnostics](diagnostics.md) for the handshake, the protocol
+number, and what happens on a remote or placed host running an older ty.
+
 ### Maintenance commands
 
 ```bash
@@ -391,6 +501,27 @@ This includes:
 - **Task management** - `ty create`, `ty execute`, `ty retry`, `ty status`, `ty pin`, `ty close`, `ty archive`, `ty delete`
 - **Direct executor interaction** - `ty input` sends keystrokes/text to running executors, `ty output` reads their output
 - **Session management** - `ty sessions list`, `ty sessions cleanup`
+- **Saved views** - `ty views` lists them, `ty views save <name> "<query>"` creates or replaces one, `ty views show <name>` prints what it matches, `ty views delete <name>` removes it
+- **Filtered listing** - `ty list --view active` applies a saved view; `ty list --filter "status:in-progress status:blocked"` applies a query inline (same grammar as the TUI filter bar)
+
+```bash
+ty views save active "status:in-progress status:blocked"
+ty views save offerlab "[offerlab] status:open"
+ty list --view active --json
+ty list --filter "has:pr status:blocked"      # waiting on review
+```
+
+Views are exposed over the HTTP API too: `GET`/`POST /api/views` and
+`GET`/`PATCH`/`DELETE /api/views/{name}`. `GET /api/views/{name}` returns the
+view plus the tasks it currently matches, so a client never has to reimplement
+the query grammar — which is exactly how the GUI applies a view.
+
+### In the GUI
+
+The desktop app and `ty serve` have the same three controls: `v` toggles the
+list, `V` opens the saved views, and `O` arranges it — plus clickable
+equivalents in the toolbar above the list. Grouping, sort and the applied view
+persist to the same settings keys the TUI uses.
 
 Because agents can send input to running executors via `ty input`, they can answer prompts, confirm dialogs, navigate menus, and fully control tasks mid-execution—no human intervention required.
 
@@ -439,6 +570,9 @@ The skill works with Claude Code, Codex, Gemini, or any agent that can execute s
 | `o` | Open task's working directory |
 | `p` | Command palette (fuzzy search) |
 | `/` | Filter tasks |
+| `v` | Toggle list / board view |
+| `V` | Saved views picker |
+| `O` | Arrange list (group / sort / density) |
 | `s` | Settings |
 | `m` | Plugin catalog (search, install, remove) |
 | `u` | Routines |

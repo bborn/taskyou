@@ -5,7 +5,7 @@
         "GET /api/plugins/actions",
         "POST /api/plugins/actions/run"
       ],
-      "note": "A / detail action picker \u2014 list and run plugin actions on a task; same runner as the CLI and command palette"
+      "note": "A / detail action picker — list and run plugin actions on a task; same runner as the CLI and command palette"
     },
     "Archive": {
       "api": [
@@ -35,7 +35,7 @@
       "note": "]"
     },
     "CommandPalette": {
-      "note": "p, f, \u2318P \u2014 cmdk palette"
+      "note": "p, f, ⌘P — cmdk palette"
     },
     "Delete": {
       "api": [
@@ -56,7 +56,7 @@
       "note": "Open task detail"
     },
     "Filter": {
-      "note": "/ \u2014 text, #id, [project] with autocomplete dropdown"
+      "note": "/ — text, #id, [project] with autocomplete dropdown"
     },
     "FocusBacklog": {
       "note": "B"
@@ -77,10 +77,10 @@
       "note": "g; toasts also carry an Open action"
     },
     "JumpToPinned": {
-      "note": "shift+\u2191 jumps to first pinned task in column"
+      "note": "shift+↑ jumps to first pinned task in column"
     },
     "JumpToUnpinned": {
-      "note": "shift+\u2193 jumps to first unpinned task in column"
+      "note": "shift+↓ jumps to first unpinned task in column"
     },
     "Left": {
       "note": "Arrow keys move board selection"
@@ -90,16 +90,16 @@
         "POST /api/tasks",
         "GET /api/placement/hosts"
       ],
-      "note": "n, \u2318N, titlebar button; the form's Host selector (shown when a placement plugin offers machines) posts the chosen host as placement"
+      "note": "n, ⌘N, titlebar button; the form's Host selector (shown when a placement plugin offers machines) posts the chosen host as placement"
     },
     "OpenBrowser": {
-      "note": "b \u2014 opens task branch in browser"
+      "note": "b — opens task branch in browser"
     },
     "OpenPR": {
       "note": "G / PR button"
     },
     "OpenWorktree": {
-      "note": "o / Editor button \u2014 opens worktree in code editor"
+      "note": "o / Editor button — opens worktree in code editor"
     },
     "Plugins": {
       "api": [
@@ -124,7 +124,7 @@
       "note": "X"
     },
     "Quit": {
-      "note": "\u2318Q / native window close"
+      "note": "⌘Q / native window close"
     },
     "Refresh": {
       "api": [
@@ -146,10 +146,10 @@
         "GET /api/routines",
         "POST /api/routines/{name}/run"
       ],
-      "note": "u / \u2318U \u2014 fleet view with last-run status, schedules, run-now, log viewer"
+      "note": "u / ⌘U — fleet view with last-run status, schedules, run-now, log viewer"
     },
     "Settings": {
-      "note": "s, \u2318,, titlebar gear"
+      "note": "s, ⌘,, titlebar gear"
     },
     "ToggleDangerous": {
       "note": "! cycles permission mode for new executions"
@@ -165,7 +165,7 @@
         "POST /api/tasks/{id}/shell",
         "GET /api/tasks/{id}/terminal"
       ],
-      "note": "Shell tab in the detail terminal panel \u2014 local or remotely placed workdir shell; remote desktop and browser input/output use the host-aware terminal API"
+      "note": "Shell tab in the detail terminal panel — local or remotely placed workdir shell; remote desktop and browser input/output use the host-aware terminal API"
     },
     "Up": {
       "note": "Arrow keys move board selection"
@@ -176,6 +176,27 @@
         "POST /api/tasks/{id}/placement"
       ],
       "note": "@ opens placement in the TUI; task detail placement panel in desktop and browser."
+    },
+    "ToggleListView": {
+      "note": "v — swaps the four columns for one flat line per task (TaskList.tsx); persisted via board_display_mode",
+      "api": [
+        "PATCH /api/settings"
+      ]
+    },
+    "SavedViews": {
+      "note": "V — saved-view picker: apply, save the current filter, delete (ListMenus.tsx). The query is resolved server-side so the grammar has one implementation",
+      "api": [
+        "GET /api/views",
+        "POST /api/views",
+        "GET /api/views/{name}",
+        "DELETE /api/views/{name}"
+      ]
+    },
+    "ListOptions": {
+      "note": "O — arrange the list: group by status/project/none, sort by urgency/updated/created/title; persisted via list_group_by and list_sort",
+      "api": [
+        "PATCH /api/settings"
+      ]
     }
   },
   "gui_only": [

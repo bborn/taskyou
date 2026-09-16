@@ -12,6 +12,8 @@ import type {
   ExecutorInfo,
   LogLine,
   Project,
+  SavedView,
+  SavedViewResult,
   Task,
   TaskDetail,
   TaskType,
@@ -76,10 +78,14 @@ export const api = {
     return request<{ hosts: PlacementHost[] }>("GET", `/api/placement/hosts?${params}`);
   },
   // Tasks
-  listTasks: (opts?: { all?: boolean; project?: string; limit?: number }) => {
+  // `filter` runs the shared query grammar (internal/taskfilter) server-side.
+  // Filtering goes through it rather than a second parser in the browser,
+  // because two parsers are two sets of answers for the same string.
+  listTasks: (opts?: { all?: boolean; project?: string; limit?: number; filter?: string }) => {
     const params = new URLSearchParams();
     if (opts?.all) params.set("all", "true");
     if (opts?.project) params.set("project", opts.project);
+    if (opts?.filter) params.set("filter", opts.filter);
     params.set("limit", String(opts?.limit ?? 1000));
     return request<Task[]>("GET", `/api/tasks?${params}`);
   },
@@ -178,6 +184,16 @@ export const api = {
 
   // Executors / settings / autocomplete
   listExecutors: () => request<ExecutorInfo[]>("GET", "/api/executors"),
+  // Saved views — named filter queries, resolved server-side so the query
+  // grammar has exactly one implementation.
+  listViews: () => request<SavedView[]>("GET", "/api/views"),
+  getView: (name: string) =>
+    request<SavedViewResult>("GET", `/api/views/${encodeURIComponent(name)}`),
+  saveView: (name: string, query: string) =>
+    request<SavedView>("POST", "/api/views", { name, query }),
+  deleteView: (name: string) =>
+    request<{ ok: boolean }>("DELETE", `/api/views/${encodeURIComponent(name)}`),
+
   getSettings: () => request<Record<string, string>>("GET", "/api/settings"),
   updateSettings: (patch: Record<string, string>) =>
     request<{ ok: boolean }>("PATCH", "/api/settings", patch),

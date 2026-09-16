@@ -71,6 +71,13 @@ an error or an observation older than 30 seconds. Neither means the task failed.
 Failed window enumeration cannot make every task appear missing, and failed
 pane capture cannot make an existing window disappear.
 
+The browser and desktop task detail read a placed Claude task's conversation
+from its host over the same outbound SSH connection used to supervise the task.
+Replies from the composer are sent to that host's executor pane as well. The
+browser never connects to the agent host directly. If the coordinator cannot
+reach the host, the conversation reports that connection failure and retains
+the last successfully loaded messages.
+
 Completion signals are scoped to the coordinator database and launch attempt.
 They remain on the remote host until persisted in SQLite. Retransmission is
 deduplicated, signals from superseded attempts are discarded, and persisted
