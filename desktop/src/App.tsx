@@ -655,7 +655,7 @@ export default function App() {
       >
           {state.view.kind === "board" &&
             (isMobile ? (
-              <MobileBoard columns={columns} />
+              <MobileBoard tasks={filteredTasks} />
             ) : (
               <div className="flex min-h-0 flex-1 flex-col gap-2">
                 {(state.filterOpen || state.filter !== "" || state.activeView !== "") && (
