@@ -17,6 +17,7 @@ import (
 
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/pipeline"
 )
 
@@ -65,6 +66,7 @@ const (
 	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldType
 	FieldExecutor
+	FieldHost // Only shown when a placement plugin offers a choice of machines
 	FieldEffort
 	FieldModel
 	FieldPermission
@@ -116,9 +118,14 @@ type FormModel struct {
 	permissionIdx      int
 	permissionModes    []string // Selectable permission modes
 	permissionTouched  bool     // user picked a permission explicitly; stop following project default
-	queue              bool
-	attachments        []string // Parsed file paths
-	attachmentCursor   int      // Index of the currently selected attachment chip
+	// Host placement. hostChoices is empty unless a placement plugin offers
+	// machines for this project, and the field is hidden when it is — every user
+	// without a fleet sees the form they have always seen.
+	hostChoices      []hostChoice
+	hostIdx          int
+	queue            bool
+	attachments      []string // Parsed file paths
+	attachmentCursor int      // Index of the currently selected attachment chip
 
 	// Type-to-select buffer for selector fields (executor, kind, effort, …).
 	// Letters typed within selectorJumpTTL append; after the TTL (or a field
@@ -198,6 +205,63 @@ func buildExecutorList(availableExecutors []string, usageCounts map[string]int) 
 
 	return result
 }
+
+// hostChoice is one option in the form's Host selector.
+//
+// The first is always "automatic": the placement resolver is asked at spawn, as
+// it always has been. Choosing anything else records the decision on the task
+// before it spawns, which is exactly what the resolver's own answer would have
+// been — so nothing downstream has to know a human made it.
+type hostChoice struct {
+	Label   string
+	Target  string // "" = automatic (ask the resolver), "local" = this machine
+	WorkDir string // the project's directory on that host
+}
+
+// hostsLoadedMsg carries the machines a placement plugin offered. It names the
+// project it answered for: the answer arrives after an out-of-process call, by
+// which time the user may have cycled to a different project.
+type hostsLoadedMsg struct {
+	project string
+	choices []hostChoice
+}
+
+// loadHosts asks the placement plugin which machines could run a task in this
+// project. It runs off the UI goroutine because it shells out to a plugin, and
+// answers nothing when no plugin is installed — which is when the Host field
+// stays hidden.
+func (m *FormModel) loadHosts() tea.Cmd {
+	if m.isEdit {
+		// Moving an existing task is `ty place` / the placement view: it carries
+		// work through Git, which a selector in an edit form cannot express.
+		return nil
+	}
+	database, project, executorName := m.db, m.project, m.executor
+	if database == nil || project == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), hostsLookupTimeout)
+		defer cancel()
+		hosts := executor.PlacementChoices(ctx, database, project, executorName)
+		if len(hosts) == 0 {
+			return hostsLoadedMsg{project: project}
+		}
+		choices := []hostChoice{
+			{Label: "automatic"},
+			{Label: "this machine", Target: "local"},
+		}
+		for _, h := range hosts {
+			choices = append(choices, hostChoice{Label: h.Name, Target: h.Target, WorkDir: h.WorkDir})
+		}
+		return hostsLoadedMsg{project: project, choices: choices}
+	}
+}
+
+// hostsLookupTimeout bounds the whole host lookup from the form's side. The hook
+// runner has its own budget; this is the backstop that keeps a wedged plugin
+// from leaving a goroutine behind for the life of the TUI.
+const hostsLookupTimeout = 10 * time.Second
 
 // effortLevelOptions returns the selectable effort values for the form. The first
 // entry is the empty string, which represents "default" (no per-task override —
@@ -546,7 +610,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 
 // Init initializes the form.
 func (m *FormModel) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, m.loadHosts())
 }
 
 // Update handles messages.
@@ -598,6 +662,32 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ghostFullText = msg.suggestion.FullText
 			}
 			// Otherwise: user typed something different, discard suggestion
+		}
+		return m, nil
+
+	// The placement plugin answered which machines could run this task.
+	case hostsLoadedMsg:
+		// Ignore an answer for a project the user has already cycled past: the
+		// lookup is out-of-process, so a slow fleet must not repopulate the
+		// selector with the previous project's machines.
+		if msg.project != m.project {
+			return m, nil
+		}
+		// Keep the machine the user already picked if the new list still has it;
+		// otherwise fall back to automatic rather than silently sliding the
+		// selection onto whichever host happens to be at that index now.
+		chosen := m.chosenHost().Target
+		m.hostChoices = msg.choices
+		m.hostIdx = 0
+		for i, c := range m.hostChoices {
+			if c.Target == chosen {
+				m.hostIdx = i
+				break
+			}
+		}
+		// A field that has just disappeared cannot keep the focus.
+		if m.focused == FieldHost && !m.isFieldVisible(FieldHost) {
+			m.focusNext()
 		}
 		return m, nil
 
@@ -655,7 +745,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.String() == "tab" {
 					m.focusNext()
 				}
-				return m, nil
+				// The project decides which machines are candidates, so a project
+				// picked by search reloads them the same way cycling does.
+				return m, m.loadHosts()
 			case "up", "ctrl+p":
 				if m.projectFilteredIdx > 0 {
 					m.projectFilteredIdx--
@@ -858,7 +950,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshPermissionDefaultForProject()
 				m.refreshEffortDefaultForProject()
 				m.refreshModelDefaultForProject()
-				return m, nil
+				// Which machines can run this task depends on the project: a host is
+				// only a candidate if it has a checkout of it.
+				return m, m.loadHosts()
 			}
 			if m.focused == FieldType {
 				m.typeIdx = (m.typeIdx - 1 + len(m.types)) % len(m.types)
@@ -868,6 +962,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				// Only some executors can be launched over SSH, so the machines on
+				// offer change with this selection.
+				return m, m.loadHosts()
+			}
+			if m.focused == FieldHost && len(m.hostChoices) > 0 {
+				m.hostIdx = (m.hostIdx - 1 + len(m.hostChoices)) % len(m.hostChoices)
 				return m, nil
 			}
 			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
@@ -903,7 +1003,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshPermissionDefaultForProject()
 				m.refreshEffortDefaultForProject()
 				m.refreshModelDefaultForProject()
-				return m, nil
+				// Which machines can run this task depends on the project: a host is
+				// only a candidate if it has a checkout of it.
+				return m, m.loadHosts()
 			}
 			if m.focused == FieldType {
 				m.typeIdx = (m.typeIdx + 1) % len(m.types)
@@ -913,6 +1015,10 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				return m, m.loadHosts()
+			}
+			if m.focused == FieldHost && len(m.hostChoices) > 0 {
+				m.hostIdx = (m.hostIdx + 1) % len(m.hostChoices)
 				return m, nil
 			}
 			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
@@ -986,7 +1092,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Type-to-select for other selector fields
-			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldModel || m.focused == FieldPermission {
+			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldHost || m.focused == FieldEffort || m.focused == FieldModel || m.focused == FieldPermission {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.typeSelectorLetter(strings.ToLower(key))
@@ -1276,6 +1382,13 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				return
 			}
 		}
+	case FieldHost:
+		for i, c := range m.hostChoices {
+			if strings.HasPrefix(strings.ToLower(c.Label), prefix) {
+				m.hostIdx = i
+				return
+			}
+		}
 	case FieldEffort:
 		for i, l := range m.effortLevels {
 			label := l
@@ -1481,6 +1594,11 @@ func (m *FormModel) rebuildExecutorListForProject() {
 // isFieldVisible returns whether a field should be shown in the current view.
 // When showAdvanced is false, only Title and Body are visible.
 func (m *FormModel) isFieldVisible(field FormField) bool {
+	if field == FieldHost {
+		// Nothing offered a choice of machines — no placement plugin, or no host
+		// serving this project — so there is nothing to pick between.
+		return m.showAdvanced && len(m.hostChoices) > 0
+	}
 	if field == FieldEffort || field == FieldModel {
 		// Effort and model are Claude-specific overrides (claude --effort/--model),
 		// only shown in advanced mode and only when the Claude executor is selected.
@@ -2027,6 +2145,24 @@ func (m *FormModel) View() string {
 		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
 		b.WriteString("\n")
 
+		// Host selector: only present when a placement plugin offers machines for
+		// this project. Picking one overrules the automatic placement.
+		if m.isFieldVisible(FieldHost) {
+			cursor = " "
+			if m.focused == FieldHost {
+				cursor = cursorStyle.Render("▸")
+			}
+			hostLabels := make([]string, len(m.hostChoices))
+			for i, c := range m.hostChoices {
+				hostLabels[i] = c.Label
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Host") + m.renderSelector(hostLabels, m.hostIdx, m.focused == FieldHost, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n")
+			if chosen := m.chosenHost(); chosen.WorkDir != "" {
+				b.WriteString("  " + dimStyle.Render(chosen.WorkDir) + "\n")
+			}
+		}
+
 		// Effort selector (Claude-specific; only shown for the Claude executor)
 		if m.isFieldVisible(FieldEffort) {
 			cursor = " "
@@ -2187,6 +2323,24 @@ func (m *FormModel) hasFormData() bool {
 		strings.TrimSpace(m.bodyInput.Value()) != "" ||
 		strings.TrimSpace(m.attachmentsInput.Value()) != "" ||
 		len(m.attachments) > 0
+}
+
+// chosenHost returns the currently selected placement option. The zero value —
+// "automatic", no target — is what an unanswered or absent host list means, so
+// callers never have to check whether the field was shown.
+func (m *FormModel) chosenHost() hostChoice {
+	if m.hostIdx < 0 || m.hostIdx >= len(m.hostChoices) {
+		return hostChoice{}
+	}
+	return m.hostChoices[m.hostIdx]
+}
+
+// PlacementChoice returns the host the user picked for a new task: the target to
+// record ("" = leave it to the resolver, "local" = this machine) and that
+// project's directory on it.
+func (m *FormModel) PlacementChoice() (target, workDir string) {
+	chosen := m.chosenHost()
+	return chosen.Target, chosen.WorkDir
 }
 
 // GetDBTask returns a db.Task from the form values.

@@ -208,9 +208,9 @@ func isNotLoggedIn(stderr string) bool {
 // graphQLLowThreshold is the remaining-points level below which `ty doctor` warns
 // the OPERATOR that the bucket is close to exhaustion.
 //
-// This is intentionally higher than rateLimitThreshold (200) in pr.go, which gates
-// automatic batch PR fetches. The two serve different jobs and should not be merged:
-//   - rateLimitThreshold (200): the TUI's own self-throttle — stop spending budget.
+// This is intentionally higher than prRateFloor (200) in prpoller.go, which pauses
+// background PR polling. The two serve different jobs and should not be merged:
+//   - prRateFloor (200): the daemon's own self-throttle — stop spending budget.
 //   - graphQLLowThreshold (500): warn a human earlier, before automatic throttling
 //     kicks in, so they can act (e.g. re-provision a bot token) with headroom to spare.
 const graphQLLowThreshold = 500

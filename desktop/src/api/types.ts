@@ -61,6 +61,21 @@ export interface LogLine {
   created_at: string;
 }
 
+/** One turn of the executor's actual conversation, read from the Claude session
+ * transcript. `task_logs` only ever held the machinery (tool calls, system
+ * lines) — the prose never went to the database. */
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  /** Prose only. Reasoning is summarised by `thinking` rather than inlined. */
+  text: string;
+  /** Names of tools used in this turn, in order, e.g. ["Read", "Bash"]. */
+  tools: string[];
+  /** Number of reasoning blocks in this turn; the text itself is not sent. */
+  thinking: number;
+  created_at: string;
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -170,6 +185,16 @@ export interface Routine {
   disabled: boolean;
   schedule?: { backend: string; detail: string };
   last_run?: RoutineRun;
+}
+
+// PlacementHost is one machine the placement plugin offers for a new task. An
+// empty list — no plugin, or no host serving the project — is why the new-task
+// form shows no host picker at all.
+export interface PlacementHost {
+  name: string;
+  target: string;
+  workdir: string;
+  detail?: string;
 }
 
 export interface Placement {

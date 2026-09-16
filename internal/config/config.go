@@ -37,6 +37,24 @@ const (
 	// SettingHTTPAPIDisabled, when "true", stops the daemon from hosting the
 	// HTTP API (for headless/security-sensitive boxes). The API is on by default.
 	SettingHTTPAPIDisabled = "http_api_disabled"
+
+	// SettingReapBlockedIdle is how long a task must show NO activity before
+	// `ty sessions cleanup` will reap the side processes (dev servers, watchers)
+	// running out of its worktree. Deliberately much longer than the done-task
+	// grace: in ty, "blocked" usually means "waiting for a human to come look",
+	// not "dead". Go duration string; "0"/"disabled" never reaps on staleness.
+	// See reaper.DefaultBlockedIdle for the default and its rationale.
+	SettingReapBlockedIdle = "reap_blocked_idle"
+
+	// SettingReapOrphanMinAge is the minimum age for the no-worktree orphan
+	// heuristic (a known dev server reparented to init with no terminal, which
+	// nothing can tie back to a task). Go duration string.
+	SettingReapOrphanMinAge = "reap_orphan_min_age"
+
+	// SettingReapOrphanDevServers, when "false", disables that no-worktree
+	// heuristic entirely, leaving the sweep to only touch processes it can map
+	// to a task worktree. Enabled by default.
+	SettingReapOrphanDevServers = "reap_orphan_dev_servers"
 )
 
 // ShellPaneWidthKey is the settings key holding one task's shell pane width.

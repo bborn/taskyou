@@ -1,3 +1,4 @@
 {
-  "RecreateWorktree": "TUI-only recovery for a task whose worktree was reaped: it rebuilds the worktree from the task's branch on the machine running the TUI. The desktop app has no worktree API surface (it covers OpenWorktree only) and does not run on the host that owns the worktree, so there is nothing for it to act on. Revisit if the GUI gains worktree management."
+  "RecreateWorktree": "TUI-only recovery for a task whose worktree was reaped: it rebuilds the worktree from the task's branch on the machine running the TUI. The desktop app has no worktree API surface (it covers OpenWorktree only) and does not run on the host that owns the worktree, so there is nothing for it to act on. Revisit if the GUI gains worktree management.",
+  "ResumeSession": "TUI detail-view only: enter re-attaches a blocked task's session that closed under the open view (usually the idle sweep) without leaving the task. The GUI has no persistent joined-pane view for a session to close under; it reopens a task's session through Retry (POST /api/tasks/{id}/retry). Revisit if the GUI gains an in-place resume."
 }

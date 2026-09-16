@@ -1,9 +1,51 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the shell paint under the notch and home
+         indicator (surfaces re-add the inset themselves via env()).
+         interactive-widget=resizes-content makes the Android soft keyboard
+         shrink the layout viewport instead of shoving the page up; iOS
+         ignores it, which is what use-keyboard-inset.ts is for. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#fafafa" id="theme-color" />
+    <!-- iOS ignores the manifest's display mode, so these metas — not the
+         manifest — are what actually give a chrome-less home-screen launch. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="TaskYou" />
     <title>TaskYou</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <!-- use-credentials: `ty serve` is often reached through an authenticated
+         tunnel, and an anonymous manifest fetch there fails the install. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <script>
+      // Pre-paint the theme before the bundle loads. This file used to hardcode
+      // class="dark" while the app defaults to `system`, so a light-mode phone
+      // flashed dark on every cold load. App.tsx owns the class afterwards and
+      // resolves the same preference.
+      (function () {
+        try {
+          var pref = localStorage.getItem("theme");
+          var dark =
+            pref === "dark" ||
+            (pref !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+          document.getElementById("theme-color").content = dark
+            ? "#1e1e20"
+            : "#fafafa";
+        } catch (e) {
+          /* private mode: fall through to the light default */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

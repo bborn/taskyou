@@ -95,6 +95,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.handleDeleteTask)
 
 	// Task actions
+	mux.HandleFunc("GET /api/placement/hosts", s.handlePlacementHosts)
 	mux.HandleFunc("GET /api/tasks/{id}/placement", s.handleGetPlacement)
 	mux.HandleFunc("POST /api/tasks/{id}/placement", s.handleSetPlacement)
 	mux.HandleFunc("POST /api/tasks/{id}/move", s.handleMoveTask)
@@ -113,6 +114,7 @@ func New(cfg Config) *Server {
 
 	// Task logs, streaming, executor output & terminal
 	mux.HandleFunc("GET /api/tasks/{id}/logs", s.handleTaskLogs)
+	mux.HandleFunc("GET /api/tasks/{id}/messages", s.handleTaskMessages)
 	mux.HandleFunc("GET /api/tasks/{id}/stream", s.handleTaskStream)
 	mux.HandleFunc("GET /api/tasks/{id}/output", s.handleTaskOutput)
 	mux.HandleFunc("GET /api/tasks/{id}/terminal", s.handleTerminal)

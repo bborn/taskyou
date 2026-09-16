@@ -15,9 +15,6 @@ func TestPRStateConstants(t *testing.T) {
 }
 
 func TestCheckStateConstants(t *testing.T) {
-	// Verify check state constants
-	states := []CheckState{CheckStatePending, CheckStatePassing, CheckStateFailing, CheckStateNone}
-	// CheckStateNone is intentionally empty
 	if CheckStatePending == "" {
 		t.Errorf("CheckStatePending should not be empty")
 	}
@@ -29,27 +26,6 @@ func TestCheckStateConstants(t *testing.T) {
 	}
 	if CheckStateNone != "" {
 		t.Errorf("CheckStateNone should be empty")
-	}
-	_ = states
-}
-
-func TestNewPRCache(t *testing.T) {
-	cache := NewPRCache()
-	if cache == nil {
-		t.Fatal("NewPRCache returned nil")
-	}
-	if cache.cache == nil {
-		t.Error("cache map should be initialized")
-	}
-}
-
-func TestPRCacheGetMissingBranch(t *testing.T) {
-	cache := NewPRCache()
-
-	// Empty branch name should return nil
-	info := cache.GetPRForBranch("/some/repo", "")
-	if info != nil {
-		t.Error("empty branch name should return nil")
 	}
 }
 
@@ -163,14 +139,44 @@ func TestPRInfoStatusDescription(t *testing.T) {
 			expected: "Has conflicts",
 		},
 		{
+			name:     "dirty merge state counts as conflicts",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePassing, MergeStateStatus: "DIRTY"},
+			expected: "Has conflicts",
+		},
+		{
 			name:     "open PR with failing checks (no conflicts)",
 			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStateFailing},
 			expected: "Checks failing",
 		},
 		{
+			name:     "failing checks outrank requested changes",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStateFailing, ReviewDecision: "CHANGES_REQUESTED"},
+			expected: "Checks failing",
+		},
+		{
+			name:     "changes requested outrank running checks",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePending, ReviewDecision: "CHANGES_REQUESTED"},
+			expected: "Changes requested",
+		},
+		{
 			name:     "open PR with pending checks",
 			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePending},
 			expected: "Checks running",
+		},
+		{
+			name:     "green but awaiting a required review",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePassing, Mergeable: "MERGEABLE", ReviewDecision: "REVIEW_REQUIRED"},
+			expected: "Awaiting review",
+		},
+		{
+			name:     "green and mergeable but blocked by branch protection",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePassing, Mergeable: "MERGEABLE", MergeStateStatus: "BLOCKED"},
+			expected: "Checks passing",
+		},
+		{
+			name:     "approved, green and clean",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePassing, MergeStateStatus: "CLEAN", ReviewDecision: "APPROVED"},
+			expected: "Ready to merge",
 		},
 	}
 
@@ -179,80 +185,6 @@ func TestPRInfoStatusDescription(t *testing.T) {
 			got := tt.prInfo.StatusDescription()
 			if got != tt.expected {
 				t.Errorf("StatusDescription() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestParseCheckState(t *testing.T) {
-	tests := []struct {
-		name     string
-		checks   []ghCheck
-		expected CheckState
-	}{
-		{
-			name:     "no checks",
-			checks:   nil,
-			expected: CheckStateNone,
-		},
-		{
-			name:     "empty checks",
-			checks:   []ghCheck{},
-			expected: CheckStateNone,
-		},
-		{
-			name: "all passing",
-			checks: []ghCheck{
-				{Conclusion: "SUCCESS"},
-				{Conclusion: "SUCCESS"},
-			},
-			expected: CheckStatePassing,
-		},
-		{
-			name: "one failing",
-			checks: []ghCheck{
-				{Conclusion: "SUCCESS"},
-				{Conclusion: "FAILURE"},
-			},
-			expected: CheckStateFailing,
-		},
-		{
-			name: "one pending",
-			checks: []ghCheck{
-				{Conclusion: "SUCCESS"},
-				{Status: "IN_PROGRESS"},
-			},
-			expected: CheckStatePending,
-		},
-		{
-			name: "pending and failing - failure wins",
-			checks: []ghCheck{
-				{Status: "IN_PROGRESS"},
-				{Conclusion: "FAILURE"},
-			},
-			expected: CheckStateFailing,
-		},
-		{
-			name: "error state",
-			checks: []ghCheck{
-				{Conclusion: "ERROR"},
-			},
-			expected: CheckStateFailing,
-		},
-		{
-			name: "timed out",
-			checks: []ghCheck{
-				{Conclusion: "TIMED_OUT"},
-			},
-			expected: CheckStateFailing,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseCheckState(tt.checks)
-			if got != tt.expected {
-				t.Errorf("parseCheckState() = %v, want %v", got, tt.expected)
 			}
 		})
 	}
@@ -269,15 +201,17 @@ func TestMarshalUnmarshalPRInfo(t *testing.T) {
 
 	// Test round-trip
 	original := &PRInfo{
-		Number:     42,
-		URL:        "https://github.com/test/repo/pull/42",
-		State:      PRStateOpen,
-		IsDraft:    false,
-		Title:      "Fix things",
-		CheckState: CheckStatePassing,
-		Mergeable:  "MERGEABLE",
-		Additions:  10,
-		Deletions:  5,
+		Number:           42,
+		URL:              "https://github.com/test/repo/pull/42",
+		State:            PRStateOpen,
+		IsDraft:          false,
+		Title:            "Fix things",
+		CheckState:       CheckStatePassing,
+		Mergeable:        "MERGEABLE",
+		MergeStateStatus: "BLOCKED",
+		ReviewDecision:   "REVIEW_REQUIRED",
+		Additions:        10,
+		Deletions:        5,
 	}
 
 	jsonStr := MarshalPRInfo(original)
@@ -289,24 +223,8 @@ func TestMarshalUnmarshalPRInfo(t *testing.T) {
 	if restored == nil {
 		t.Fatal("UnmarshalPRInfo returned nil")
 	}
-
-	if restored.Number != original.Number {
-		t.Errorf("Number = %d, want %d", restored.Number, original.Number)
-	}
-	if restored.URL != original.URL {
-		t.Errorf("URL = %q, want %q", restored.URL, original.URL)
-	}
-	if restored.State != original.State {
-		t.Errorf("State = %q, want %q", restored.State, original.State)
-	}
-	if restored.CheckState != original.CheckState {
-		t.Errorf("CheckState = %q, want %q", restored.CheckState, original.CheckState)
-	}
-	if restored.Mergeable != original.Mergeable {
-		t.Errorf("Mergeable = %q, want %q", restored.Mergeable, original.Mergeable)
-	}
-	if restored.Title != original.Title {
-		t.Errorf("Title = %q, want %q", restored.Title, original.Title)
+	if *restored != *original {
+		t.Errorf("round trip = %+v, want %+v", restored, original)
 	}
 
 	// Test invalid JSON
@@ -314,69 +232,9 @@ func TestMarshalUnmarshalPRInfo(t *testing.T) {
 		t.Errorf("UnmarshalPRInfo(invalid) = %v, want nil", got)
 	}
 
-	// Test merged state round-trip
-	merged := &PRInfo{
-		Number: 42,
-		State:  PRStateMerged,
-	}
-	mergedJSON := MarshalPRInfo(merged)
-	restoredMerged := UnmarshalPRInfo(mergedJSON)
-	if restoredMerged.State != PRStateMerged {
-		t.Errorf("State = %q, want MERGED", restoredMerged.State)
-	}
-}
-
-func TestPRCacheInvalidate(t *testing.T) {
-	cache := NewPRCache()
-
-	// Add an entry manually
-	cache.cache["test:branch"] = &cacheEntry{
-		info: &PRInfo{Number: 1},
-	}
-
-	// Verify it exists
-	if len(cache.cache) != 1 {
-		t.Error("cache should have 1 entry")
-	}
-
-	// Invalidate it
-	cache.InvalidateCache("test", "branch")
-
-	// Verify it's gone
-	if len(cache.cache) != 0 {
-		t.Error("cache should be empty after invalidation")
-	}
-}
-
-func TestNeedsReconcile(t *testing.T) {
-	open := map[string]*PRInfo{
-		"feature/open-pr": {Number: 10, State: PRStateOpen},
-	}
-
-	cases := []struct {
-		name   string
-		branch string
-		number int
-		want   bool
-	}{
-		// A known PR whose branch is absent from the open batch has merged or
-		// closed — it must be reconciled. This is the bug we are guarding against:
-		// merged PRs were left frozen at OPEN because the batch (open-only) can't
-		// see them and nothing fetched their terminal state.
-		{"merged/closed PR no longer open", "task/3970-universal-cart", 3162, true},
-		// Still open and present in the batch — already covered, no extra fetch.
-		{"still-open PR in batch", "feature/open-pr", 10, false},
-		// No PR was ever associated — never spend a lookup on it.
-		{"no PR number", "task/no-pr", 0, false},
-		// Defensive: a blank branch can't be looked up.
-		{"empty branch", "", 99, false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := NeedsReconcile(open, tc.branch, tc.number); got != tc.want {
-				t.Errorf("NeedsReconcile(%q, %d) = %v, want %v", tc.branch, tc.number, got, tc.want)
-			}
-		})
+	// Rows stored before the review fields existed still decode.
+	legacy := UnmarshalPRInfo(`{"number":42,"state":"MERGED","checkState":"SUCCESS"}`)
+	if legacy == nil || legacy.State != PRStateMerged || legacy.ReviewDecision != "" {
+		t.Errorf("legacy row = %+v", legacy)
 	}
 }

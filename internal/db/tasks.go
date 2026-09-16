@@ -512,6 +512,7 @@ type ListTasksOptions struct {
 	IncludeClosed  bool // Include closed tasks even when Status is empty
 	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
 	OrderByRecency bool // Sort purely by recency, ignoring pinned-first ordering
+	OpenPROnly     bool // Only tasks whose stored PR is still open or draft (not merged/closed)
 }
 
 // ListTasks retrieves tasks with optional filters.
@@ -567,6 +568,12 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
 		query += " AND status NOT IN ('done', 'archived')"
+	}
+
+	// pr_info_json is written by json.Marshal, so the state key has a fixed
+	// shape. LIKE rather than json_extract also tolerates a malformed row.
+	if opts.OpenPROnly {
+		query += ` AND (pr_info_json LIKE '%"state":"OPEN"%' OR pr_info_json LIKE '%"state":"DRAFT"%')`
 	}
 
 	// Soft-deleted (trashed) tasks are hidden everywhere by default — the board,
@@ -757,6 +764,24 @@ func (db *DB) MarkTaskStarted(id int64) error {
 		WHERE id = ? AND started_at IS NULL
 	`, id)
 	return err
+}
+
+// RestartIdleClock stamps a blocked task's completed_at with now. The idle
+// sweep measures a parked task's idle time from completed_at, so a session the
+// user resumes by hand, without typing into it, would otherwise be suspended
+// again on the sweep's next pass, a minute later. Only a task that actually ran
+// (completed_at already set) is touched; a staged pipeline step stays unstamped.
+//
+// This refreshes an existing stamp and never writes status, so it is not a way
+// around the status log: a task it touches is already blocked and has already
+// completed a turn.
+func (db *DB) RestartIdleClock(id int64) error {
+	_, err := db.Exec(`UPDATE tasks SET completed_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ? AND completed_at IS NOT NULL`, id, StatusBlocked)
+	if err != nil {
+		return fmt.Errorf("restart idle clock: %w", err)
+	}
+	return nil
 }
 
 // UpdateTaskStatus is gone on purpose.

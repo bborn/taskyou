@@ -83,12 +83,14 @@ export function RoutinesView() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-5">
+    <div className="flex-1 overflow-y-auto px-4 py-5 md:px-6">
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
           Routines
         </h2>
-        <span className="text-xs text-muted-foreground">
+        {/* The path is reference material, not something to read on a phone —
+            it was wrapping to two lines and shoving the refresh button down. */}
+        <span className="hidden text-xs text-muted-foreground md:inline">
           unattended agent runs · defined in ~/.config/task/routines
         </span>
         <div className="flex-1" />
@@ -108,7 +110,10 @@ export function RoutinesView() {
       {routines && routines.length > 0 && (
         <div className="divide-y rounded-lg border">
           {routines.map((routine) => (
-            <div key={routine.name} className="flex items-center gap-3 px-3 py-2.5 text-[12.5px]">
+            <div
+              key={routine.name}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5 text-[12.5px]"
+            >
               <span className="font-medium">{routine.name}</span>
               {routine.disabled && (
                 <Badge variant="outline" className="h-4.5 px-1.5 text-[10px] text-muted-foreground">
@@ -124,7 +129,7 @@ export function RoutinesView() {
               {routine.schedule && (
                 <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
                   <CalendarClock className="size-3" />
-                  {routine.schedule.detail}
+                  <span className="whitespace-nowrap">{routine.schedule.detail}</span>
                 </span>
               )}
 
@@ -138,13 +143,15 @@ export function RoutinesView() {
                   {routine.last_run.status}
                 </Badge>
               )}
-              <span className="w-32 text-right text-[11px] tabular-nums text-muted-foreground">
+              {/* A fixed 8rem column squeezed "0 9 1 *" into a vertical
+                  stack of single characters at phone width. */}
+              <span className="whitespace-nowrap text-right text-[11px] tabular-nums text-muted-foreground md:w-32">
                 {lastRunSummary(routine)}
               </span>
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-6"
+                className="size-9 md:size-6"
                 title="View latest run log"
                 disabled={!routine.last_run}
                 onClick={() => void viewLog(routine)}
@@ -154,7 +161,7 @@ export function RoutinesView() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-6"
+                className="size-9 md:size-6"
                 title={routine.disabled ? "Routine is disabled" : "Run now"}
                 disabled={routine.disabled || routine.last_run?.status === "running"}
                 onClick={() => void runNow(routine.name)}

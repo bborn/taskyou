@@ -6,6 +6,27 @@ shell PATH. Credentials and executor configuration belong on that host. When
 multiple coordinators use the same host, give each coordinator its own project
 checkout: task worktree paths are still relative to that checkout.
 
+## Choose a host when creating a task
+
+If a placement plugin offers machines for the project, the new-task forms show a
+**Host** selector: `automatic` (the default — the resolver is asked at spawn, as
+before), `this machine`, or one of the offered hosts. It is in the TUI form's
+advanced fields, in the desktop/browser form under **Advanced**, and on the CLI
+as `ty create --host <ssh-destination|local>`.
+
+Choosing one records it as the task's placement decision before it spawns, so the
+resolver is never asked for that task and every later retry reuses it. The
+project's directory on that host comes from the same plugin that offered it;
+`--host-dir` overrides it for a host the plugin does not know. `automatic`
+records nothing at all.
+
+The host is not contacted while the form is open: an unreachable host fails
+visibly at launch, exactly as a resolver's answer does. To change a host after
+the task has run, use the move controls below — they carry the work.
+
+With no placement plugin installed, or no host serving the project, no selector
+is shown and nothing changes.
+
 ## Select a destination
 
 Use `ty place <task-id> <ssh-destination> --dir <remote-checkout>`, the **Change
@@ -59,6 +80,13 @@ they are restarted.
 
 ## HTTP API
 
+- `GET /api/placement/hosts?project=<name>&executor=<name>` lists the machines a
+  new task in that project could be placed on (`name`, `target`, `workdir`,
+  `detail`). An empty list means nothing is offering a choice.
+- `POST /api/tasks` accepts `placement` (`""`/`auto` leaves it to the resolver,
+  `local` pins the task to this machine, anything else is an SSH destination) and
+  an optional `placement_workdir`. An unusable choice is reported and the task is
+  still created.
 - `GET /api/tasks/{id}/placement` returns the destination, directory, reason,
   decision state, remote worktree and health (`state`, `last_seen`, `problem`).
 - `POST /api/tasks/{id}/placement` accepts `target`, `workdir` and optional

@@ -108,6 +108,7 @@ type KeyMap struct {
 	OpenPR key.Binding
 	// Rebuild a task's missing worktree (detail view recovery)
 	RecreateWorktree key.Binding
+	ResumeSession    key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -289,6 +290,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("W"),
 			key.WithHelp("W", "recreate worktree"),
 		),
+		ResumeSession: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "resume session"),
+		),
 	}
 }
 
@@ -353,6 +358,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
+	km.ResumeSession = applyBinding(km.ResumeSession, cfg.ResumeSession)
 
 	return km
 }
@@ -422,9 +428,9 @@ type AppModel struct {
 	watcher    *fsnotify.Watcher
 	dbChangeCh chan struct{}
 
-	// PR status cache
-	prCache              *github.PRCache
-	initialPRRefreshDone bool // Track if initial PR refresh after load is done
+	// PR status is polled by the daemon and read from the DB. The TUI only asks
+	// GitHub itself when a task's detail view opens; this rate-limits that.
+	prLookedUpAt map[int64]time.Time
 
 	// Detail view state
 	selectedTask *db.Task
@@ -445,9 +451,14 @@ type AppModel struct {
 	newTaskForm        *FormModel
 	pendingTask        *db.Task
 	pendingAttachments []string
-	pendingPipeline    string // non-empty when the pending submission is a pipeline definition
-	queueConfirm       *huh.Form
-	queueValue         string
+	// The host chosen in the form, if any: "" leaves placement to the resolver,
+	// "local" pins the task here, anything else is an SSH destination. Recorded
+	// on the task the moment it is created, before it can spawn.
+	pendingPlacement    string
+	pendingPlacementDir string
+	pendingPipeline     string // non-empty when the pending submission is a pipeline definition
+	queueConfirm        *huh.Form
+	queueValue          string
 
 	// Edit task form state
 	editTaskForm *FormModel
@@ -693,7 +704,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
-		prCache:            github.NewPRCache(),
+		prLookedUpAt:       make(map[int64]time.Time),
 		filterInput:        filterInput,
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
@@ -744,7 +755,7 @@ func (m *AppModel) Init() tea.Cmd {
 		}
 	}
 
-	cmds := []tea.Cmd{m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick()}
+	cmds := []tea.Cmd{m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick()}
 
 	// Check for version upgrades in the background
 	if m.currentVersion != "" && m.currentVersion != "dev" {
@@ -757,7 +768,6 @@ func (m *AppModel) Init() tea.Cmd {
 // Update handles messages.
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	prevView := m.currentView
 	// Deferred so every early return below still publishes the new focus.
 	defer m.reportTerminalTask()
 
@@ -777,7 +787,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg, reloadTokenMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg, reloadTokenMsg:
 		isSystemMsg = true
 	case placementFinishedMsg:
 		isSystemMsg = true
@@ -1137,11 +1147,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.kanban.SetLatestActivity(msg.latestActivity)
 		}
 
-		// Load cached PR info from database for instant display
+		// PR status lives in the DB, kept current by the daemon's poller. Every
+		// reload carries the latest into the board and the open detail view.
 		for _, t := range m.tasks {
 			if t.PRInfoJSON != "" {
 				if info := github.UnmarshalPRInfo(t.PRInfoJSON); info != nil {
 					m.kanban.SetPRInfo(t.ID, info)
+					if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == t.ID {
+						m.detailView.SetPRInfo(info)
+					}
 				}
 			}
 		}
@@ -1152,12 +1166,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if state.Detail && state.TaskID > 0 {
 				cmds = append(cmds, m.loadTask(state.TaskID))
 			}
-		}
-
-		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
-		if !m.initialPRRefreshDone {
-			m.initialPRRefreshDone = true
-			cmds = append(cmds, m.refreshAllPRs())
 		}
 
 	case detailPaneResultMsg:
@@ -1333,28 +1341,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prJSON := github.MarshalPRInfo(msg.info)
 			m.db.UpdateTaskPRInfo(msg.taskID, msg.info.URL, msg.info.Number, prJSON)
 		}
-
-	case prBatchMsg:
-		// Batch PR update from refreshAllPRs
-		for _, result := range msg.results {
-			if result.info != nil {
-				m.kanban.SetPRInfo(result.taskID, result.info)
-				// Update detail view if showing this task
-				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
-					m.detailView.SetPRInfo(result.info)
-				}
-				// Persist PR state to database for instant display on next startup
-				prJSON := github.MarshalPRInfo(result.info)
-				m.db.UpdateTaskPRInfo(result.taskID, result.info.URL, result.info.Number, prJSON)
-			}
-		}
-
-	case prRefreshTickMsg:
-		// Periodically refresh PR info (every 4 minutes)
-		// Always refresh regardless of view - PR state is persisted to DB
-		// so it stays current even when navigating between views
-		cmds = append(cmds, m.refreshAllPRs())
-		cmds = append(cmds, m.prRefreshTick())
 
 	case taskCreatedMsg:
 		if msg.err == nil {
@@ -1702,11 +1688,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
-	}
-
-	// Trigger PR refresh when transitioning back to dashboard from another view
-	if m.currentView == ViewDashboard && prevView != ViewDashboard && m.initialPRRefreshDone {
-		cmds = append(cmds, m.refreshAllPRs())
 	}
 
 	// Dump debug state if enabled
@@ -2118,7 +2099,7 @@ func (m *AppModel) renderFilterBar() string {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
 			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
 			// so advertise the short alias (is:wf) rather than the full token.
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf)", navHelp)))
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf: workflows only)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
@@ -2126,15 +2107,12 @@ func (m *AppModel) renderFilterBar() string {
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 
-	// Wrap in a subtle box
+	// No background: each part's styling ends in an ANSI reset, so a bar
+	// background only survived in the trailing padding, as a gray stub after
+	// the hint. The bold primary "/" already marks the filter as active.
 	filterBarStyle := lipgloss.NewStyle().
 		Padding(0, 1).
 		Width(m.width)
-
-	if m.filterActive {
-		filterBarStyle = filterBarStyle.
-			Background(lipgloss.Color("#333333"))
-	}
 
 	filterBar := filterBarStyle.Render(filterContent)
 
@@ -3023,6 +3001,21 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notifyUntil = time.Now().Add(5 * time.Second)
 		return m, m.recreateWorktree(m.selectedTask.ID)
 	}
+	// Resume a session that closed under the open view (usually the idle sweep)
+	// without leaving and re-entering the task. Offered only while it is closed.
+	if key.Matches(keyMsg, m.keys.ResumeSession) && m.selectedTask != nil &&
+		m.detailView != nil && m.detailView.SessionClosed() {
+		m.notification = fmt.Sprintf("%s Resuming #%d…", IconInProgress(), m.selectedTask.ID)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		database, id := m.db, m.selectedTask.ID
+		restartClock := func() tea.Msg {
+			if err := database.RestartIdleClock(id); err != nil {
+				GetLogger().Error("resume #%d: %v", id, err)
+			}
+			return nil
+		}
+		return m, tea.Batch(restartClock, m.detailView.ResumeSession())
+	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		return m, m.detailView.ToggleShellPane()
 	}
@@ -3097,6 +3090,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
+			m.pendingPlacement, m.pendingPlacementDir = form.PlacementChoice()
 			m.pendingPipeline = form.Pipeline()
 			// Default to last queue choice for this project. Permission mode now
 			// lives on the task form, so this is just execute-now vs backlog;
@@ -3175,6 +3169,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				execute := m.queueValue == "yes"
 				m.pendingTask = nil
 				m.pendingAttachments = nil
+				m.pendingPlacement, m.pendingPlacementDir = "", ""
 				m.pendingPipeline = ""
 				m.newTaskForm = nil
 				m.queueConfirm = nil
@@ -3192,13 +3187,15 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			task := m.pendingTask
 			attachments := m.pendingAttachments
+			target, dir := m.pendingPlacement, m.pendingPlacementDir
 			m.pendingTask = nil
 			m.pendingAttachments = nil
+			m.pendingPlacement, m.pendingPlacementDir = "", ""
 			m.pendingPipeline = ""
 			m.newTaskForm = nil
 			m.queueConfirm = nil
 			m.currentView = ViewDashboard
-			return m, m.createTaskWithAttachments(task, attachments)
+			return m, m.createTaskWithAttachments(task, attachments, target, dir)
 		}
 	}
 
@@ -4592,8 +4589,6 @@ type tickMsg time.Time
 
 type focusTickMsg time.Time
 
-type prRefreshTickMsg time.Time
-
 type dbChangeMsg struct{}
 
 type prInfoMsg struct {
@@ -4799,7 +4794,11 @@ func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.C
 	}
 }
 
-func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string) tea.Cmd {
+// createTaskWithAttachments creates a task, its attachments, and — when the form
+// offered a choice of machines and one was picked — its placement. placement is
+// "" for the automatic answer, which writes nothing and leaves the resolver to
+// be asked at spawn exactly as before.
+func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string, placement, placementDir string) tea.Cmd {
 	m.reloadWrites.Add(1)
 	exec := m.executor
 	database := m.db
@@ -4834,6 +4833,13 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 		err := database.CreateTask(t)
 		if err != nil {
 			return taskCreatedMsg{task: t, err: err}
+		}
+
+		// A hand-picked host is recorded as the task's placement decision before it
+		// can spawn, so the resolver is never asked. The task is already created:
+		// a placement that cannot be recorded is said out loud, not rolled back.
+		if err := executor.ChoosePlacement(context.Background(), database, t, placement, placementDir); err != nil {
+			database.AppendTaskLog(t.ID, "error", "Could not set this task's host: "+err.Error())
 		}
 
 		// Mark onboarding as complete when first task is created
@@ -5535,12 +5541,6 @@ func (m *AppModel) focusTick() tea.Cmd {
 	})
 }
 
-func (m *AppModel) prRefreshTick() tea.Cmd {
-	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
-		return prRefreshTickMsg(t)
-	})
-}
-
 // checkVersion fetches the latest release from GitHub and compares with current version.
 func (m *AppModel) checkVersion() tea.Cmd {
 	return func() tea.Msg {
@@ -5552,9 +5552,18 @@ func (m *AppModel) checkVersion() tea.Cmd {
 	}
 }
 
-// fetchPRInfo fetches PR info for a single task (used for detail view).
+// fetchPRInfo asks GitHub about one task's PR as its detail view opens, so the
+// person looking at it sees current state rather than waiting for the daemon's
+// next poll. It skips merged/closed PRs, which can't change, and tasks it asked
+// about moments ago. A failed lookup yields no info, leaving what's shown alone.
 func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
-	if task.BranchName == "" || m.prCache == nil {
+	if task.BranchName == "" {
+		return nil
+	}
+	if known := github.UnmarshalPRInfo(task.PRInfoJSON); known != nil && github.PollInterval(known) == 0 {
+		return nil
+	}
+	if last, ok := m.prLookedUpAt[task.ID]; ok && time.Since(last) < github.PRPollActive {
 		return nil
 	}
 
@@ -5563,100 +5572,21 @@ func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
 	if repoDir == "" {
 		return nil
 	}
+	if m.prLookedUpAt == nil {
+		m.prLookedUpAt = make(map[int64]time.Time)
+	}
+	m.prLookedUpAt[task.ID] = time.Now()
 
-	prCache := m.prCache
 	taskID := task.ID
 	branchName := task.BranchName
 
 	return func() tea.Msg {
-		// Try cache first, fall back to single fetch if needed
-		info := prCache.GetCachedPR(repoDir, branchName)
-		if info == nil {
-			info = prCache.GetPRForBranch(repoDir, branchName)
+		info, err := github.LookupPR(context.Background(), repoDir, branchName)
+		if err != nil {
+			return prInfoMsg{taskID: taskID}
 		}
 		return prInfoMsg{taskID: taskID, info: info}
 	}
-}
-
-// refreshAllPRs fetches PR info for all repos in batch (much more efficient).
-// Instead of N gh calls for N tasks, this makes M calls for M unique repos.
-func (m *AppModel) refreshAllPRs() tea.Cmd {
-	if m.prCache == nil {
-		return nil
-	}
-
-	// Group tasks by repo directory, skipping tasks with terminal PR states
-	repoTasks := make(map[string][]*db.Task)
-	for _, task := range m.tasks {
-		if task.BranchName == "" {
-			continue
-		}
-		// Skip tasks whose PRs are already merged or closed — their state won't change
-		if task.PRInfoJSON != "" {
-			if cached := github.UnmarshalPRInfo(task.PRInfoJSON); cached != nil {
-				if cached.State == github.PRStateMerged || cached.State == github.PRStateClosed {
-					continue
-				}
-			}
-		}
-		repoDir := m.executor.GetProjectDir(task.Project)
-		if repoDir == "" {
-			continue
-		}
-		repoTasks[repoDir] = append(repoTasks[repoDir], task)
-	}
-
-	if len(repoTasks) == 0 {
-		return nil
-	}
-
-	prCache := m.prCache
-	// Copy the map to avoid race conditions
-	repoTasksCopy := make(map[string][]*db.Task)
-	for k, v := range repoTasks {
-		tasksCopy := make([]*db.Task, len(v))
-		copy(tasksCopy, v)
-		repoTasksCopy[k] = tasksCopy
-	}
-
-	return func() tea.Msg {
-		var results []prInfoMsg
-
-		// Fetch PRs for each repo sequentially (avoids memory spikes)
-		for repoDir, tasks := range repoTasksCopy {
-			prsByBranch := github.FetchAllPRsForRepo(repoDir)
-			if prsByBranch == nil {
-				// nil signals rate-limit/throttle — keep cached state, skip this repo.
-				continue
-			}
-			// Update cache with batch results
-			prCache.UpdateCacheForRepo(repoDir, prsByBranch)
-
-			// Create messages for tasks in this repo. The batch lists only OPEN
-			// PRs, so a task with a known PR number whose branch is absent has
-			// merged or closed — reconcile its terminal state with one targeted
-			// fetch. Without this, merged/closed PRs stay frozen at OPEN on the
-			// board. Bypass the cache so a stale OPEN entry from the prior batch
-			// can't mask the transition.
-			for _, task := range tasks {
-				info := prsByBranch[task.BranchName]
-				if info == nil && github.NeedsReconcile(prsByBranch, task.BranchName, task.PRNumber) {
-					prCache.InvalidateCache(repoDir, task.BranchName)
-					info = prCache.GetPRForBranch(repoDir, task.BranchName)
-				}
-				if info != nil {
-					results = append(results, prInfoMsg{taskID: task.ID, info: info})
-				}
-			}
-		}
-
-		return prBatchMsg{results: results}
-	}
-}
-
-// prBatchMsg contains PR info for multiple tasks (from batch fetch).
-type prBatchMsg struct {
-	results []prInfoMsg
 }
 
 // startDatabaseWatcher starts watching the database file for changes.
@@ -5777,7 +5707,7 @@ func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
 		}
 		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
 		m.notifyUntil = time.Now().Add(5 * time.Second)
-		return m.createTaskWithAttachments(newTask, nil)
+		return m.createTaskWithAttachments(newTask, nil, "", "")
 
 	case ai.CommandUpdateStatus:
 		if cmd.TaskID == 0 {

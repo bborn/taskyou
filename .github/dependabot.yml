@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # v0.4.0+ declares its module path as charm.land/ssh, so every bump
+      # under the old path fails with go_module_path_mismatch. wish v1 pins
+      # this; moving off it means wish v2, which requires bubbletea v2.
+      - dependency-name: github.com/charmbracelet/ssh
 
   - package-ecosystem: github-actions
     directory: /

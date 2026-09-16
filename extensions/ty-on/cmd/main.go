@@ -31,9 +31,10 @@ const maxRequest = 1 << 20
 
 const usage = `ty-on — placement resolver for TaskYou
 
-Reads one JSON placement request on stdin, writes one JSON response on stdout.
+Reads one JSON request on stdin, writes one JSON response on stdout.
 
     echo '{"event":"task.placement","task":{"project":"taskyou"}}' | ty-on
+    echo '{"event":"task.hosts","task":{"project":"taskyou"}}' | ty-on
 
 Reads the same host inventory as the "on" CLI: $ON_HOSTS, else
 $XDG_CONFIG_HOME/on/hosts.yaml, else ~/.config/on/hosts.yaml.
@@ -59,26 +60,44 @@ func main() {
 		}
 	}
 
-	emit(resolve(context.Background(), os.Stdin))
+	emit(answer(context.Background(), os.Stdin))
 }
 
-// resolve turns whatever is on stdin into a placement response. Every failure
-// mode becomes a local placement carrying an explanation.
-func resolve(ctx context.Context, stdin io.Reader) placement.Response {
+// answer reads one request and produces the response for whichever question it
+// asks: task.placement ("where does this task go") or task.hosts ("where could
+// it go"). Anything unreadable is treated as a placement question and answered
+// locally with an explanation — that caller is in the spawn path and must never
+// be failed.
+func answer(ctx context.Context, stdin io.Reader) any {
+	req, unreadable, ok := decode(stdin)
+	if !ok {
+		return unreadable
+	}
+
+	resolver := placement.Resolver{Timeout: timeout()}
+	if req.Event == placement.HostsEvent {
+		// No probe and no ranking: a form is open and waiting, and every eligible
+		// host is a legitimate answer to "which ones are there".
+		return resolver.Hosts(req)
+	}
+	return resolver.Resolve(ctx, req)
+}
+
+// decode reads the request. A request that cannot be read at all is not a
+// question anyone can answer, so it comes back as the local placement that every
+// failure in this resolver becomes, and ok is false.
+func decode(stdin io.Reader) (req placement.Request, unreadable placement.Response, ok bool) {
 	body, err := io.ReadAll(io.LimitReader(stdin, maxRequest))
 	if err != nil {
-		return placement.Local("placement request could not be read: %v", err)
+		return req, placement.Local("placement request could not be read: %v", err), false
 	}
 	if len(body) == 0 {
-		return placement.Local("empty placement request")
+		return req, placement.Local("empty placement request"), false
 	}
-
-	var req placement.Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return placement.Local("placement request is not valid JSON: %v", err)
+		return req, placement.Local("placement request is not valid JSON: %v", err), false
 	}
-
-	return placement.Resolver{Timeout: timeout()}.Resolve(ctx, req)
+	return req, placement.Response{}, true
 }
 
 // timeout reads the probe budget from TY_ON_TIMEOUT, falling back to the
@@ -95,7 +114,7 @@ func timeout() time.Duration {
 	return d
 }
 
-func emit(resp placement.Response) {
+func emit(resp any) {
 	out, err := json.Marshal(resp)
 	if err != nil {
 		// Response is three strings; this cannot fail in practice, but a

@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
+import { ChevronDown, ChevronRight, GitPullRequest, MoreVertical, Pin, Code2 } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
-import type { Dependencies, LogLine, Task } from "../api/types";
+import type { ChatMessage, Dependencies, LogLine, Task } from "../api/types";
 import { openExternal, openInEditor } from "../tauri";
 import { store, useAppState } from "../store";
 import { PlacementPanel } from "./PlacementPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
+import { ChatList } from "./ChatList";
 import { LogList } from "./LogList";
 import { mergeRecentLogs } from "../lib/logs";
 import { Markdown } from "./Markdown";
@@ -58,6 +66,17 @@ function SectionTitle({ children, onClick }: { children: React.ReactNode; onClic
   );
 }
 
+function ActionRow({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="-mx-1 flex h-11 items-center rounded-lg px-3 text-left text-[15px] text-foreground active:bg-surface-2"
+    >
+      {label}
+    </button>
+  );
+}
+
 function AddBlockerInput({ taskId, onAdded }: { taskId: number; onAdded: () => void }) {
   const [value, setValue] = useState("");
 
@@ -94,9 +113,12 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [deps, setDeps] = useState<Dependencies | null>(null);
   const isMobile = useIsMobile();
-  // A phone has no terminal, so the execution log is how you see what the
-  // agent is doing: start it open there.
-  const [showLogs, setShowLogs] = useState(isMobile);
+  // The conversation is what you came to read; the execution log is machinery
+  // (tool calls and system lines) and stays collapsed until asked for.
+  const [showLogs, setShowLogs] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [showChat, setShowChat] = useState(true);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -143,6 +165,7 @@ export function DetailView({ taskId }: { taskId: number }) {
   useEffect(() => {
     let active = true;
     let unsubscribe: (() => void) | undefined;
+    let messageRefresh: ReturnType<typeof setTimeout> | null = null;
     historyRevision.current++;
     setTask((current) => current?.id === taskId ? current : null);
     setLogs([]);
@@ -157,13 +180,35 @@ export function DetailView({ taskId }: { taskId: number }) {
       setLogs(mergeRecentLogs([], detail.logs));
       const since = detail.logs[detail.logs.length - 1]?.id ?? 0;
       unsubscribe = subscribeTaskLogs(taskId, since, (batch) => {
-        if (active) setLogs((prev) => mergeRecentLogs(prev, batch));
+        if (!active) return;
+        setLogs((prev) => mergeRecentLogs(prev, batch));
+        // Log activity means the transcript on disk has almost certainly grown
+        // too, so keep the conversation live. Throttled hard: the server
+        // re-reads and re-parses the whole session file, which must not happen
+        // once per log line.
+        if (messageRefresh === null) {
+          messageRefresh = setTimeout(() => {
+            messageRefresh = null;
+            api
+              .taskMessages(taskId)
+              .then((m) => { if (active) setMessages(m); })
+              .catch(() => {});
+          }, 4000);
+        }
       });
     }).catch((e) => {
       if (active) store.toast({title: `Failed to load #${taskId}`, body: String(e), kind: "error"});
     });
     api.deps(taskId).then((value) => { if (active) setDeps(value); }).catch(() => { if (active) setDeps(null); });
-    return () => { active = false; unsubscribe?.(); };
+    setMessages([]);
+    api.taskMessages(taskId)
+      .then((m) => { if (active) setMessages(m); })
+      .catch(() => { if (active) setMessages([]); });
+    return () => {
+      active = false;
+      unsubscribe?.();
+      if (messageRefresh !== null) clearTimeout(messageRefresh);
+    };
   }, [taskId]);
 
   async function loadOlderLogs() {
@@ -194,8 +239,66 @@ export function DetailView({ taskId }: { taskId: number }) {
   const blocked = task.status === "blocked";
   const refreshDeps = () => api.deps(task.id).then(setDeps).catch(() => {});
 
+  // The executor's actual conversation, read from the Claude session
+  // transcript. It was never in task_logs — that table only ever held tool
+  // calls and system lines, so the prose had nowhere to go.
+  //
+  // `follow` on a phone: 135 turns deep, opening at the oldest message means
+  // scrolling the whole history to find what the agent is waiting on.
+  // A task placed on another host keeps its transcript over there, and its
+  // local worktree_path is empty — so there is genuinely nothing to read here.
+  // Saying "hasn't started yet" about a running task would be a lie.
+  const remoteHost =
+    task.placement_target && task.placement_target !== "local" ? task.placement_target : "";
+  const chatEmptyHint =
+    remoteHost && !task.worktree_path
+      ? `This task runs on ${remoteHost}, and its transcript lives on that host — nothing to read locally.`
+      : undefined;
+
+  const conversationSection = (
+    <>
+      <SectionTitle onClick={() => setShowChat(!showChat)}>
+        {showChat ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        Conversation <span className="font-normal">({messages.length})</span>
+      </SectionTitle>
+      {showChat && <ChatList messages={messages} follow={isMobile} emptyHint={chatEmptyHint} />}
+    </>
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* Phone: one line. The old header stacked four rows — title, then
+          status/id/pin/mode/executor, then Edit/PR/Status, then the stand line
+          — and cost 230px of an 844px screen (27%) before a word of the
+          conversation. Everything moves behind the ⋮ sheet. */}
+      {isMobile ? (
+        <div className="flex shrink-0 items-center gap-2 border-b bg-surface-1 px-3 py-2">
+          <span
+            className={cn(
+              "size-2 shrink-0 rounded-full",
+              task.status === "blocked"
+                ? "bg-status-blocked"
+                : task.status === "processing"
+                  ? "bg-status-processing"
+                  : task.status === "backlog" || task.status === "queued"
+                    ? "bg-status-backlog"
+                    : "bg-muted-foreground",
+            )}
+            title={task.status}
+          />
+          <span className="min-w-0 flex-1 truncate text-[15px] font-semibold" title={task.title}>
+            {task.title}
+          </span>
+          {task.pinned && <Pin className="size-3.5 shrink-0 text-amber-300" />}
+          <button
+            onClick={() => setActionsOpen(true)}
+            aria-label="Task actions"
+            className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground active:bg-surface-2"
+          >
+            <MoreVertical className="size-5" />
+          </button>
+        </div>
+      ) : (
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-3 py-2.5 md:px-4">
         <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
           {task.status}
@@ -204,7 +307,9 @@ export function DetailView({ taskId }: { taskId: number }) {
         <span
           className={
             isMobile
-              ? "order-last line-clamp-3 w-full text-[15px] leading-snug font-semibold"
+              ? // Title first on a phone: the badges and buttons used to push it
+                // onto a third row, so you scrolled before reading what this is.
+                "order-first line-clamp-3 w-full text-[15px] leading-snug font-semibold"
               : "max-w-[44ch] truncate text-sm font-semibold"
           }
           title={task.title}
@@ -223,31 +328,29 @@ export function DetailView({ taskId }: { taskId: number }) {
 
         <div className="flex-1" />
 
-        {/* Phone: Execute and Reply live in the composer at the bottom, and
-            there is no local editor to open. */}
-        {!isMobile && (
-          <Select
-            value={task.executor || "claude"}
-            onValueChange={async (v) => {
-              await api.updateTask(task.id, { executor: v }).catch(() => {});
-              void store.refreshTasks();
-            }}
-          >
-            <SelectTrigger size="sm" className="w-32" title="Executor">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
-                (ex) => (
-                  <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
-                    {ex.name}
-                    {ex.available ? "" : " (not installed)"}
-                  </SelectItem>
-                ),
-              )}
-            </SelectContent>
-          </Select>
-        )}
+        {/* The executor decides what actually runs when you tap Execute in the
+            phone composer, so it belongs on the phone too. */}
+        <Select
+          value={task.executor || "claude"}
+          onValueChange={async (v) => {
+            await api.updateTask(task.id, { executor: v }).catch(() => {});
+            void store.refreshTasks();
+          }}
+        >
+          <SelectTrigger size="sm" className={isMobile ? "h-9 w-28" : "w-32"} title="Executor">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+              (ex) => (
+                <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                  {ex.name}
+                  {ex.available ? "" : " (not installed)"}
+                </SelectItem>
+              ),
+            )}
+          </SelectContent>
+        </Select>
 
         {!isMobile &&
           (blocked ? (
@@ -296,6 +399,86 @@ export function DetailView({ taskId }: { taskId: number }) {
           Status
         </Button>
       </div>
+      )}
+
+      {/* The ⋮ sheet. Built on Dialog, which already renders as a bottom sheet
+          on a phone, rather than adding a second overlay idiom for one menu. */}
+      <Dialog open={actionsOpen} onOpenChange={setActionsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="truncate">{task.title}</DialogTitle>
+          </DialogHeader>
+
+          <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-muted-foreground">
+            <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
+              {task.status}
+            </Badge>
+            <span className="font-mono text-[11px]">#{task.id}</span>
+            {task.permission_mode && task.permission_mode !== "default" && (
+              <Badge variant={task.permission_mode === "dangerous" ? "destructive" : "outline"}>
+                {task.permission_mode}
+              </Badge>
+            )}
+          </div>
+
+          <ActionRow
+            label={task.pinned ? "Unpin task" : "Pin task"}
+            onClick={() => {
+              setActionsOpen(false);
+              void store.pinTask(task.id);
+            }}
+          />
+          <ActionRow
+            label="Change status"
+            onClick={() => {
+              setActionsOpen(false);
+              store.setDialog({ kind: "status", taskId: task.id });
+            }}
+          />
+          <ActionRow
+            label="Edit task"
+            onClick={() => {
+              setActionsOpen(false);
+              store.setForm({ kind: "edit", taskId: task.id });
+            }}
+          />
+          {task.pr_url && (
+            <ActionRow
+              label={task.pr_number ? `Open PR #${task.pr_number}` : "Open PR"}
+              onClick={() => {
+                setActionsOpen(false);
+                void openExternal(task.pr_url);
+              }}
+            />
+          )}
+
+          <div className="mt-1 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
+            Executor
+          </div>
+          <Select
+            value={task.executor || "claude"}
+            onValueChange={async (v) => {
+              await api.updateTask(task.id, { executor: v }).catch(() => {});
+              void store.refreshTasks();
+            }}
+          >
+            <SelectTrigger className="h-11 w-full" title="Executor">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+                (ex) => (
+                  <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                    {ex.name}
+                    {ex.available ? "" : " (not installed)"}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+        </DialogContent>
+      </Dialog>
+
       {task.stand && (
         <div
           className={`shrink-0 truncate border-b bg-surface-1 px-4 py-1.5 text-[12.5px] ${
@@ -309,12 +492,27 @@ export function DetailView({ taskId }: { taskId: number }) {
 
       <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-[140px] min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-3.5 break-words select-text md:px-5">
-          {task.body ? (
-            <Markdown source={task.body} />
-          ) : (
-            <span className="text-xs text-muted-foreground">No description</span>
-          )}
+          {/* Phone: the conversation is why you opened this, so it comes before
+              the ticket body, placement, dependencies and attachments. */}
+          {isMobile && conversationSection}
 
+          {/* The conversation's opening turn IS the ticket, so on a phone
+              repeating the body below the whole thread showed the description
+              twice — the second copy wedged against the composer. Keep it only
+              when there is no conversation to read instead. */}
+          {(!isMobile || messages.length === 0) &&
+            (task.body ? (
+              <Markdown source={task.body} />
+            ) : (
+              <span className="text-xs text-muted-foreground">No description</span>
+            ))}
+
+          {/* Everything below is desktop-only. On a phone the detail view is
+              the thread and nothing else: scrolling past the conversation used
+              to land you in Placement / Dependencies / Attachments — config
+              panels and diagnostics — instead of ending at the composer. */}
+          {!isMobile && (
+            <>
           {task.summary && !task.stand && (
             <>
               <SectionTitle>Summary</SectionTitle>
@@ -365,6 +563,9 @@ export function DetailView({ taskId }: { taskId: number }) {
           <SectionTitle>Attachments</SectionTitle>
           <AttachmentsPanel taskId={task.id} />
 
+          {/* Desktop keeps it in place; the phone hoists it to the top. */}
+          {conversationSection}
+
           <SectionTitle onClick={() => setShowLogs(!showLogs)}>
             {showLogs ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
             Execution log <span className="font-normal">({displayedLogs.length})</span>
@@ -378,6 +579,8 @@ export function DetailView({ taskId }: { taskId: number }) {
             </div>
             <LogList logs={displayedLogs} follow={history === null} />
           </>}
+            </>
+          )}
         </div>
 
         {/* A phone gets a reply box where the desktop gets the live terminal:

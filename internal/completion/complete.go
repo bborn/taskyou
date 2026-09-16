@@ -96,14 +96,16 @@ func doneEvidence(summary, gate string) db.Evidence {
 //
 // It prefers a live `gh` lookup — an agent typically opens the PR moments before
 // completing, so the DB copy is stale — and persists a fresh result so the board
-// and the daemon reconciler both see it. Falls back to stored PR info.
+// and the daemon reconciler both see it. Falls back to stored PR info, including
+// when GitHub can't be reached: a failed lookup must not make a PR-bearing task
+// look PR-less and skip the human merge.
 func LookupPR(database *db.DB, task *db.Task) (int, string) {
 	if task == nil {
 		return 0, ""
 	}
 	repoDir, branch := prLookupTarget(database, task)
 	if branch != "" {
-		if info := github.NewPRCache().GetPRForBranch(repoDir, branch); info != nil {
+		if info, err := github.LookupPR(context.Background(), repoDir, branch); err == nil && info != nil {
 			_ = database.UpdateTaskPRInfo(task.ID, info.URL, info.Number, github.MarshalPRInfo(info))
 			return info.Number, info.URL
 		}

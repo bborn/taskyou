@@ -1,6 +1,8 @@
 import type {
   Attachment,
+  ChatMessage,
   Placement,
+  PlacementHost,
   Routine,
   RoutineRun,
   Dependencies,
@@ -62,6 +64,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
  placement: (id: number) => request<Placement>("GET", `/api/tasks/${id}/placement`),
  placeTask: (id: number, target: string, workdir: string) => request<{messages: string[]}>("POST", `/api/tasks/${id}/placement`, {target, workdir}),
+  // The machines a new task in this project could be placed on. An empty list
+  // means nothing is offering a choice, and the form falls back to automatic
+  // placement without showing a picker.
+  placementHosts: (project: string, executor?: string) => {
+    const params = new URLSearchParams({ project });
+    if (executor) params.set("executor", executor);
+    return request<{ hosts: PlacementHost[] }>("GET", `/api/placement/hosts?${params}`);
+  },
   // Tasks
   listTasks: (opts?: { all?: boolean; project?: string; limit?: number }) => {
     const params = new URLSearchParams();
@@ -83,6 +93,11 @@ export const api = {
     pinned?: boolean;
     permission_mode?: string;
     tags?: string;
+    // A host chosen by hand instead of by the resolver: "" leaves the choice to
+    // it, "local" pins the task to this machine, anything else is a destination
+    // from placementHosts().
+    placement?: string;
+    placement_workdir?: string;
   }) => request<Task>("POST", "/api/tasks", task),
   updateTask: (
     id: number,
@@ -112,6 +127,10 @@ export const api = {
   sendInput: (id: number, message: string) =>
     request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true }),
   taskLogs: (id: number, limit = 200) => request<LogLine[]>("GET", `/api/tasks/${id}/logs?limit=${limit}`),
+  // 60 turns is a long scroll on a phone and ~50KB instead of ~175KB; older
+  // history is a deliberate request, not something to ship on every poll.
+  taskMessages: (id: number, limit = 60) =>
+    request<ChatMessage[]>("GET", `/api/tasks/${id}/messages?limit=${limit}`),
   latestLogs: (ids: number[]) =>
     request<Record<string, LogLine>>("GET", `/api/tasks/latest-logs?ids=${ids.join(",")}`),
 
