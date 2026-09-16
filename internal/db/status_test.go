@@ -22,6 +22,25 @@ func newStatusTask(t *testing.T, database *DB, title, status string) *Task {
 	return task
 }
 
+// newWorkflowStep creates an intermediate workflow step: pipeline-tagged, on a
+// shared branch, with a dependent waiting on it. It is the only kind of task
+// automation may move to done, so tests of the gates behind the human-only one
+// start here.
+func newWorkflowStep(t *testing.T, database *DB, title, status string) *Task {
+	t.Helper()
+	step := &Task{Title: title, Body: "seeded by status_test", Status: status,
+		Type: TypeCode, Project: "personal", Tags: "pipeline",
+		SourceBranch: "workflow/" + strings.ToLower(strings.ReplaceAll(title, " ", "-"))}
+	if err := database.CreateTask(step); err != nil {
+		t.Fatalf("create workflow step %q: %v", title, err)
+	}
+	next := newStatusTask(t, database, "Next step after: "+title, StatusBlocked)
+	if err := database.AddDependency(step.ID, next.ID, false); err != nil {
+		t.Fatalf("add dependent to step %d: %v", step.ID, err)
+	}
+	return step
+}
+
 // markStarted stamps started_at the way the executor does, without going
 // through a status transition, so a test can set up "this task genuinely ran"
 // independently of the transition it is about to assert on.
@@ -123,7 +142,9 @@ func TestZombieStepCannotBecomeDone(t *testing.T) {
 	// A workflow step staged behind its dependencies: created, never run. No
 	// window, no worktree, no commit — exactly what the sweep used to read as
 	// "finished".
-	step := newStatusTask(t, database, "Migrate the sessions table to UUID keys", StatusBlocked)
+	// It is an intermediate step, the one kind of task automation may complete —
+	// so the refusal below comes from the never-started gate, not human-only.
+	step := newWorkflowStep(t, database, "Migrate the sessions table to UUID keys", StatusBlocked)
 	if step.StartedAt != nil {
 		t.Fatal("precondition: a freshly created step must not look started")
 	}
@@ -193,9 +214,8 @@ func TestCompletedAtOnlyOnTasksThatStarted(t *testing.T) {
 	if started.StartedAt == nil {
 		t.Fatal("moving to processing did not stamp started_at")
 	}
-	if err := database.SetTaskStatus(ran.ID, StatusDone, ActorMCP,
-		"the agent signalled completion",
-		Observedf("agent called taskyou_complete with a summary")); err != nil {
+	if err := database.SetTaskStatus(ran.ID, StatusDone, ActorCLI,
+		"closed by `ty close`", ByHuman("ran `ty close %d`", ran.ID)); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 	done, _ := database.GetTask(ran.ID)
@@ -215,18 +235,20 @@ func TestCompletedAtOnlyOnTasksThatStarted(t *testing.T) {
 	}
 }
 
-// TestOpenPRGateRefusesDoneWrite is the `ty close` incident: a task whose PR is
-// still open must not be buried, and the refusal must leave a trace.
+// TestOpenPRGateRefusesDoneWrite: automation completing a workflow step whose
+// row carries a still-open PR must say the PR is not its own; without that the
+// write is refused, and the refusal must leave a trace.
 func TestOpenPRGateRefusesDoneWrite(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	task := newStatusTask(t, database, "Harden the OAuth callback against replay", StatusBlocked)
+	task := newWorkflowStep(t, database, "Harden the OAuth callback against replay", StatusBlocked)
 	markStarted(t, database, task.ID)
 	giveOpenPR(t, database, task.ID, 412)
 
-	err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI,
-		"closed by `ty close`", ByHuman("ran `ty close %d`", task.ID))
+	err := database.SetTaskStatus(task.ID, StatusDone, ActorSweep,
+		"workflow step committed and pushed its work",
+		Observedf("HEAD moved past the recorded base commit and is pushed"))
 	if !IsRefused(err) || RefusalGate(err) != GateOpenPR {
 		t.Fatalf("want open-pr refusal, got %v", err)
 	}
@@ -248,7 +270,7 @@ func TestOpenPRGateRefusesDoneWrite(t *testing.T) {
 	if last.Outcome != OutcomeRefused || last.Gate != GateOpenPR {
 		t.Fatalf("the refusal was not logged: %+v", last)
 	}
-	if last.Actor != ActorCLI {
+	if last.Actor != ActorSweep {
 		t.Errorf("the log does not say who tried: %q", last.Actor)
 	}
 	// A refusal changed nothing, so it must not fold.
@@ -257,10 +279,11 @@ func TestOpenPRGateRefusesDoneWrite(t *testing.T) {
 	}
 }
 
-// TestObservedTerminalPRStateGetsThrough: the only way past the open-PR gate is
-// to have looked at the PR and seen it finish — which is what the daemon's
-// review reconciler does.
-func TestObservedTerminalPRStateGetsThrough(t *testing.T) {
+// TestMergedPRDoesNotLetAutomationFinishATask: a merged PR used to be enough
+// for the daemon's review reconciler to move a task to done. It no longer is —
+// a merge can land while the agent is still working — so even an observed
+// MERGED state leaves the close to a human.
+func TestMergedPRDoesNotLetAutomationFinishATask(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
@@ -268,14 +291,15 @@ func TestObservedTerminalPRStateGetsThrough(t *testing.T) {
 	markStarted(t, database, task.ID)
 	giveOpenPR(t, database, task.ID, 88)
 
-	if err := database.SetTaskStatus(task.ID, StatusDone, ActorDaemon,
+	err := database.SetTaskStatus(task.ID, StatusDone, ActorDaemon,
 		"PR #88 was merged by a human, which finishes this task",
-		Evidence{Observed: "gh reports PR #88 in state MERGED", PRNumber: 88, PRState: "MERGED"}); err != nil {
-		t.Fatalf("the reconciler could not complete a merged PR's task: %v", err)
+		Evidence{Observed: "gh reports PR #88 in state MERGED", PRNumber: 88, PRState: "MERGED"})
+	if !IsRefused(err) || RefusalGate(err) != GateHumanOnly {
+		t.Fatalf("want human-only refusal for a merged PR's task, got %v", err)
 	}
 	reloaded, _ := database.GetTask(task.ID)
-	if reloaded.Status != StatusDone {
-		t.Fatalf("status is %q, want done", reloaded.Status)
+	if reloaded.Status != StatusBlocked {
+		t.Fatalf("status is %q, want blocked", reloaded.Status)
 	}
 }
 
@@ -286,7 +310,7 @@ func TestDisownedSharedBranchPRGetsThrough(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	step := newStatusTask(t, database, "Extract the pricing rules into a service", StatusProcessing)
+	step := newWorkflowStep(t, database, "Extract the pricing rules into a service", StatusProcessing)
 	markStarted(t, database, step.ID)
 	giveOpenPR(t, database, step.ID, 901)
 
@@ -304,21 +328,153 @@ func TestDisownedSharedBranchPRGetsThrough(t *testing.T) {
 	}
 }
 
+// TestAutomationCannotFinishAPlainTask is the rule itself: only a human moves a
+// task to done. The daemon, a sweep, a hook or the agent may observe that the
+// work is finished, but the most they may do is park it for review — and the
+// attempt is refused and logged, whatever evidence it brings.
+func TestAutomationCannotFinishAPlainTask(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	task := newStatusTask(t, database, "Add retries to the Slack notifier", StatusProcessing)
+	markStarted(t, database, task.ID)
+
+	for _, actor := range []Actor{ActorDaemon, ActorSweep, ActorHook, ActorMCP} {
+		err := database.SetTaskStatus(task.ID, StatusDone, actor,
+			"the agent signalled completion",
+			Evidence{Observed: "agent called taskyou_complete", HeadCommit: "d41d8cd98f00", Gate: "go test ./..."})
+		if !IsRefused(err) {
+			t.Fatalf("actor %s finished a plain task: %v", actor, err)
+		}
+		if gate := RefusalGate(err); gate != GateHumanOnly {
+			t.Errorf("actor %s: want %s gate, got %s", actor, GateHumanOnly, gate)
+		}
+
+		events, err := database.GetStatusEvents(task.ID)
+		if err != nil {
+			t.Fatalf("GetStatusEvents: %v", err)
+		}
+		last := events[len(events)-1]
+		if last.Outcome != OutcomeRefused || last.Gate != GateHumanOnly || last.Actor != actor {
+			t.Errorf("actor %s: the refusal was not logged: %+v", actor, last)
+		}
+	}
+
+	reloaded, _ := database.GetTask(task.ID)
+	if reloaded.Status != StatusProcessing {
+		t.Fatalf("automation moved the task to %q", reloaded.Status)
+	}
+}
+
+// TestAutomationCannotArchiveATask: archiving buries a task as surely as
+// closing it, so it is a human's decision too.
+func TestAutomationCannotArchiveATask(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	task := newStatusTask(t, database, "Clean up stale feature flags", StatusBlocked)
+	markStarted(t, database, task.ID)
+
+	err := database.SetTaskStatus(task.ID, StatusArchived, ActorSweep,
+		"idle for a week", Observedf("no activity since the last check"))
+	if !IsRefused(err) || RefusalGate(err) != GateHumanOnly {
+		t.Fatalf("want human-only refusal for an automated archive, got %v", err)
+	}
+	reloaded, _ := database.GetTask(task.ID)
+	if reloaded.Status != StatusBlocked {
+		t.Fatalf("the task was archived anyway: %q", reloaded.Status)
+	}
+
+	// A person archiving it is fine.
+	if err := database.SetTaskStatus(task.ID, StatusArchived, ActorTUI,
+		"archived from the board", ByHuman("pressed archive")); err != nil {
+		t.Fatalf("a human could not archive the task: %v", err)
+	}
+}
+
+// TestHumanCloseIgnoresCachedPRState is the stale-badge case: the PR merged a
+// minute ago but the daemon's cached state still says OPEN. The human closing
+// the task is the decision; the cache must not overrule them. The same holds
+// for a task that never started.
+func TestHumanCloseIgnoresCachedPRState(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	withPR := newStatusTask(t, database, "Harden the OAuth callback against replay", StatusBlocked)
+	markStarted(t, database, withPR.ID)
+	giveOpenPR(t, database, withPR.ID, 412)
+
+	if err := database.SetTaskStatus(withPR.ID, StatusDone, ActorCLI,
+		"closed by `ty close`", ByHuman("ran `ty close %d`", withPR.ID)); err != nil {
+		t.Fatalf("a human could not close a task with a stored OPEN PR: %v", err)
+	}
+	if reloaded, _ := database.GetTask(withPR.ID); reloaded.Status != StatusDone {
+		t.Fatalf("status is %q, want done", reloaded.Status)
+	}
+
+	// A never-started workflow step is refused for automation, but not for a
+	// person.
+	unstarted := newWorkflowStep(t, database, "Rename the billing tables", StatusBlocked)
+	if err := database.SetTaskStatus(unstarted.ID, StatusDone, ActorWeb,
+		"closed from the web API", ByHuman("POST /api/tasks/%d/close", unstarted.ID)); err != nil {
+		t.Fatalf("a human could not close a never-started task: %v", err)
+	}
+	if reloaded, _ := database.GetTask(unstarted.ID); reloaded.Status != StatusDone {
+		t.Fatalf("status is %q, want done", reloaded.Status)
+	}
+}
+
+// TestOnlyIntermediateWorkflowStepsCompleteAutomatically: the one exception to
+// human-only is a workflow step others wait on, whose done advances the DAG.
+// The terminal step — nothing depends on it — is the workflow's result, and a
+// human closes it like any other task.
+func TestOnlyIntermediateWorkflowStepsCompleteAutomatically(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	middle := newWorkflowStep(t, database, "Extract the tax rules into a module", StatusProcessing)
+	markStarted(t, database, middle.ID)
+	giveOpenPR(t, database, middle.ID, 530)
+
+	ev := Observedf("agent called taskyou_complete").DisownSharedBranchPR(530, middle.SourceBranch)
+	if err := database.SetTaskStatus(middle.ID, StatusDone, ActorMCP,
+		"workflow step finished; its dependents can start", ev); err != nil {
+		t.Fatalf("automation could not complete an intermediate workflow step: %v", err)
+	}
+	if reloaded, _ := database.GetTask(middle.ID); reloaded.Status != StatusDone {
+		t.Fatalf("status is %q, want done", reloaded.Status)
+	}
+
+	// Same shape — pipeline tag, shared branch — but nothing depends on it.
+	terminal := &Task{Title: "Open the tax rules PR", Status: StatusProcessing, Type: TypeCode,
+		Project: "personal", Tags: "pipeline", SourceBranch: middle.SourceBranch}
+	if err := database.CreateTask(terminal); err != nil {
+		t.Fatalf("create terminal step: %v", err)
+	}
+	markStarted(t, database, terminal.ID)
+
+	err := database.SetTaskStatus(terminal.ID, StatusDone, ActorMCP,
+		"the agent signalled completion", Observedf("agent called taskyou_complete"))
+	if !IsRefused(err) || RefusalGate(err) != GateHumanOnly {
+		t.Fatalf("want human-only refusal for a terminal workflow step, got %v", err)
+	}
+}
+
 // TestUnknownPRStateCountsAsOpen: the failure mode is burying live work, so an
 // unknown PR state must not be a way through the gate.
 func TestUnknownPRStateCountsAsOpen(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	task := newStatusTask(t, database, "Cache the pricing table in Redis", StatusBlocked)
+	task := newWorkflowStep(t, database, "Cache the pricing table in Redis", StatusBlocked)
 	markStarted(t, database, task.ID)
 	if _, err := database.Exec(
 		`UPDATE tasks SET pr_number = 77, pr_info_json = '' WHERE id = ?`, task.ID); err != nil {
 		t.Fatalf("attach PR: %v", err)
 	}
 
-	err := database.SetTaskStatus(task.ID, StatusDone, ActorWeb,
-		"closed from the web API", ByHuman("POST /api/tasks/%d/close", task.ID))
+	err := database.SetTaskStatus(task.ID, StatusDone, ActorMCP,
+		"the agent signalled completion", Observedf("agent called taskyou_complete"))
 	if RefusalGate(err) != GateOpenPR {
 		t.Fatalf("an unknown PR state was treated as closed: %v", err)
 	}
@@ -343,7 +499,8 @@ func TestFoldRoundTrip(t *testing.T) {
 		{StatusProcessing, ActorDaemon, "picked up for execution", NoEvidence},
 		{StatusBlocked, ActorHook, "the agent asked a question", Observedf("stop reason %q", "needs_input")},
 		{StatusProcessing, ActorHook, "the agent is running a tool again", NoEvidence},
-		{StatusDone, ActorMCP, "the agent signalled completion", Observedf("agent called taskyou_complete")},
+		{StatusBlocked, ActorMCP, "the agent signalled completion", Observedf("agent called taskyou_complete")},
+		{StatusDone, ActorTUI, "closed from the board", ByHuman("pressed close")},
 	}
 
 	// The status the task should hold after each step, indexed alongside.
@@ -711,7 +868,7 @@ func TestEvidenceSurvivesTheRoundTrip(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	task := newStatusTask(t, database, "Verify the SOC2 evidence collector", StatusProcessing)
+	task := newWorkflowStep(t, database, "Verify the SOC2 evidence collector", StatusProcessing)
 	markStarted(t, database, task.ID)
 
 	ev := Evidence{
@@ -757,7 +914,12 @@ func TestReleasingDependentsIsItselfLogged(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	blocker := newStatusTask(t, database, "Publish the new pricing schema", StatusProcessing)
+	// A workflow step, so the agent's own completion is a done-write it may make.
+	blocker := &Task{Title: "Publish the new pricing schema", Status: StatusProcessing,
+		Type: TypeCode, Project: "personal", Tags: "pipeline", SourceBranch: "workflow/pricing-schema"}
+	if err := database.CreateTask(blocker); err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
 	markStarted(t, database, blocker.ID)
 	dependent := newStatusTask(t, database, "Migrate the billing UI to the new schema", StatusBlocked)
 	if err := database.AddDependency(blocker.ID, dependent.ID, false); err != nil {
@@ -892,5 +1054,21 @@ func TestFailedGenesisRollsBackTheTask(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("the task row survived a failed genesis write: %d row(s) left behind", n)
+	}
+}
+
+// Human evidence only counts from a surface a person drives. Automation that
+// dresses its write up as a human's is still automation.
+func TestHumanEvidenceFromAutomationIsNotAHuman(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	task := newStatusTask(t, database, "Plain task", StatusBlocked)
+	markStarted(t, database, task.ID)
+	for _, actor := range []Actor{ActorDaemon, ActorSweep, ActorHook, ActorMCP, ActorSystem} {
+		err := database.SetTaskStatus(task.ID, StatusDone, actor, "pretending", ByHuman("not really a human"))
+		if RefusalGate(err) != GateHumanOnly {
+			t.Errorf("actor %s with human evidence: want human-only refusal, got %v", actor, err)
+		}
 	}
 }

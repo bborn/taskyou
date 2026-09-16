@@ -56,9 +56,13 @@ func createBranchTask(t *testing.T, database *db.DB, branch, status string, stor
 		t.Fatal(err)
 	}
 	if status != db.StatusProcessing {
-		if err := database.SetTaskStatus(task.ID, status, db.ActorDaemon,
-			"test fixture: the task reached "+status,
-			db.Observedf("the agent finished its turn on branch %s", branch)); err != nil {
+		actor, ev := db.ActorDaemon, db.Observedf("the agent finished its turn on branch %s", branch)
+		if status == db.StatusDone || status == db.StatusArchived {
+			// Only a human closes a task.
+			actor, ev = db.ActorCLI, db.ByHuman("ran `ty close %d`", task.ID)
+		}
+		if err := database.SetTaskStatus(task.ID, status, actor,
+			"test fixture: the task reached "+status, ev); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -70,7 +74,9 @@ func createBranchTask(t *testing.T, database *db.DB, branch, status string, stor
 	return task
 }
 
-func TestRefreshPRStatus_StoresNewPRsAndPromotesMergedReviews(t *testing.T) {
+// Polling stores what it sees, including a merge, but a merged PR does not close
+// the task: only a human does that.
+func TestRefreshPRStatus_StoresNewPRsAndLeavesMergedReviewsForAHuman(t *testing.T) {
 	exec, database := newPRTestExecutor(t)
 
 	review := createBranchTask(t, database, "task/review", db.StatusBlocked,
@@ -91,8 +97,8 @@ func TestRefreshPRStatus_StoresNewPRsAndPromotesMergedReviews(t *testing.T) {
 	}
 
 	got, _ := database.GetTask(review.ID)
-	if got.Status != db.StatusDone {
-		t.Errorf("merged review task status = %q, want done", got.Status)
+	if got.Status != db.StatusBlocked {
+		t.Errorf("merged review task status = %q, want it left blocked for a human", got.Status)
 	}
 	if info := github.UnmarshalPRInfo(got.PRInfoJSON); info == nil || info.State != github.PRStateMerged {
 		t.Errorf("review task PR info = %s, want merged", got.PRInfoJSON)
@@ -132,8 +138,8 @@ func TestRefreshPRStatus_FailedLookupKeepsLastKnownState(t *testing.T) {
 }
 
 // A merge stored by someone else (or before a restart) is never polled again,
-// so promotion can't depend on a fresh lookup.
-func TestRefreshPRStatus_PromotesStoredMergeWithoutAskingGitHub(t *testing.T) {
+// and it does not close the task either — that is left to a human.
+func TestRefreshPRStatus_StoredMergeIsNotPolledAndDoesNotCloseTheTask(t *testing.T) {
 	exec, database := newPRTestExecutor(t)
 	task := createBranchTask(t, database, "task/merged", db.StatusBlocked,
 		&github.PRInfo{Number: 30, State: github.PRStateMerged})
@@ -146,20 +152,14 @@ func TestRefreshPRStatus_PromotesStoredMergeWithoutAskingGitHub(t *testing.T) {
 		t.Errorf("asked GitHub about a merged PR (%d calls)", calls)
 	}
 	got, _ := database.GetTask(task.ID)
-	if got.Status != db.StatusDone {
-		t.Errorf("status = %q, want done", got.Status)
+	if got.Status != db.StatusBlocked {
+		t.Errorf("status = %q, want blocked awaiting a human close", got.Status)
 	}
 
-	// Reopening against the same merged PR must not bounce it back to done.
-	if err := database.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
-		"test fixture: the PR was reopened, so the task is parked again",
-		db.Observedf("PR reopened after merge")); err != nil {
-		t.Fatal(err)
-	}
 	exec.refreshPRStatus(context.Background())
 	got, _ = database.GetTask(task.ID)
 	if got.Status != db.StatusBlocked {
-		t.Errorf("reopened task auto-completed again: %q", got.Status)
+		t.Errorf("a second poll closed the task: %q", got.Status)
 	}
 	logs, _ := database.GetTaskLogs(task.ID, 100)
 	n := 0
@@ -168,7 +168,7 @@ func TestRefreshPRStatus_PromotesStoredMergeWithoutAskingGitHub(t *testing.T) {
 			n++
 		}
 	}
-	if n != 1 {
-		t.Errorf("auto-complete log lines = %d, want 1", n)
+	if n != 0 {
+		t.Errorf("auto-complete log lines = %d, want 0", n)
 	}
 }

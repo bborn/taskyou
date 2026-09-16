@@ -22,9 +22,10 @@ func TestListTasksOpenPROnly(t *testing.T) {
 			"test fixture: the task ran", NoEvidence); err != nil {
 			t.Fatal(err)
 		}
-		if err := database.SetTaskStatus(task.ID, StatusDone, ActorDaemon,
-			"test fixture: the task finished",
-			Observedf("the agent signalled completion")); err != nil {
+		// Only a human closes a task, so the fixture closes it as one.
+		if err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI,
+			"test fixture: the task was closed",
+			ByHuman("ran `ty close %d`", task.ID)); err != nil {
 			t.Fatal(err)
 		}
 		if prJSON != "" {

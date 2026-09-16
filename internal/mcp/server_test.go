@@ -166,16 +166,13 @@ func TestWorkflowComplete(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Verify task moved to done — agents are trusted to close their own tasks.
+	// The task parks for review — only a human moves a task to done.
 	updatedTask, err := database.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if updatedTask.Status != db.StatusDone {
-		t.Errorf("expected status 'done' after taskyou_complete, got '%s'", updatedTask.Status)
-	}
-	if updatedTask.CompletedAt == nil {
-		t.Error("expected completed_at to be set when task moves to done")
+	if updatedTask.Status != db.StatusBlocked {
+		t.Errorf("expected status 'blocked' awaiting a human close after taskyou_complete, got '%s'", updatedTask.Status)
 	}
 	if !completeCalled {
 		t.Error("expected onComplete callback to fire so executor session shuts down")
@@ -188,8 +185,8 @@ func TestWorkflowComplete(t *testing.T) {
 	}
 	content := result["content"].([]interface{})
 	text := content[0].(map[string]interface{})["text"].(string)
-	if !strings.Contains(text, "done") {
-		t.Errorf("expected response text to mention task is done, got: %s", text)
+	if !strings.Contains(text, "review and close") {
+		t.Errorf("expected response text to say a human will review and close the task, got: %s", text)
 	}
 }
 
@@ -311,7 +308,8 @@ func TestWorkflowGateStepParksForReview(t *testing.T) {
 
 // TestCompleteEndToEnd is the smoke test the bug report calls for: simulate the
 // executor speaking JSON-RPC to the MCP server, call taskyou_complete, and assert
-// the task transitions to 'done' without external intervention.
+// the task leaves 'processing' and parks for a human without external
+// intervention.
 func TestCompleteEndToEnd(t *testing.T) {
 	database := testDB(t)
 	task := createTestTask(t, database)
@@ -353,8 +351,8 @@ func TestCompleteEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if updatedTask.Status != db.StatusDone {
-		t.Errorf("expected status 'done' after taskyou_complete end-to-end, got '%s'", updatedTask.Status)
+	if updatedTask.Status != db.StatusBlocked {
+		t.Errorf("expected status 'blocked' after taskyou_complete end-to-end, got '%s'", updatedTask.Status)
 	}
 }
 

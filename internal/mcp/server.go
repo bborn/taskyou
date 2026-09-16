@@ -402,9 +402,11 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		case completion.KindGateParked:
 			resultText = "Output saved. This is a human-review gate — the step is now 'blocked' awaiting a human to approve it (`ty close`), which releases the next phase. Do not call taskyou_complete again."
 		case completion.KindPRReview:
-			resultText = fmt.Sprintf("Work finished. PR #%d is up for review — the task is now 'blocked' awaiting a human merge, and will move to 'done' automatically once the PR is merged or closed. Do not call taskyou_complete again.", outcome.PRNumber)
+			resultText = fmt.Sprintf("Work finished. PR #%d is up for review — the task is now 'blocked' awaiting a human merge, and a human will close it after merging. Do not call taskyou_complete again.", outcome.PRNumber)
+		case completion.KindReview:
+			resultText = "Work finished. The task is now 'blocked' awaiting a human to review and close it. Do not call taskyou_complete again."
 		default:
-			resultText = "Task marked done."
+			resultText = "Workflow step marked done; the next steps can start."
 		}
 
 		s.sendResult(id, toolCallResult{

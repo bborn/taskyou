@@ -234,6 +234,9 @@ const (
 	GateNeverStarted = "never-started"
 	// GateOpenPR: a done-write for a task whose pull request is still open.
 	GateOpenPR = "open-pr"
+	// GateHumanOnly: automation tried to finish or archive a task. Only a
+	// person does that; the one exception is a workflow step with dependents.
+	GateHumanOnly = "human-only"
 	// GateUnknownStatus: the target status is not a status.
 	GateUnknownStatus = "unknown-status"
 	// GateMissingActor / GateMissingReason: the write did not say who or why.
@@ -375,7 +378,7 @@ func (db *DB) SetTaskStatus(id int64, to string, actor Actor, reason string, evi
 		return err
 	}
 
-	if refusal := db.gate(task, to, evidence); refusal != nil {
+	if refusal := db.gate(task, to, actor, evidence); refusal != nil {
 		refusal.From = from
 		// Record the refusal. An attempt to bury a task with an open PR is
 		// exactly the thing that used to leave no trace anywhere.
@@ -408,7 +411,7 @@ func isKnownStatus(s string) bool {
 // Only terminal transitions are gated. Everything else (queueing, starting,
 // parking for review, dropping back to backlog) is reversible and cheap to get
 // wrong; burying a task is neither.
-func (db *DB) gate(task *Task, to string, ev Evidence) *RefusedError {
+func (db *DB) gate(task *Task, to string, actor Actor, ev Evidence) *RefusedError {
 	terminal := to == StatusDone || to == StatusArchived
 
 	// Gate 1 — evidence required. "A transition to a terminal state must carry
@@ -419,7 +422,28 @@ func (db *DB) gate(task *Task, to string, ev Evidence) *RefusedError {
 			Detail: "a terminal status must say what was observed — no completion by inference"}
 	}
 
+	// Gate 1b — only a human finishes a task. Automation (the daemon, sweeps,
+	// hooks, agents) used to move tasks to done on its own: when a PR merged,
+	// when an agent said it was finished. It got that wrong often enough — a
+	// merge landing while the agent was still working, a close refused on a
+	// stale PR badge seconds after the merge — that the decision is now the
+	// human's alone. The single exception is a workflow step that other steps
+	// wait on: its done is what advances the DAG, and parking every middle step
+	// for a human would stall every workflow.
+	humanWrite := strings.TrimSpace(ev.Human) != "" && isHumanActor(actor)
+	if terminal && !humanWrite && !db.isIntermediateWorkflowStep(task) {
+		return &RefusedError{TaskID: task.ID, To: to, Gate: GateHumanOnly,
+			Detail: "only a human closes or archives a task; automation parks it in blocked instead"}
+	}
+
 	if to != StatusDone {
+		return nil
+	}
+
+	// A person closing a task is the decision, not a request to be checked
+	// against cached state: a PR badge can lag a merge by minutes, and the gates
+	// below exist to stop automation, not the human it works for.
+	if humanWrite {
 		return nil
 	}
 
@@ -432,10 +456,9 @@ func (db *DB) gate(task *Task, to string, ev Evidence) *RefusedError {
 			Detail: "this task never started, so it cannot have finished; only a human may close unstarted work"}
 	}
 
-	// Gate 3 — open PR. `ty close`, `ty status done`, `ty bulk close`, the web
-	// API and the MCP tool all used to bury a task whose PR was still open.
-	// The way past this gate is to observe the PR reaching a terminal state
-	// (which is what the daemon's review reconciler does), not to assert it.
+	// Gate 3 — open PR. Only a workflow step reaches here (gate 1b), and every
+	// step shares one branch, so the PR on its row is the terminal step's. The
+	// caller has to say so (PRDisowned) rather than the gate assuming it.
 	if open, number := db.prIsOpen(task); open {
 		switch {
 		case strings.TrimSpace(ev.PRDisowned) != "":
@@ -444,11 +467,44 @@ func (db *DB) gate(task *Task, to string, ev Evidence) *RefusedError {
 			// The caller looked at the PR and saw it finish. Allowed.
 		default:
 			return &RefusedError{TaskID: task.ID, To: to, Gate: GateOpenPR,
-				Detail: fmt.Sprintf("PR #%d is still open — merge or close it (the daemon then completes this task), or use `ty complete` to park it for review", number)}
+				Detail: fmt.Sprintf("PR #%d is still open — only a human can close this task", number)}
 		}
 	}
 
 	return nil
+}
+
+// isHumanActor reports whether actor is a surface a person drives. Human
+// evidence from any other actor (a sweep, a hook, an agent) is a claim, not a
+// person, and does not get past the human-only gate.
+func isHumanActor(actor Actor) bool {
+	switch actor {
+	case ActorTUI, ActorCLI, ActorWeb:
+		return true
+	}
+	return false
+}
+
+// isIntermediateWorkflowStep reports whether task is a workflow step that other
+// steps depend on — the only kind of task automation may move to done. It
+// mirrors pipeline.IsWorkflowTask (which db cannot import) plus "has
+// dependents", which is what pipeline.IsTerminalStep negates.
+func (db *DB) isIntermediateWorkflowStep(task *Task) bool {
+	pipelineTagged := false
+	for _, tag := range strings.Split(task.Tags, ",") {
+		if strings.EqualFold(strings.TrimSpace(tag), "pipeline") {
+			pipelineTagged = true
+			break
+		}
+	}
+	if !pipelineTagged {
+		return false
+	}
+	if strings.TrimSpace(task.SourceBranch) == "" && strings.TrimSpace(task.BranchName) == "" {
+		return false
+	}
+	dependents, err := db.GetBlockedBy(task.ID)
+	return err == nil && len(dependents) > 0
 }
 
 // isTerminalPRState reports whether an observed PR state means the human is
