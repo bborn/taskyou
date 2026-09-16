@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,8 +34,7 @@ func (p *PiExecutor) Name() string {
 
 // IsAvailable checks if the pi CLI is installed.
 func (p *PiExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("pi")
-	return err == nil
+	return binaryOnPath("pi")
 }
 
 // Execute runs a task using Pi.

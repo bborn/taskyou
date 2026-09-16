@@ -38,8 +38,7 @@ func (g *GeminiExecutor) Name() string {
 
 // IsAvailable checks if the gemini CLI is installed.
 func (g *GeminiExecutor) IsAvailable() bool {
-	_, err := exec.LookPath("gemini")
-	return err == nil
+	return binaryOnPath("gemini")
 }
 
 // Execute runs a task using the Gemini CLI.
