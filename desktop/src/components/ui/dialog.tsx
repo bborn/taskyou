@@ -60,17 +60,19 @@ function DialogContent({
   // is what makes the retry, edit, status and settings dialogs usable without
   // re-fitting each of them by hand.
   const isMobile = useIsMobile()
-  const panelRef = React.useRef<HTMLDivElement>(null)
+  // Radix mounts portal content after this component. A callback ref makes
+  // the keyboard effect run when the actual panel becomes available.
+  const [panel, setPanel] = React.useState<HTMLDivElement | null>(null)
   // bb's second keyboard layer: a sheet is fixed to the viewport bottom, so
   // resizing the shell is not enough — the panel lifts itself by the measured
   // overlap. This is what was leaving the filter sheet's input under the keys.
-  useSheetKeyboardInset(panelRef, isMobile)
+  useSheetKeyboardInset(panel, isMobile)
 
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
       <DialogPrimitive.Content
-        ref={panelRef}
+        ref={setPanel}
         data-slot="dialog-content"
         data-mobile-sheet={isMobile ? "true" : undefined}
         className={cn(

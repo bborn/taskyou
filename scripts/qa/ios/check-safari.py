@@ -95,7 +95,7 @@ def main():
         geometry = js('''return {url:location.href, ua:navigator.userAgent,
           viewport:{height:visualViewport.height,top:visualViewport.offsetTop,scale:visualViewport.scale},
           innerHeight,clientHeight:document.documentElement.clientHeight,
-          active:document.activeElement?.outerHTML,
+          active:document.activeElement?.outerHTML,activeRect:document.activeElement?.getBoundingClientRect().toJSON(),
           dialogs:[...document.querySelectorAll('[role="dialog"]')].map(e=>({rect:e.getBoundingClientRect().toJSON(),bottom:e.style.bottom}))};''')
         (artifacts / f'{name}.json').write_text(json.dumps(geometry, indent=2))
         return geometry

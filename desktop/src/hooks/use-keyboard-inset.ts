@@ -194,11 +194,10 @@ export function measureKeyboardOverlap(
 }
 
 export function useSheetKeyboardInset(
-  panelRef: RefObject<HTMLElement | null>,
+  panel: HTMLElement | null,
   open: boolean,
 ): void {
   useEffect(() => {
-    const panel = panelRef.current;
     const visualViewport = window.visualViewport;
     if (!panel || !open || !visualViewport) return;
 
@@ -243,5 +242,5 @@ export function useSheetKeyboardInset(
       if (frame !== null) window.cancelAnimationFrame(frame);
       reset();
     };
-  }, [panelRef, open]);
+  }, [panel, open]);
 }
