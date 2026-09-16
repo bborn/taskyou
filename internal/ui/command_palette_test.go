@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/hooks"
 )
@@ -734,5 +737,51 @@ func TestFilterTasksFindsByGitHubPRURL(t *testing.T) {
 	}
 	if m.filteredTasks[0].ID != 42 {
 		t.Errorf("First result should be task 42, got %d", m.filteredTasks[0].ID)
+	}
+}
+
+// The AI-command branch is the palette's one exit that does not return to the
+// view it was opened over: an AI command runs against the board. A detail view
+// opened behind the palette therefore has to be handed back here — left
+// attached, its tmux panes stay joined to a view the user can no longer see and
+// the next task load finds a model for the wrong task.
+func TestCommandPaletteAICommandDetachesDetailView(t *testing.T) {
+	in := textinput.New()
+	in.SetValue("make me a task about billing")
+	m := &AppModel{
+		width:       100,
+		height:      50,
+		keys:        DefaultKeyMap(),
+		kanban:      NewKanbanBoard(100, 50),
+		currentView: ViewCommandPalette,
+		commandPaletteView: &CommandPaletteModel{
+			searchInput: in,
+			width:       100,
+			height:      40,
+			maxVisible:  10,
+		},
+		commandPaletteReturnView:   ViewDetail,
+		commandPaletteReturnTaskID: 42,
+		selectedTask:               &db.Task{ID: 42, Title: "Fix billing"},
+		detailView:                 &DetailModel{},
+	}
+
+	palette := m.commandPaletteView
+	m.updateCommandPalette(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if !palette.IsAICommandRequest() {
+		t.Fatal("enter on a query with no matching task did not become an AI command")
+	}
+	if m.currentView != ViewDashboard {
+		t.Fatalf("currentView = %v, want the board", m.currentView)
+	}
+	if m.detailView != nil {
+		t.Error("the detail view is still attached behind the board")
+	}
+	if !m.detailCleanupInFlight {
+		t.Error("the detail view's panes were never handed back")
+	}
+	if m.commandPaletteReturnView != ViewDashboard || m.commandPaletteReturnTaskID != 0 {
+		t.Errorf("palette return state left at (%v, %d), want the board", m.commandPaletteReturnView, m.commandPaletteReturnTaskID)
 	}
 }

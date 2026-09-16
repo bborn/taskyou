@@ -4467,10 +4467,20 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rawInput := m.commandPaletteView.RawInput()
 		projects := m.commandPaletteView.Projects()
 		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
 		m.currentView = ViewDashboard
 		m.notification = "Processing command..."
 		m.notifyUntil = time.Now().Add(30 * time.Second)
-		return m, m.executeAICommand(rawInput, projects)
+		// Unlike its three siblings above, this branch does not return to the
+		// view the palette was opened over: an AI command runs against the board.
+		// So a detail view opened behind the palette has to be handed back here,
+		// or its panes stay joined to a view the user can no longer see and the
+		// next detail load reuses a model for the wrong task.
+		m.taskLoadRevision++
+		m.pendingDetailLoad = nil
+		m.endTaskTransition()
+		return m, tea.Batch(m.detachDetail(true), m.executeAICommand(rawInput, projects))
 	}
 
 	return m, cmd
