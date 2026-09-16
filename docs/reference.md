@@ -26,14 +26,8 @@ Press `v` to swap the four columns for one flat line per task — the same board
 at a quarter of the vertical cost. Pair it with a saved view and the whole
 "what am I working on right now?" answer fits on one screen:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Active  6 tasks                        ◐ 2 running  ✗ 3 blocked  ○ 1 queued │
-│▌◐ #5321 [ty] Add persistent filtered task list view    +412/-18  running 4m │
-│ ✗ #5318 [ol] Offer refactor — needs a pricing decision           blocked 2h │
-│ ◐ #5310 [ik] Reconnect flow for expired Meta tokens   ✓ +88/-12  running 1h │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+[![List view showing the Active saved view](media/list-view.png)](media/list-view.png)
+*`v` for the list, with the `Active` view applied — in progress and blocked, nothing else*
 
 Rows carry the same badges as cards (PR state and diff, running dot, permission
 mode, host, pin, dependency lock) plus an age hint. Every key that works on a
@@ -43,6 +37,9 @@ card works on a row — the selection is shared, so `v` never loses your place.
 ### Saved Views
 
 A **view** is a name plus a filter query. Press `V` for the picker:
+
+[![The saved views picker](media/saved-views.png)](media/saved-views.png)
+
 
 | Key | Action |
 |-----|--------|
