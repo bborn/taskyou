@@ -83,10 +83,11 @@ type KanbanBoard struct {
 	// status columns. The columns stay populated either way (the count helpers
 	// and the render signature read them), so toggling is free. See list.go.
 	listMode   bool
-	listTasks  []*db.Task // k.allTasks in list order (pinned, then urgency)
-	listRow    int        // selected index into listTasks
-	listScroll int        // first visible index
-	listTitle  string     // active saved view / filter, shown in the header
+	listTasks  []*db.Task  // k.allTasks in list order (pinned, then urgency)
+	listRow    int         // selected index into listTasks
+	listScroll int         // first visible index
+	listTitle  string      // active saved view / filter, shown in the header
+	listOpts   ListOptions // grouping, sort and density (see listopts.go)
 }
 
 // cardHeight is the number of vertical lines a task card occupies, including
@@ -115,6 +116,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 		prInfo:           make(map[int64]*github.PRInfo),
 		runningProcesses: make(map[int64]bool),
 		originColumn:     -1,
+		listOpts:         DefaultListOptions(),
 	}
 }
 

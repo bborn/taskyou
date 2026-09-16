@@ -60,6 +60,7 @@ const (
 	ViewActionPicker         // modal list of plugin actions for the current task
 	ViewRepoClone            // clone a pasted repo URL, then continue as a folder
 	ViewSavedViews           // modal list of saved filter views
+	ViewListOptions          // modal for the list's grouping / sort / density
 )
 
 // KeyMap defines key bindings.
@@ -114,6 +115,8 @@ type KeyMap struct {
 	// Board display: kanban columns vs a flat list, and the saved-view picker
 	ToggleListView key.Binding
 	SavedViews     key.Binding
+	// How the list is arranged: group by, sort, density
+	ListOptions key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -129,7 +132,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
-		{k.Filter, k.ToggleListView, k.SavedViews},
+		{k.Filter, k.ToggleListView, k.SavedViews, k.ListOptions},
 		{k.CommandPalette, k.Settings, k.Routines},
 		{k.ChangeStatus, k.PlaceTask, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
@@ -308,6 +311,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("V"),
 			key.WithHelp("V", "saved views"),
 		),
+		ListOptions: key.NewBinding(
+			key.WithKeys("O"),
+			key.WithHelp("O", "arrange list"),
+		),
 	}
 }
 
@@ -375,6 +382,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.ResumeSession = applyBinding(km.ResumeSession, cfg.ResumeSession)
 	km.ToggleListView = applyBinding(km.ToggleListView, cfg.ToggleListView)
 	km.SavedViews = applyBinding(km.SavedViews, cfg.SavedViews)
+	km.ListOptions = applyBinding(km.ListOptions, cfg.ListOptions)
 
 	return km
 }
@@ -555,9 +563,10 @@ type AppModel struct {
 	// Board display state. listMode and the active filter/view are persisted in
 	// settings (see loadBoardViewState), so the board you left is the board you
 	// come back to — the whole point of a "persistent filtered view".
-	listMode   bool
-	activeView string // name of the applied saved view; cleared once the filter is edited by hand
-	viewPicker *ViewPickerModel
+	listMode     bool
+	activeView   string // name of the applied saved view; cleared once the filter is edited by hand
+	viewPicker   *ViewPickerModel
+	listOptsView *ListOptionsModel
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -1003,6 +1012,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.currentView {
 		case ViewSavedViews:
 			return m.updateSavedViews(msg)
+		case ViewListOptions:
+			return m.updateListOptions(msg)
 		case ViewDashboard:
 			return m.updateDashboard(msg)
 		case ViewDetail:
@@ -1770,6 +1781,9 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.viewPicker != nil {
 		m.viewPicker.SetSize(width, height)
 	}
+	if m.listOptsView != nil {
+		m.listOptsView.SetSize(width, height)
+	}
 	if m.newTaskForm != nil {
 		m.newTaskForm.SetSize(width, height)
 	}
@@ -1808,6 +1822,10 @@ func (m *AppModel) View() string {
 	case ViewSavedViews:
 		if m.viewPicker != nil {
 			return m.viewPicker.View()
+		}
+	case ViewListOptions:
+		if m.listOptsView != nil {
+			return m.listOptsView.View()
 		}
 	case ViewDetail:
 		if m.detailView != nil {
@@ -2428,6 +2446,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.SavedViews):
 		return m, m.openViewPicker()
+
+	case key.Matches(msg, m.keys.ListOptions):
+		// Arranging a board that isn't drawn as a list would change nothing the
+		// user can see, so switch to the list first.
+		if !m.listMode {
+			m.setListMode(true)
+		}
+		return m, m.openListOptions()
 
 	case key.Matches(msg, m.keys.Back):
 		// If filter is set, clear it first

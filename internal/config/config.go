@@ -65,6 +65,13 @@ const (
 	// SettingBoardView is the name of the saved view that filter came from, ""
 	// when the filter was typed ad hoc. Only used to label the filter bar.
 	SettingBoardView = "board_view"
+	// SettingListGroupBy, SettingListSort and SettingListDensity are how the
+	// list view is arranged: which field it breaks into sections on, how tasks
+	// order inside a section, and how many lines each task gets. See
+	// ui.ListOptions for the accepted values.
+	SettingListGroupBy = "list_group_by"
+	SettingListSort    = "list_sort"
+	SettingListDensity = "list_density"
 )
 
 // Board display modes for SettingBoardDisplayMode.
