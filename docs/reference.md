@@ -802,6 +802,13 @@ The sweep is deliberately conservative:
 echo "continue" | ./bin/ty input <id>   # Pipe input
 ```
 
+Both work wherever the task is running. A task a placement plugin put on
+another host has its executor pane in a tmux server over there, and `ty input`
+and `ty output` reach it over ssh — the same connection `ty show` prints an
+`ssh … tmux attach` line for. When there is no pane to reach, the error names
+the host and tmux session that were checked, so a finished agent reads
+differently from a lookup on the wrong machine.
+
 **Inside a task worktree:**
 
 When working in a task's worktree directory, you can interact with the executor directly. For Claude tasks:
