@@ -98,3 +98,32 @@ func TestRemoteCoordinatorsAndHostsAreIsolated(t *testing.T) {
 		t.Fatalf("incomplete placement: %+v", got)
 	}
 }
+
+// A host nobody is connected to is idle, not reconnecting. "reconnecting" is a
+// claim that a channel is trying; only a recorded problem can make it.
+func TestRemoteHostHealthDistinguishesIdleFromReconnecting(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.RecordHostHealth("build", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := d.RemoteHostHealth("build"); h.State != "online" {
+		t.Fatalf("fresh observation: got %q, want online", h.State)
+	}
+
+	if _, err = d.Exec(`UPDATE remote_hosts SET last_seen='2026-01-01T00:00:00Z' WHERE host='build'`); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := d.RemoteHostHealth("build"); h.State != "idle" {
+		t.Fatalf("stale observation, no problem: got %q, want idle", h.State)
+	}
+
+	if err = d.RecordHostHealth("build", "Connection interrupted; reconnecting", false); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := d.RemoteHostHealth("build"); h.State != "reconnecting" {
+		t.Fatalf("recorded problem: got %q, want reconnecting", h.State)
+	}
+}
