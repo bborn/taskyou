@@ -61,3 +61,23 @@ Tested the production preview on an iPhone 11 through macOS iPhone Mirroring, us
 - Views includes All tasks, and selecting the current saved view again clears the pending view selection.
 - The reply composer exposes Attach files; the redundant yes/continue shortcuts are removed and Retry is available in task actions.
 - Browser verification: draft and disclosure state survive reload; Reset stays cleared without Apply; a synthetic text file uploads successfully through the file picker; the footer stays visible without horizontal overflow at 320×568. Production build passes. This follow-up was not tested with the iOS software keyboard.
+
+### Local attachment delivery follow-up
+
+- Durable bytes now live beside the database; execution copies are staged in
+  each task's local or remote worktree. Existing blobs migrate on database open.
+- Mobile composer directly opens the native picker, displays selected files,
+  supports attachment-only replies, and retains pending files on reload/failure.
+- Browser check at 393×852: uploaded a synthetic text file directly, reloaded,
+  verified the chip persisted, then verified failure to reach the fixture's
+  absent executor retained the chip. No horizontal overflow; send and attach
+  controls remained visible. QA database migration preserved existing files.
+- Go tests cover legacy blob migration/deduplication/integrity, local and remote
+  staging through a fake SSH transport, filename collision isolation, ownership,
+  failed transfers, and attachment-only HTTP input delivery to a tagged pane.
+- Changed backend packages pass. Full-suite run encountered
+  `TestRemoteAttachDropsALeftOverViewPairing` (remote tmux pane window lookup);
+  it also fails individually, while an earlier full run passed that package.
+  Installed golangci-lint was built with Go 1.25 and cannot lint this Go 1.26 repo.
+- No real remote executor session or new iOS keyboard run was performed. No
+  macOS Actions job was started. The main user database was inspected read-only.

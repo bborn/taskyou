@@ -2442,10 +2442,20 @@ type Attachment struct {
 
 // AddAttachment adds a file attachment to a task.
 func (db *DB) AddAttachment(taskID int64, filename, mimeType string, data []byte) (*Attachment, error) {
+	var hash string
+	var err error
+	storedData := data
+	if db.path != ":memory:" {
+		hash, err = db.storeAttachmentFile(data)
+		if err != nil {
+			return nil, err
+		}
+		storedData = []byte{}
+	}
 	result, err := db.Exec(`
-		INSERT INTO task_attachments (task_id, filename, mime_type, size, data)
-		VALUES (?, ?, ?, ?, ?)
-	`, taskID, filename, mimeType, len(data), data)
+		INSERT INTO task_attachments (task_id, filename, mime_type, size, data, content_hash)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, taskID, filename, mimeType, len(data), storedData, hash)
 	if err != nil {
 		return nil, fmt.Errorf("insert attachment: %w", err)
 	}
@@ -2464,12 +2474,19 @@ func (db *DB) AddAttachment(taskID int64, filename, mimeType string, data []byte
 // GetAttachment retrieves an attachment by ID.
 func (db *DB) GetAttachment(id int64) (*Attachment, error) {
 	a := &Attachment{}
+	var hash string
 	err := db.QueryRow(`
-		SELECT id, task_id, filename, mime_type, size, data, created_at
+		SELECT id, task_id, filename, mime_type, size, data, created_at, content_hash
 		FROM task_attachments WHERE id = ?
-	`, id).Scan(&a.ID, &a.TaskID, &a.Filename, &a.MimeType, &a.Size, &a.Data, &a.CreatedAt)
+	`, id).Scan(&a.ID, &a.TaskID, &a.Filename, &a.MimeType, &a.Size, &a.Data, &a.CreatedAt, &hash)
 	if err != nil {
 		return nil, fmt.Errorf("get attachment: %w", err)
+	}
+	if hash != "" {
+		a.Data, err = db.readAttachmentFile(hash)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return a, nil
 }
@@ -2512,23 +2529,15 @@ func (db *DB) CountAttachments(taskID int64) (int, error) {
 
 // ListAttachmentsWithData retrieves all attachments for a task including data.
 func (db *DB) ListAttachmentsWithData(taskID int64) ([]*Attachment, error) {
-	rows, err := db.Query(`
-		SELECT id, task_id, filename, mime_type, size, data, created_at
-		FROM task_attachments WHERE task_id = ?
-		ORDER BY created_at ASC
-	`, taskID)
+	attachments, err := db.ListAttachments(taskID)
 	if err != nil {
-		return nil, fmt.Errorf("list attachments with data: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	var attachments []*Attachment
-	for rows.Next() {
-		a := &Attachment{}
-		if err := rows.Scan(&a.ID, &a.TaskID, &a.Filename, &a.MimeType, &a.Size, &a.Data, &a.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan attachment: %w", err)
+	for i, a := range attachments {
+		attachments[i], err = db.GetAttachment(a.ID)
+		if err != nil {
+			return nil, err
 		}
-		attachments = append(attachments, a)
 	}
 	return attachments, nil
 }

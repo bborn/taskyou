@@ -614,7 +614,7 @@ export function DetailView({ taskId }: { taskId: number }) {
         {/* A phone gets a reply box where the desktop gets the live terminal:
             xterm needs a keyboard and ~80 columns. */}
         {isMobile ? (
-          <ReplyComposer task={task} onAttach={() => setAttachmentsOpen(true)} />
+          <ReplyComposer key={task.id} task={task} onAttach={() => setAttachmentsOpen(true)} />
         ) : (
           <>
             <div

@@ -560,9 +560,10 @@ func (s *Server) handlePinTask(w http.ResponseWriter, r *http.Request) {
 }
 
 type inputRequest struct {
-	Message string `json:"message"`
-	Enter   bool   `json:"enter"`
-	Key     string `json:"key"`
+	AttachmentIDs []int64 `json:"attachment_ids"`
+	Message       string  `json:"message"`
+	Enter         bool    `json:"enter"`
+	Key           string  `json:"key"`
 	// Force sends the message even while the agent is working. The GUI sets it
 	// only after telling the user the agent is busy and being told to go ahead.
 	Force bool `json:"force"`
@@ -597,6 +598,13 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.AttachmentIDs) > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		r = r.WithContext(ctx)
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(3 * time.Minute))
+	}
+
 	// A remote task's pane is on another machine's tmux server, so it is found
 	// by the code that owns that connection rather than by a tag lookup here —
 	// but the delivery itself is the same one every other surface uses, so a
@@ -613,6 +621,15 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "task has no remote executor pane", http.StatusConflict)
 			return
 		}
+		if len(req.AttachmentIDs) > 0 {
+			runner := executor.RemoteRunner{Host: info.RemoteHost, WorkDir: info.Workdir}
+			paths, err := executor.StageAttachments(r.Context(), s.db, task.ID, info.Workdir, &runner, req.AttachmentIDs)
+			if err != nil {
+				jsonErr(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			req.Message += executor.AttachmentPrompt(paths)
+		}
 		terminal := paneTerminal{ctx: r.Context(), runner: executor.RemoteRunner{Host: info.RemoteHost}}
 		sender := agentsend.NewForHost(terminalRunner{terminal}, s.db, info.RemoteHost)
 		s.writeInput(w, r, sender, inputTarget{task: task, pane: info.ClaudePaneID}, req)
@@ -622,6 +639,14 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 	if s.runner == nil {
 		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
 		return
+	}
+	if len(req.AttachmentIDs) > 0 {
+		paths, err := executor.StageAttachments(r.Context(), s.db, task.ID, s.taskWorkdir(task), nil, req.AttachmentIDs)
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Message += executor.AttachmentPrompt(paths)
 	}
 	s.writeInput(w, r, s.agentSender(), inputTarget{task: task}, req)
 }

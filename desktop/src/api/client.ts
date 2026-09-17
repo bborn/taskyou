@@ -137,8 +137,8 @@ export const api = {
   // force types the message even while the agent is working. Without it the API
   // refuses with code "agent_busy" rather than dropping text into the middle of
   // the agent's own output.
-  sendInput: (id: number, message: string, force = false) =>
-    request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true, force }),
+  sendInput: (id: number, message: string, force = false, attachmentIds: number[] = []) =>
+    request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true, force, attachment_ids: attachmentIds }),
   taskLogs: (id: number, limit = 200) => request<LogLine[]>("GET", `/api/tasks/${id}/logs?limit=${limit}`),
   // 60 turns is a long scroll on a phone and ~50KB instead of ~175KB; older
   // history is a deliberate request, not something to ship on every poll.

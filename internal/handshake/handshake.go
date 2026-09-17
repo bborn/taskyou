@@ -49,11 +49,14 @@ import (
 // advance them run the DAEMON's binary, so a daemon from before this writes no
 // counters — and a newer client that sends a prompt and waits for the reply then
 // waits for something that cannot happen. It has to be able to say so.
-const Protocol = 3
+//
+// 4: attachment bytes moved to local files (db.SchemaVersion 3). Older
+// executors would read the empty compatibility blob and silently lose files.
+const Protocol = 4
 
 // ContractFingerprint pins the contract inputs Protocol covers. See
 // contract_test.go; it prints the replacement value when the inputs move.
-const ContractFingerprint = "6f6ce470baec9838"
+const ContractFingerprint = "955cf702ca9431fd"
 
 // Severity ranks a finding. The zero value is intentionally invalid so a
 // finding always carries an explicit one.
