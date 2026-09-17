@@ -370,7 +370,7 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
         dragOver && "border-ring/60 bg-surface-2 ring-1 ring-ring/40",
       )}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes("text/x-task-id")) {
+        if (column.status && e.dataTransfer.types.includes("text/x-task-id")) {
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
           setDragOver(true);
@@ -381,20 +381,21 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
         e.preventDefault();
         setDragOver(false);
         const id = parseInt(e.dataTransfer.getData("text/x-task-id"), 10);
-        if (id) store.moveTaskToColumn(id, column.status);
+        if (id && column.status) store.moveTaskToColumn(id, column.status);
       }}
     >
       <div className="flex items-center gap-2 border-b px-3 py-2.5">
-        <span className={cn("size-1.5 rounded-full", COLUMN_DOT[column.status])} />
+        <span className={cn("size-1.5 shrink-0 rounded-full", column.status ? COLUMN_DOT[column.status] : "bg-muted-foreground")}
+          style={column.project ? { backgroundColor: projects.find((p) => p.name === column.project)?.color } : undefined} />
         <span
           className={cn(
-            "text-[11px] font-semibold uppercase tracking-wider",
+            "min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider",
             COLUMN_ACCENT[column.status],
           )}
         >
           {column.label}
         </span>
-        <span className="rounded-full bg-surface-3 px-1.5 text-[10px] tabular-nums text-muted-foreground">
+        <span className="shrink-0 rounded-full bg-surface-3 px-1.5 text-[10px] tabular-nums text-muted-foreground">
           {column.tasks.length}
         </span>
       </div>
@@ -480,7 +481,7 @@ export function Board({
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3.5">
         {columns.map((column) => (
           <BoardColumn
-            key={column.status}
+            key={column.key}
             column={column}
             collapsed={
               (column.status === "backlog" && collapsed.backlog) ||

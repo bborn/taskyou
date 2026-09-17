@@ -92,3 +92,21 @@ to the top rather than stretching with wrapped descriptions.
 Production build passed. At 813×858, browser checks covered both layout
 switch directions, the sort menu, and the help dialog. Screenshots confirmed
 roomier rows and all shortcut badges at a consistent 20.5px height.
+
+### Shared kanban grouping and Settings navigation
+
+Kanban now uses the same grouping and sorting preferences as List. Project
+columns retain pinned tasks in their projects and cannot trigger status moves;
+status columns preserve their existing drag behavior. Shift+O arranges either
+layout. The dependency-free grouping check (using the existing TypeScript
+compiler) runs with `node scripts/qa/check-kanban.mjs` and covers project/status
+name collisions, queued tasks, pinned tasks, unassigned tasks, and empty groups.
+
+Settings now has persistent sections for Appearance, Projects, Task types,
+Routines, Machines, and Executors. Routines reuses the existing run/log surface.
+Machines uses the existing placement discovery API for the selected project and
+executor; it does not introduce a host editor. Executors reports availability
+on the server. Browser checks verified project kanban columns at 1440×900,
+routine listings, machine empty state, executor availability, and section
+persistence after closing/reopening Settings. Frontend build and grouping checks
+passed. No routines were started and no machine configuration was changed.

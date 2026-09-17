@@ -4,7 +4,7 @@ import { motion } from "motion/react";
 import { Plus, Search, ListFilter, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
-import { buildColumns } from "./lib/board";
+import { buildKanbanColumns } from "./lib/kanban";
 import { buildSections, flattenSections } from "./lib/list";
 import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
@@ -250,7 +250,7 @@ export default function App() {
     () => (state.filteredIds ? state.tasks.filter((t) => state.filteredIds!.has(t.id)) : state.tasks),
     [state.tasks, state.filteredIds],
   );
-  const columns = useMemo(() => buildColumns(filteredTasks), [filteredTasks]);
+  const columns = useMemo(() => buildKanbanColumns(filteredTasks, state.listOptions), [filteredTasks, state.listOptions]);
 
   // List mode walks one flat run in display order rather than a column grid.
   const listTasks = useMemo(
@@ -300,7 +300,7 @@ export default function App() {
   }
 
   function jumpToColumn(status: string) {
-    if (inList) {
+    if (inList || state.listOptions.groupBy !== "status") {
       // The status keys still mean something in a flat list: jump to the first
       // task with that status wherever the current arrangement put it.
       const wanted = status === "processing" ? ["processing", "queued"] : [status];
@@ -465,9 +465,6 @@ export default function App() {
           case "V":
             return void store.setViewsOpen(true);
           case "O":
-            // Arranging a board that isn't drawn as a list changes nothing the
-            // user can see, so switch to the list first (parity with the TUI).
-            if (s.boardMode !== "list") store.setBoardMode("list");
             return void store.setArrangeOpen(true);
         }
       } else if (s.view.kind === "detail") {

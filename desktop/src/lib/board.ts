@@ -2,7 +2,9 @@ import type { Task, TaskStatus } from "../api/types";
 import { fuzzyMatches } from "./fuzzy";
 
 export interface Column {
-  status: TaskStatus;
+  key: string;
+  status: TaskStatus | "";
+  project?: string;
   label: string;
   tasks: Task[];
 }
@@ -125,7 +127,7 @@ export function buildColumns(tasks: Task[]): Column[] {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       return referenceTime(b) - referenceTime(a);
     });
-    return { status, label, tasks: columnTasks };
+    return { key: `status:${status}`, status, label, tasks: columnTasks };
   });
 }
 

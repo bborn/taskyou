@@ -73,8 +73,8 @@ export function ArrangeMenu() {
     <Dialog open={arrangeOpen} onOpenChange={(open) => store.setArrangeOpen(open)}>
       <DialogContent className="sm:max-w-md" onEscapeKeyDown={(e) => e.preventDefault()}>
         <DialogHeader>
-          <DialogTitle>Arrange list</DialogTitle>
-          <DialogDescription>How the list groups and orders tasks.</DialogDescription>
+          <DialogTitle>Arrange tasks</DialogTitle>
+          <DialogDescription>Group and sort tasks in either Board or List.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3 py-1">
           <OptionRow
@@ -205,7 +205,6 @@ export function ListToolbar() {
           <List className="size-4" /> List
         </Button>
       </div>
-      {inList && <>
         <Select value={listOptions.groupBy} onValueChange={(value) => store.setListOptions({ ...listOptions, groupBy: value as ListGroupBy })}>
           <SelectTrigger onKeyDown={(event) => event.stopPropagation()} aria-label="Group tasks" className="h-10 bg-background"><span className="text-muted-foreground">Group</span><SelectValue /></SelectTrigger>
           <SelectContent onKeyDown={(event) => event.stopPropagation()}>{GROUP_BY_OPTIONS.map((value) => <SelectItem key={value} value={value}>{value === "none" ? "None" : value === "status" ? "Status" : "Project"}</SelectItem>)}</SelectContent>
@@ -214,7 +213,6 @@ export function ListToolbar() {
           <SelectTrigger onKeyDown={(event) => event.stopPropagation()} aria-label="Sort tasks" className="h-10 bg-background"><span className="text-muted-foreground">Sort</span><SelectValue /></SelectTrigger>
           <SelectContent onKeyDown={(event) => event.stopPropagation()}>{SORT_OPTIONS.map((value) => <SelectItem key={value} value={value}>{({urgency:"Urgency",updated:"Recently updated",created:"Recently created",title:"Title"})[value]}</SelectItem>)}</SelectContent>
         </Select>
-      </>}
       <Button variant="outline" className="ml-auto h-10 gap-2" onClick={() => store.setViewsOpen(true)} title="Saved views (Shift+V)">
         <Bookmark className="size-4" /> {activeView || "Saved views"}
       </Button>

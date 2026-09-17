@@ -201,7 +201,7 @@ const HELP: [string, string][] = [
   ["/", "Filter board"],
   ["v", "Switch Board / List"],
   ["Shift+V", "Saved views"],
-  ["Shift+O", "Group and sort list"],
+  ["Shift+O", "Group and sort tasks"],
   ["p or f / ⌘P", "Search tasks"],
   ["o", "Open worktree in editor"],
   ["b / G", "Open branch / PR"],

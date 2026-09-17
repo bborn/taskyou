@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { MachineSettings } from "./MachineSettings";
+import { RoutinesView } from "./RoutinesView";
+import { cn } from "@/lib/utils";
 import { api } from "../api/client";
 import type { Project, TaskType } from "../api/types";
 import { inTauri, supervisorGetConfig, supervisorSetConfig, supervisorStatus } from "../tauri";
@@ -24,12 +27,56 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
   );
 }
 
+const SETTINGS_SECTIONS = [
+  ["appearance", "Appearance"], ["projects", "Projects"], ["types", "Task types"],
+  ["routines", "Routines"], ["machines", "Machines"], ["executors", "Executors"],
+] as const;
+type SettingsSection = typeof SETTINGS_SECTIONS[number][0];
+
 export function SettingsView() {
+  const { theme, executors } = useAppState();
+  const [section, setSection] = useState<SettingsSection>(() => {
+    try {
+      const saved = localStorage.getItem("ty:settings-section");
+      return SETTINGS_SECTIONS.find(([key]) => key === saved)?.[0] ?? "projects";
+    } catch { return "projects"; }
+  });
+  function selectSection(next: SettingsSection) {
+    setSection(next);
+    try { localStorage.setItem("ty:settings-section", next); } catch { /* optional persistence */ }
+  }
   return (
-    <div className="max-w-3xl flex-1 overflow-y-auto px-4 py-5 md:px-6">
-      <ConnectionSettings />
-      <ProjectSettings />
-      <TypeSettings />
+    <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+      <nav aria-label="Settings sections" className="grid shrink-0 grid-cols-3 gap-1 border-b p-3 md:flex md:w-48 md:flex-col md:border-r md:border-b-0">
+        {SETTINGS_SECTIONS.map(([key, label]) => <Button key={key} variant={section === key ? "secondary" : "ghost"}
+          className="h-11 shrink-0 justify-start" aria-current={section === key ? "page" : undefined} onClick={() => selectSection(key)}>{label}</Button>)}
+      </nav>
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 md:p-6">
+        <div className="mx-auto flex max-w-4xl flex-col">
+          {section === "appearance" && <section className="space-y-4">
+            <h2 className="text-lg font-semibold">Appearance</h2>
+            <p className="text-sm text-muted-foreground">Choose how TaskYou looks in this browser or app.</p>
+            <div role="group" aria-label="Color theme" className="flex flex-wrap gap-2">
+              {(["light", "dark", "system"] as const).map((value) => <Button key={value} variant="outline" aria-pressed={theme === value}
+                className={cn("h-11 capitalize", theme === value && "border-primary bg-accent")} onClick={() => store.setTheme(value)}>{value}</Button>)}
+            </div>
+            <ConnectionSettings />
+          </section>}
+          {section === "projects" && <ProjectSettings />}
+          {section === "types" && <TypeSettings />}
+          {section === "routines" && <RoutinesView />}
+          {section === "machines" && <MachineSettings />}
+          {section === "executors" && <section className="space-y-4">
+            <h2 className="text-lg font-semibold">Executors</h2>
+            <p className="text-sm text-muted-foreground">Availability on the TaskYou server. Choose an executor in the task form; remote availability may differ.</p>
+            <div className="divide-y rounded-lg border">{executors.map((executor) => <div key={executor.name} className="flex flex-wrap items-center justify-between gap-2 p-4">
+              <span className="font-medium">{executor.name}{executor.default && <span className="ml-2 text-xs text-muted-foreground">Default</span>}</span>
+              <span className="text-sm text-muted-foreground">{executor.available ? "Available" : "Not installed"}</span>
+            </div>)}</div>
+            {executors.length === 0 && <p className="text-sm text-muted-foreground">No executor information is available.</p>}
+          </section>}
+        </div>
+      </div>
     </div>
   );
 }
