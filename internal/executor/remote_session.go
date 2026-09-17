@@ -22,6 +22,11 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 	if !SupportsRemoteExecutor(executorName) {
 		return execResult{Message: "Unsupported remote executor: " + executorName}
 	}
+	paths, stageErr := StageAttachments(ctx, e.db, task.ID, r.WorkDir, &r, nil)
+	if stageErr != nil {
+		return execResult{Message: "Could not stage attachments: " + stageErr.Error()}
+	}
+	prompt += AttachmentPrompt(paths)
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	probe := r.Command(probeCtx, "", "sh", "-c", "command -v "+shellQuote(executorName)+" >/dev/null")
 	err := probe.Run()

@@ -1,3 +1,4 @@
+import { usePersistedToggle } from "../hooks/use-persisted-toggle";
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, GitPullRequest, MoreVertical, Pin, Code2 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -118,7 +119,7 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [showLogs, setShowLogs] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageError, setMessageError] = useState("");
-  const [showChat, setShowChat] = useState(true);
+  const [showChat, setShowChat] = usePersistedToggle("ty:conversation:expanded", true);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [history, setHistory] = useState<LogLine[] | null>(null);
@@ -449,6 +450,13 @@ export function DetailView({ taskId }: { taskId: number }) {
             }}
           />
           <ActionRow
+            label="Retry task…"
+            onClick={() => {
+              setActionsOpen(false);
+              store.setDialog({ kind: "retry", taskId: task.id });
+            }}
+          />
+          <ActionRow
             label="Attachments"
             onClick={() => {
               setActionsOpen(false);
@@ -606,7 +614,7 @@ export function DetailView({ taskId }: { taskId: number }) {
         {/* A phone gets a reply box where the desktop gets the live terminal:
             xterm needs a keyboard and ~80 columns. */}
         {isMobile ? (
-          <ReplyComposer task={task} />
+          <ReplyComposer key={task.id} task={task} onAttach={() => setAttachmentsOpen(true)} />
         ) : (
           <>
             <div

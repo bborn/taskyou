@@ -1,5 +1,6 @@
+import { usePersistedToggle } from "../hooks/use-persisted-toggle";
 import { memo, useState } from "react";
-import { Pin } from "lucide-react";
+import { Pin, ChevronDown, ChevronRight } from "lucide-react";
 import type { LogLine, Task, TaskStatus } from "../api/types";
 import { ageHint, referenceTime, shortDuration } from "../lib/board";
 import { buildSections, PINNED_GROUP, type ListSection, type ListOptions } from "../lib/list";
@@ -110,13 +111,13 @@ const TaskRow = memo(function TaskRow({
     <div
       data-task-row={task.id}
       className={cn(
-        "group cursor-pointer rounded-md px-2 py-0.5 transition-colors",
+        "group flex min-h-12 cursor-pointer flex-col justify-center rounded-md border-b border-border/50 px-3 py-3 transition-colors",
         selected ? "bg-accent text-accent-foreground" : "hover:bg-surface-2",
       )}
       onClick={() => store.selectTask(task.id)}
       onDoubleClick={() => store.openDetail(task.id)}
     >
-      <div className="flex items-baseline gap-2">
+      <div className="flex items-center gap-3">
         <span
           className={cn(
             "size-1.5 shrink-0 translate-y-[-1px] rounded-full",
@@ -135,7 +136,7 @@ const TaskRow = memo(function TaskRow({
             {task.project}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-[13px]" title={task.title}>
+        <span className="min-w-0 flex-1 truncate text-sm" title={task.title}>
           {task.title}
         </span>
         <span className="flex shrink-0 items-center gap-1.5">
@@ -180,8 +181,10 @@ function Section({
   variant,
   projectColorFor,
   latestFor,
+  groupBy,
 }: {
   section: ListSection;
+  groupBy: ListOptions["groupBy"];
   selectedTaskId: number | null;
   showProject: boolean;
   showHeader: boolean;
@@ -190,6 +193,7 @@ function Section({
   latestFor: (task: Task) => LogLine | undefined;
 }) {
   const [showAll, setShowAll] = useState(false);
+  const [collapsed, setCollapsed] = usePersistedToggle(`ty:list:${groupBy}:${section.key}:collapsed`, false);
   const selectedBeyondCap =
     section.tasks.findIndex((t) => t.id === selectedTaskId) >= SECTION_RENDER_CAP;
   const uncapped = showAll || selectedBeyondCap || section.key === PINNED_GROUP;
@@ -199,9 +203,11 @@ function Section({
   return (
     <div className={variant === "card" ? "flex flex-col gap-2" : undefined}>
       {showHeader && section.title && (
-        <SectionHeader title={section.title} status={section.status} count={section.tasks.length} />
+        <button className="w-full min-h-11 text-left" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)}>
+          <SectionHeader title={section.title} status={section.status} count={section.tasks.length} collapsed={collapsed} />
+        </button>
       )}
-      {visible.map((task) =>
+      {!collapsed && visible.map((task) =>
         variant === "card" ? (
           <CardSlot
             key={task.id}
@@ -223,7 +229,7 @@ function Section({
           />
         ),
       )}
-      {hidden > 0 && (
+      {!collapsed && hidden > 0 && (
         <button
           className={cn(
             "w-full rounded-md text-center text-muted-foreground",
@@ -244,23 +250,26 @@ function SectionHeader({
   title,
   status,
   count,
+  collapsed,
 }: {
   title: string;
   status: TaskStatus | "";
   count: number;
+  collapsed: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2 px-2 pb-1 pt-3 first:pt-1">
+    <div className="flex items-center gap-2 px-2 py-2">
+      {collapsed ? <ChevronRight className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
       <span
         className={cn(
-          "text-[11px] font-semibold uppercase tracking-wider",
+          "min-w-0 truncate text-[11px] font-semibold uppercase tracking-wider",
           status ? STATUS_TEXT[status] : "text-amber-500",
         )}
       >
         {title}
       </span>
       <span className="h-px flex-1 bg-border" />
-      <span className="font-mono text-[11px] text-muted-foreground">{count}</span>
+      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{count}</span>
     </div>
   );
 }
@@ -286,7 +295,7 @@ export function TaskList({
   const showProject = options.groupBy !== "project";
   // A lone section's header says nothing the filter above it has not already
   // said — "Blocked" under a control that reads "Needs you · 5".
-  const showHeaders = sections.length > 1;
+  const showHeaders = sections.length > 1 || options.groupBy !== "none";
 
   if (sections.length === 0) {
     return (
@@ -307,8 +316,9 @@ export function TaskList({
     >
       {sections.map((section) => (
         <Section
-          key={section.key || "all"}
+          key={`${options.groupBy}:${section.key || "all"}`}
           section={section}
+          groupBy={options.groupBy}
           selectedTaskId={selectedTaskId}
           showProject={showProject}
           showHeader={showHeaders}

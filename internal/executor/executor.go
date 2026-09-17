@@ -2310,15 +2310,15 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		}
 	}
 
-	// Prepare attachments (write to .claude/attachments for seamless access).
-	// Attachments are staged inside the workspace on THIS machine; a remotely
-	// placed task's workspace is on another one, so there is nowhere here to put
-	// them.
 	var attachmentPaths []string
 	if !placedRemote {
-		var cleanupAttachments func()
-		attachmentPaths, cleanupAttachments = e.prepareAttachments(task.ID, workDir)
-		defer cleanupAttachments()
+		var err error
+		attachmentPaths, err = StageAttachments(taskCtx, e.db, task.ID, workDir, nil, nil)
+		if err != nil {
+			e.logLine(task.ID, "error", "Could not stage attachments: "+err.Error())
+			_ = e.db.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorDaemon, "attachment staging failed", db.Observedf("stage attachments: %v", err))
+			return
+		}
 	}
 	if len(attachmentPaths) > 0 {
 		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
@@ -2531,39 +2531,6 @@ func (e *Executor) lookupKindInstructions(task *db.Task) string {
 		projectDir = p.Path
 	}
 	return pipeline.LookupKindInstructions(task.Type, pipeline.WorkflowDirs(projectDir)...)
-}
-
-// prepareAttachments writes task attachments to .claude/attachments/ in the worktree.
-// This allows Claude to read them without permission prompts since .claude/ is trusted.
-// Returns a list of file paths and a cleanup function.
-func (e *Executor) prepareAttachments(taskID int64, worktreePath string) ([]string, func()) {
-	attachments, err := e.db.ListAttachmentsWithData(taskID)
-	if err != nil || len(attachments) == 0 {
-		return nil, func() {}
-	}
-
-	// Create attachments directory inside .claude/ which Claude has permission to read
-	attachmentsDir := filepath.Join(worktreePath, ".claude", "attachments", fmt.Sprintf("task-%d", taskID))
-	if err := os.MkdirAll(attachmentsDir, 0755); err != nil {
-		e.logger.Error("Failed to create attachments dir", "error", err)
-		return nil, func() {}
-	}
-
-	var paths []string
-	for _, a := range attachments {
-		path := filepath.Join(attachmentsDir, a.Filename)
-		if err := os.WriteFile(path, a.Data, 0644); err != nil {
-			e.logger.Error("Failed to write attachment", "file", a.Filename, "error", err)
-			continue
-		}
-		paths = append(paths, path)
-	}
-
-	cleanup := func() {
-		os.RemoveAll(attachmentsDir)
-	}
-
-	return paths, cleanup
 }
 
 // getAttachmentsSection returns a prompt section describing attachments.

@@ -114,6 +114,13 @@ type addAttachmentRequest struct {
 }
 
 func (s *Server) handleAddAttachment(w http.ResponseWriter, r *http.Request) {
+	// A phone may need longer than the server's normal five-second read
+	// deadline to upload a photo. Bound the body before decoding its base64.
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(2 * time.Minute))
+	_ = controller.SetWriteDeadline(time.Now().Add(3 * time.Minute))
+	r.Body = http.MaxBytesReader(w, r.Body, int64(base64.StdEncoding.EncodedLen(maxAttachmentSize))+64*1024)
+
 	task, ok := s.requireTask(w, r)
 	if !ok {
 		return
@@ -121,6 +128,11 @@ func (s *Server) handleAddAttachment(w http.ResponseWriter, r *http.Request) {
 
 	var req addAttachmentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonErr(w, "attachment too large (max 32MB)", http.StatusRequestEntityTooLarge)
+			return
+		}
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}

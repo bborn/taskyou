@@ -62,12 +62,26 @@ try:
     assert actual == args.query, f'Typing lost characters: {actual!r}'
     print('PASS multi-word search preserves typing')
     browser('fill', search, '#' + str(args.task_id))
-    wait('document.querySelector("[role=dialog]").innerText.includes("All statuses")')
+    wait('Array.from(document.querySelectorAll("[role=dialog] button")).some(e=>e.textContent==="All statuses1")')
     counts = evaluate('Array.from(document.querySelectorAll("[role=dialog] button")).map(e=>e.textContent)')
     assert 'All statuses1' in counts, f'ID search count disagrees with result: {counts}'
     assert 'All projects1' in counts, f'ID project count disagrees with result: {counts}'
     print('PASS task-number filter counts')
+    browser('find', 'role', 'button', 'click', '--name', 'Apply', '--exact')
+    wait('!document.querySelector("[role=dialog]")')
+    browser('click', 'button:has(svg.lucide-list-filter)')
+    browser('fill', search, 'remember this pending search')
     browser('click', '[data-slot="dialog-close"]')
+    browser('click', 'button:has(svg.lucide-list-filter)')
+    assert evaluate(f'document.querySelector({json.dumps(search)}).value') == 'remember this pending search', 'Closing discarded pending filters'
+    browser('find', 'role', 'button', 'click', '--name', 'Reset', '--exact')
+    assert evaluate(f'document.querySelector({json.dumps(search)}).value') == '', 'Reset did not clear search'
+    assert evaluate('!document.querySelector("[aria-label^=Filters]")'), 'Reset left active filters'
+    browser('click', '[data-slot="dialog-close"]')
+    browser('click', 'button:has(svg.lucide-list-filter)')
+    assert evaluate(f'document.querySelector({json.dumps(search)}).value') == '', 'Reset required Apply to persist'
+    browser('click', '[data-slot="dialog-close"]')
+    print('PASS Apply, persistent draft, and immediate Reset')
     browser('find', 'role', 'button', 'click', '--name', 'New', '--exact')
     browser('wait', '[role="dialog"]')
     assert evaluate('!!document.querySelector("[role=dialog] input[type=file]")'), 'New task has no file picker'
@@ -170,16 +184,13 @@ try:
         wait('!document.querySelector("textarea").disabled')
         assert evaluate(f'document.querySelector({json.dumps(reply)}).value') == draft + '\n', 'Failed send discarded draft'
         evaluate('window.__tyFailReply = false')
-        browser('find', 'role', 'button', 'click', '--name', 'yes', '--exact')
-        wait('!document.querySelector("textarea").disabled')
-        assert evaluate(f'document.querySelector({json.dumps(reply)}).value') == draft + '\n', 'Quick answer discarded another draft'
         browser('find', 'role', 'button', 'click', '--name', 'Send reply')
         wait('!document.querySelector("textarea").disabled && document.querySelector("textarea").value === ""')
         evaluate('window.fetch = window.__tyOriginalFetch')
         browser('open', detail)
         browser('wait', reply)
         assert evaluate(f'document.querySelector({json.dumps(reply)}).value') == '', 'Sent draft returned'
-        print('PASS failed sends retain drafts; quick answers preserve drafts; successful sends clear drafts')
+        print('PASS failed sends retain drafts; successful sends clear drafts')
         browser('fill', reply, draft)
         browser('click', reply)
         evaluate(f'document.querySelector({json.dumps(reply)}).select()')

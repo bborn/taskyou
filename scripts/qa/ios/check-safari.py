@@ -161,7 +161,8 @@ def main():
             wd('POST', f'/element/{ident}/value', {'text': 'Mobile checkout'})
             wait_for(lambda: js('return document.querySelector(arguments[0]).value', search) == 'Mobile checkout', 'multiword input')
             evidence('03-filter-text')
-            click('[role="dialog"] [data-slot="dialog-close"]')
+            apply_button = js('return [...document.querySelectorAll("[role=dialog] button")].find(e=>e.textContent.trim()==="Apply")')
+            wd('POST', f'/element/{apply_button["element-6066-11e4-a52e-4f735466cecf"]}/click', {})
             wait_for(lambda: not keyboard_visible(), 'keyboard dismissal')
             wait_for(lambda: js('return !document.querySelector("[role=dialog]")'), 'filter dismissed')
             assert js('return document.body.innerText.includes("Mobile checkout")'), 'Filtered task missing'

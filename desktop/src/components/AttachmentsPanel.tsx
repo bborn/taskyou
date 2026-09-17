@@ -11,7 +11,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-async function fileToBase64(file: File): Promise<string> {
+export async function fileToBase64(file: File): Promise<string> {
   const buf = await file.arrayBuffer();
   const bytes = new Uint8Array(buf);
   let bin = "";
@@ -43,6 +43,7 @@ export function AttachmentsPanel({ taskId }: { taskId: number }) {
     setUploading(true);
     try {
       for (const file of Array.from(files)) {
+        if (file.size > 32 * 1024 * 1024) throw new Error(`${file.name} exceeds the 32 MB limit.`);
         const data = await fileToBase64(file);
         await api.addAttachment(taskId, file.name, data, file.type || undefined);
       }
@@ -54,6 +55,7 @@ export function AttachmentsPanel({ taskId }: { taskId: number }) {
         kind: "error",
       });
     } finally {
+      await reload();
       setUploading(false);
     }
   }

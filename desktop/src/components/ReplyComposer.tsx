@@ -1,13 +1,11 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { SendHorizonal } from "lucide-react";
+import { SendHorizonal, Paperclip } from "lucide-react";
 import { ApiError, api } from "../api/client";
-import type { Task } from "../api/types";
+import { fileToBase64 } from "./AttachmentsPanel";
+import type { Attachment, Task } from "../api/types";
 import { store } from "../store";
 import { useIsCoarsePointer } from "../hooks/use-mobile";
 import { Button } from "@/components/ui/button";
-
-/** One-tap answers for the two things an agent asks for most often. */
-const QUICK = ["yes", "continue"];
 
 /**
  * Shell ported from bb's promptbox (apps/app/src/components/promptbox/
@@ -20,12 +18,58 @@ const QUICK = ["yes", "continue"];
  * reserved for an overlaid send button, the 68px floor and 50dvh ceiling, and
  * the controls sitting inside the card along the bottom edge.
  */
-export function ReplyComposer({ task }: { task: Task }) {
+export function ReplyComposer({ task, onAttach }: { task: Task; onAttach: () => void }) {
+  const live = task.status === "processing" || task.status === "blocked";
   const draftKey = `ty-reply-draft-${task.id}`;
   const [message, setMessage] = useState(() => {
     try { return sessionStorage.getItem(draftKey) ?? ""; }
     catch { return ""; }
   });
+
+  const [sending, setSending] = useState(false);
+  const filesKey = `ty-reply-files-${task.id}`;
+  const [files, setFiles] = useState<Attachment[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(filesKey) ?? "[]");
+      return Array.isArray(saved) ? saved.filter((a): a is Attachment => a && typeof a.id === "number" && typeof a.filename === "string") : [];
+    } catch { return []; }
+  });
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  function saveFiles(next: Attachment[]) {
+    setFiles(next);
+    try { localStorage.setItem(filesKey, JSON.stringify(next)); } catch { /* optional persistence */ }
+  }
+  async function upload(selected: File[]) {
+    if (uploading || sending) return;
+    setUploading(true);
+    let next = [...files];
+    for (const file of selected) {
+      try {
+        if (file.size > 32 * 1024 * 1024) throw new Error("Maximum file size is 32 MB.");
+        const a = await api.addAttachment(task.id, file.name, await fileToBase64(file), file.type);
+        next = [...next, a];
+        saveFiles(next);
+      } catch (e) {
+        store.toast({ title: `Could not upload ${file.name}`, body: String(e), kind: "error" });
+      }
+    }
+    setUploading(false);
+  }
+  const attachments = <>
+    <input ref={fileRef} type="file" multiple className="hidden" aria-label="Choose attachments"
+      onChange={(e) => { const selected = Array.from(e.target.files ?? []); e.target.value = ""; void upload(selected); }} />
+    {files.length > 0 && <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto px-3 py-2" aria-label="Attached files">
+      {files.map((file) => <button key={file.id} type="button" className="min-h-11 max-w-full truncate rounded-md border px-2 text-sm" disabled={sending || uploading}
+        aria-label={live ? `Remove ${file.filename} from reply` : `Delete ${file.filename}`} onClick={async () => {
+          try {
+            if (!live) await api.deleteAttachment(file.id);
+            saveFiles(files.filter((a) => a.id !== file.id));
+          } catch (e) { store.toast({ title: "Could not remove file", body: String(e), kind: "error" }); }
+        }}>{file.filename} ×</button>)}
+    </div>}
+    {uploading && <p role="status" className="px-3 text-sm text-muted-foreground">Uploading files…</p>}
+  </>;
 
   // Write on each edit, rather than on unmount: mobile tabs can be discarded
   // without running cleanup. A successful send (or clearing the field) removes it.
@@ -38,7 +82,6 @@ export function ReplyComposer({ task }: { task: Task }) {
       // Storage may be unavailable; composing and sending must still work.
     }
   }
-  const [sending, setSending] = useState(false);
   // The message the API refused because the agent was mid-turn, held so the
   // user can send it anyway rather than retyping it.
   const [busyText, setBusyText] = useState<string | null>(null);
@@ -56,15 +99,13 @@ export function ReplyComposer({ task }: { task: Task }) {
     el.style.height = `${el.scrollHeight}px`;
   }, [message]);
 
-  const live = task.status === "processing" || task.status === "blocked";
-
   async function send(text: string, force = false) {
     const body = text.trim();
-    if (!body || sending) return;
+    if ((!body && files.length === 0) || sending || uploading) return;
     setSending(true);
     try {
-      await api.sendInput(task.id, body, force);
-      // A quick answer must not discard a different reply being composed.
+      await api.sendInput(task.id, body, force, files.map((a) => a.id));
+      saveFiles([]);
       if (text === message) updateMessage("");
       setBusyText(null);
       store.toast({ title: "Sent to the agent", kind: "success" });
@@ -97,13 +138,17 @@ export function ReplyComposer({ task }: { task: Task }) {
         style={liftForKeyboard}
         className="shrink-0 border-t bg-surface-1 px-3 pt-3 pb-[max(0.75rem,var(--ty-safe-area-bottom,env(safe-area-inset-bottom)))]"
       >
+        {attachments}
+        <div className="flex gap-2">
+        <Button variant="outline" disabled={uploading} className="h-11" onClick={() => fileRef.current?.click()}><Paperclip className="size-4" /> Attach files</Button>
         <Button
-          className="h-11 w-full text-sm"
-          disabled={task.status === "queued"}
+          className="h-11 flex-1 text-sm"
+          disabled={task.status === "queued" || uploading}
           onClick={() => void store.executeTask(task.id)}
         >
           {task.status === "queued" ? "Queued…" : "Execute"}
         </Button>
+        </div>
       </div>
     );
   }
@@ -148,6 +193,9 @@ export function ReplyComposer({ task }: { task: Task }) {
           enterKeyHint={touch ? "enter" : "send"}
           style={{ minHeight: "68px", maxHeight: "calc(50dvh - 3rem)" }}
           className="w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 pr-14 pb-1 text-sm leading-relaxed outline-none max-md:text-base"
+          onPaste={(e) => {
+            if (e.clipboardData.files.length) { e.preventDefault(); void upload(Array.from(e.clipboardData.files)); }
+          }}
           onChange={(e) => updateMessage(e.target.value)}
           onKeyDown={(e) => {
             // A touch keyboard has no usable Shift+Enter, so Enter-to-send
@@ -166,7 +214,7 @@ export function ReplyComposer({ task }: { task: Task }) {
           <Button
             size="icon"
             className="size-9 max-md:size-10"
-            disabled={sending || !message.trim()}
+            disabled={sending || uploading || (!message.trim() && files.length === 0)}
             onClick={() => void send(message)}
             aria-label="Send reply"
           >
@@ -174,28 +222,14 @@ export function ReplyComposer({ task }: { task: Task }) {
           </Button>
         </div>
 
+        {attachments}
         {/* Controls live inside the card along the bottom edge, where bb keeps
             its attach / model / mic cluster. */}
         <div className="flex items-center gap-1.5 px-2.5 pt-1 pb-2">
-          {QUICK.map((word) => (
-            <Button
-              key={word}
-              variant="ghost"
-              className="h-8 px-2 text-[13px] text-muted-foreground max-md:h-10 max-md:px-2.5"
-              disabled={sending}
-              onClick={() => void send(word)}
-            >
-              {word}
-            </Button>
-          ))}
-          <Button
-            variant="ghost"
-            className="ml-auto h-8 px-2 text-[13px] text-muted-foreground max-md:h-10 max-md:px-2.5"
-            disabled={sending}
-            onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}
-          >
-            Retry…
+          <Button variant="ghost" className="h-11 px-2.5 text-sm text-muted-foreground" disabled={sending || uploading} onClick={() => fileRef.current?.click()}>
+            <Paperclip className="size-4" /> Attach files
           </Button>
+          <Button variant="ghost" className="h-11 text-sm" onClick={onAttach}>All files</Button>
         </div>
       </div>
     </div>

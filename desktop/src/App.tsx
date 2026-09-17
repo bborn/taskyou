@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { motion } from "motion/react";
-import { Plus, Search, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
+import { Plus, Search, ListFilter, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
-import { buildColumns } from "./lib/board";
+import { buildKanbanColumns } from "./lib/kanban";
 import { buildSections, flattenSections } from "./lib/list";
 import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
@@ -43,6 +43,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 export default function App() {
   const state = useAppState();
   const isMobile = useIsMobile();
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // popstate handlers close over stale state, so the drawer's open-ness has to
   // be readable from inside one.
@@ -249,7 +250,7 @@ export default function App() {
     () => (state.filteredIds ? state.tasks.filter((t) => state.filteredIds!.has(t.id)) : state.tasks),
     [state.tasks, state.filteredIds],
   );
-  const columns = useMemo(() => buildColumns(filteredTasks), [filteredTasks]);
+  const columns = useMemo(() => buildKanbanColumns(filteredTasks, state.listOptions), [filteredTasks, state.listOptions]);
 
   // List mode walks one flat run in display order rather than a column grid.
   const listTasks = useMemo(
@@ -299,7 +300,7 @@ export default function App() {
   }
 
   function jumpToColumn(status: string) {
-    if (inList) {
+    if (inList || state.listOptions.groupBy !== "status") {
       // The status keys still mean something in a flat list: jump to the first
       // task with that status wherever the current arrangement put it.
       const wanted = status === "processing" ? ["processing", "queued"] : [status];
@@ -464,9 +465,6 @@ export default function App() {
           case "V":
             return void store.setViewsOpen(true);
           case "O":
-            // Arranging a board that isn't drawn as a list changes nothing the
-            // user can see, so switch to the list first (parity with the TUI).
-            if (s.boardMode !== "list") store.setBoardMode("list");
             return void store.setArrangeOpen(true);
         }
       } else if (s.view.kind === "detail") {
@@ -598,7 +596,12 @@ export default function App() {
         >
           <Plus className="size-4" /> New
         </Button>
-        {/* The phone board has its own search field. */}
+        {isMobile && state.view.kind === "board" && (
+          <Button variant="ghost" size="icon" className="relative size-11" aria-label="Filter tasks" aria-haspopup="dialog" onClick={() => setMobileFilterOpen(true)}>
+            <ListFilter className="size-4" />
+            {state.filter.trim() && <span aria-label="Filters active" className="absolute right-2 top-2 size-1.5 rounded-full bg-primary" />}
+          </Button>
+        )}
         {!isMobile && (
           <Button
             variant="ghost"
@@ -632,8 +635,9 @@ export default function App() {
           variant="ghost"
           size="icon"
           className={isMobile ? "size-9" : "size-7"}
-          title="Settings (⌘,)"
-          onClick={() => store.openSettings()}
+          title={state.view.kind === "settings" ? "Close settings (⌘,)" : "Settings (⌘,)"}
+          aria-pressed={state.view.kind === "settings"}
+          onClick={() => state.view.kind === "settings" ? store.openBoard() : store.openSettings()}
         >
           <Settings2 className="size-4" />
         </Button>
@@ -650,15 +654,15 @@ export default function App() {
       >
           {state.view.kind === "board" &&
             (isMobile ? (
-              <MobileBoard tasks={filteredTasks} />
+              <MobileBoard tasks={filteredTasks} filterOpen={mobileFilterOpen} onFilterClose={() => setMobileFilterOpen(false)} />
             ) : (
               <div className="flex min-h-0 flex-1 flex-col gap-2">
                 {(state.filterOpen || state.filter !== "" || state.activeView !== "") && (
                   <FilterBar />
                 )}
+                <ListToolbar />
                 {inList ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-1 px-4 pb-4">
-                    <ListToolbar />
                     <TaskList tasks={filteredTasks} options={state.listOptions} />
                   </div>
                 ) : (

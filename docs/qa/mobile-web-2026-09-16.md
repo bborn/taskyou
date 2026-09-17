@@ -53,3 +53,60 @@ Tested the production preview on an iPhone 11 through macOS iPhone Mirroring, us
 - Add files opens the native Photo Library / Take Photo or Video / Choose Files menu. No personal file was selected or uploaded.
 
 **Limitation:** iPhone Mirroring suppressed the full software keyboard even with text inputs focused; only the input accessory controls appeared. This verifies a subset of native Safari behavior, not software-keyboard overlap, viewport panning, or installed-PWA behavior. Those remain unverified and need direct phone interaction with screen capture or a simulator. No agent execution was triggered.
+
+## Mobile controls follow-up
+
+- Filter now opens from a header icon. Apply commits pending selections; Reset clears active filters and list arrangement immediately.
+- Filter drafts, section disclosures, task-group disclosures, and the conversation disclosure are remembered in this browser. Applied filters and arrangement continue using the server settings.
+- Views includes All tasks, and selecting the current saved view again clears the pending view selection.
+- The reply composer exposes Attach files; the redundant yes/continue shortcuts are removed and Retry is available in task actions.
+- Browser verification: draft and disclosure state survive reload; Reset stays cleared without Apply; a synthetic text file uploads successfully through the file picker; the footer stays visible without horizontal overflow at 320×568. Production build passes. This follow-up was not tested with the iOS software keyboard.
+
+### Local attachment delivery follow-up
+
+- Durable bytes now live beside the database; execution copies are staged in
+  each task's local or remote worktree. Existing blobs migrate on database open.
+- Mobile composer directly opens the native picker, displays selected files,
+  supports attachment-only replies, and retains pending files on reload/failure.
+- Browser check at 393×852: uploaded a synthetic text file directly, reloaded,
+  verified the chip persisted, then verified failure to reach the fixture's
+  absent executor retained the chip. No horizontal overflow; send and attach
+  controls remained visible. QA database migration preserved existing files.
+- Go tests cover legacy blob migration/deduplication/integrity, local and remote
+  staging through a fake SSH transport, filename collision isolation, ownership,
+  failed transfers, and attachment-only HTTP input delivery to a tagged pane.
+- Changed backend packages pass. Full-suite run encountered
+  `TestRemoteAttachDropsALeftOverViewPairing` (remote tmux pane window lookup);
+  it also fails individually, while an earlier full run passed that package.
+  Installed golangci-lint was built with Go 1.25 and cannot lint this Go 1.26 repo.
+- No real remote executor session or new iOS keyboard run was performed. No
+  macOS Actions job was started. The main user database was inspected read-only.
+
+### September 17 desktop list polish
+
+The shared toolbar now exposes Board/List in both layouts, proper Group/Sort
+select controls, and Saved views. Desktop list rows have a 48px minimum height
+and separators. Keyboard help includes v, Shift+V, and Shift+O; key badges align
+to the top rather than stretching with wrapped descriptions.
+
+Production build passed. At 813×858, browser checks covered both layout
+switch directions, the sort menu, and the help dialog. Screenshots confirmed
+roomier rows and all shortcut badges at a consistent 20.5px height.
+
+### Shared kanban grouping and Settings navigation
+
+Kanban now uses the same grouping and sorting preferences as List. Project
+columns retain pinned tasks in their projects and cannot trigger status moves;
+status columns preserve their existing drag behavior. Shift+O arranges either
+layout. The dependency-free grouping check (using the existing TypeScript
+compiler) runs with `node scripts/qa/check-kanban.mjs` and covers project/status
+name collisions, queued tasks, pinned tasks, unassigned tasks, and empty groups.
+
+Settings now has persistent sections for Appearance, Projects, Task types,
+Routines, Machines, and Executors. Routines reuses the existing run/log surface.
+Machines uses the existing placement discovery API for the selected project and
+executor; it does not introduce a host editor. Executors reports availability
+on the server. Browser checks verified project kanban columns at 1440×900,
+routine listings, machine empty state, executor availability, and section
+persistence after closing/reopening Settings. Frontend build and grouping checks
+passed. No routines were started and no machine configuration was changed.

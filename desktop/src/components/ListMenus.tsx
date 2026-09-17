@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Trash2 } from "lucide-react";
+import { Check, Trash2, Columns3, List, Bookmark } from "lucide-react";
 import {
   GROUP_BY_OPTIONS,
   SORT_OPTIONS,
@@ -9,6 +9,7 @@ import {
 import { store, useAppState } from "../store";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -72,8 +73,8 @@ export function ArrangeMenu() {
     <Dialog open={arrangeOpen} onOpenChange={(open) => store.setArrangeOpen(open)}>
       <DialogContent className="sm:max-w-md" onEscapeKeyDown={(e) => e.preventDefault()}>
         <DialogHeader>
-          <DialogTitle>Arrange list</DialogTitle>
-          <DialogDescription>How the list groups and orders tasks.</DialogDescription>
+          <DialogTitle>Arrange tasks</DialogTitle>
+          <DialogDescription>Group and sort tasks in either Board or List.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3 py-1">
           <OptionRow
@@ -188,43 +189,33 @@ export function ViewsMenu() {
   );
 }
 
-/** The arrangement, always visible above the list — a setting you cannot see is
- * one you forget you changed. Mirrors the TUI's options bar. */
+/** Shared controls keep both board layouts discoverable. */
 export function ListToolbar() {
-  const { listOptions, activeView } = useAppState();
+  const { boardMode, listOptions, activeView } = useAppState();
+  const inList = boardMode === "list";
   return (
-    <div className="flex items-center gap-2 px-2 text-[11px] text-muted-foreground">
-      {activeView && (
-        <span className="rounded bg-primary px-1.5 py-0.5 font-medium text-primary-foreground">
-          {activeView}
-        </span>
-      )}
-      <button
-        type="button"
-        className="transition-colors hover:text-foreground"
-        onClick={() => store.setArrangeOpen(true)}
-        title="Arrange list (O)"
-      >
-        group: <span className="text-foreground">{listOptions.groupBy}</span>
-        {"   "}sort: <span className="text-foreground">{listOptions.sort}</span>
-      </button>
-      <span className="flex-1" />
-      <button
-        type="button"
-        className="transition-colors hover:text-foreground"
-        onClick={() => store.setViewsOpen(true)}
-        title="Saved views (V)"
-      >
-        views
-      </button>
-      <button
-        type="button"
-        className="transition-colors hover:text-foreground"
-        onClick={() => store.setBoardMode("board")}
-        title="Back to the board (v)"
-      >
-        board
-      </button>
+    <div className="flex shrink-0 flex-wrap items-center gap-3 px-4 pt-3 pb-1">
+      <div role="group" aria-label="Task layout" className="flex items-center gap-1 rounded-lg border bg-muted/40 p-1">
+        <Button variant={inList ? "ghost" : "secondary"} className={cn("h-9 gap-2 px-3", !inList && "bg-background shadow-sm")}
+          aria-pressed={!inList} onClick={() => store.setBoardMode("board")}>
+          <Columns3 className="size-4" /> Board
+        </Button>
+        <Button variant={inList ? "secondary" : "ghost"} className={cn("h-9 gap-2 px-3", inList && "bg-background shadow-sm")}
+          aria-pressed={inList} onClick={() => store.setBoardMode("list")}>
+          <List className="size-4" /> List
+        </Button>
+      </div>
+        <Select value={listOptions.groupBy} onValueChange={(value) => store.setListOptions({ ...listOptions, groupBy: value as ListGroupBy })}>
+          <SelectTrigger onKeyDown={(event) => event.stopPropagation()} aria-label="Group tasks" className="h-10 bg-background"><span className="text-muted-foreground">Group</span><SelectValue /></SelectTrigger>
+          <SelectContent onKeyDown={(event) => event.stopPropagation()}>{GROUP_BY_OPTIONS.map((value) => <SelectItem key={value} value={value}>{value === "none" ? "None" : value === "status" ? "Status" : "Project"}</SelectItem>)}</SelectContent>
+        </Select>
+        <Select value={listOptions.sort} onValueChange={(value) => store.setListOptions({ ...listOptions, sort: value as ListSort })}>
+          <SelectTrigger onKeyDown={(event) => event.stopPropagation()} aria-label="Sort tasks" className="h-10 bg-background"><span className="text-muted-foreground">Sort</span><SelectValue /></SelectTrigger>
+          <SelectContent onKeyDown={(event) => event.stopPropagation()}>{SORT_OPTIONS.map((value) => <SelectItem key={value} value={value}>{({urgency:"Urgency",updated:"Recently updated",created:"Recently created",title:"Title"})[value]}</SelectItem>)}</SelectContent>
+        </Select>
+      <Button variant="outline" className="ml-auto h-10 gap-2" onClick={() => store.setViewsOpen(true)} title="Saved views (Shift+V)">
+        <Bookmark className="size-4" /> {activeView || "Saved views"}
+      </Button>
     </div>
   );
 }

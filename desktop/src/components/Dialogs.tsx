@@ -199,6 +199,9 @@ const HELP: [string, string][] = [
   ["t", "Pin task"],
   ["S", "Change status"],
   ["/", "Filter board"],
+  ["v", "Switch Board / List"],
+  ["Shift+V", "Saved views"],
+  ["Shift+O", "Group and sort tasks"],
   ["p or f / ⌘P", "Search tasks"],
   ["o", "Open worktree in editor"],
   ["b / G", "Open branch / PR"],
@@ -219,7 +222,7 @@ function HelpDialog() {
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
         </DialogHeader>
-        <div className="grid grid-cols-[auto_1fr_auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+        <div className="grid grid-cols-[auto_1fr] items-start gap-x-4 gap-y-2 text-[12.5px] sm:grid-cols-[auto_1fr_auto_1fr]">
           {HELP.map(([key, desc]) => (
             <KeyRow key={key} k={key} desc={desc} />
           ))}
@@ -232,7 +235,7 @@ function HelpDialog() {
 function KeyRow({ k, desc }: { k: string; desc: string }) {
   return (
     <>
-      <span className="kbd justify-self-start">{k}</span>
+      <span className="kbd self-start justify-self-start whitespace-nowrap">{k}</span>
       <span className="text-muted-foreground">{desc}</span>
     </>
   );

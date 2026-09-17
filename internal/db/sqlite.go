@@ -212,7 +212,7 @@ const modelClaudeSlugMigrationKey = "migration:clear_model_claude_slug_v1"
 // handshake.Protocol must be bumped whenever a schema change means a daemon and
 // a client of different builds would disagree about a row — see
 // internal/handshake.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // SchemaVersionKey is where SchemaVersion is stamped in the settings table.
 const SchemaVersionKey = "schema_version"
@@ -428,6 +428,7 @@ func (db *DB) migrate() error {
 
 	// Run ALTER TABLE migrations separately (they may fail if column already exists)
 	alterMigrations := []string{
+		`ALTER TABLE task_attachments ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN instructions TEXT DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN actions TEXT DEFAULT '[]'`,
 		`ALTER TABLE tasks ADD COLUMN worktree_path TEXT DEFAULT ''`,
@@ -652,6 +653,10 @@ func (db *DB) migrate() error {
 	// one. Insert-only, so it cannot lose or reorder existing history.
 	if err := db.backfillStatusEvents(); err != nil {
 		return fmt.Errorf("backfill status events: %w", err)
+	}
+
+	if err := db.MigrateAttachmentFiles(); err != nil {
+		return fmt.Errorf("migrate attachment files: %w", err)
 	}
 
 	// Stamp the schema this build just brought the file up to. Written last, so

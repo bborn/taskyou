@@ -201,15 +201,7 @@ func TestRunningTasks(t *testing.T) {
 }
 
 func TestAttachmentsInPrompt(t *testing.T) {
-	// Create temp database
-	tmpFile, err := os.CreateTemp("", "test-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
-
-	database, err := db.Open(tmpFile.Name())
+	database, err := db.Open(filepath.Join(t.TempDir(), "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,8 +240,10 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		// Create a temporary worktree directory
 		worktreePath := t.TempDir()
 
-		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
-		defer cleanup()
+		paths, err := StageAttachments(context.Background(), database, task.ID, worktreePath, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if len(paths) != 2 {
 			t.Errorf("expected 2 attachment paths, got %d", len(paths))
@@ -295,8 +289,10 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		worktreePath := t.TempDir()
 		// Set task's WorktreePath so buildPrompt can convert to relative paths
 		task.WorktreePath = worktreePath
-		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
-		defer cleanup()
+		paths, err := StageAttachments(context.Background(), database, task.ID, worktreePath, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		prompt := exec.buildPrompt(task, paths)
 
@@ -314,8 +310,10 @@ func TestAttachmentsInPrompt(t *testing.T) {
 
 	t.Run("retry feedback includes attachments when present", func(t *testing.T) {
 		worktreePath := t.TempDir()
-		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
-		defer cleanup()
+		paths, err := StageAttachments(context.Background(), database, task.ID, worktreePath, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Simulate what happens during retry: attachment section is appended to feedback
 		retryFeedback := "Please fix the bug"
