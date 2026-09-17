@@ -81,3 +81,14 @@ Tested the production preview on an iPhone 11 through macOS iPhone Mirroring, us
   Installed golangci-lint was built with Go 1.25 and cannot lint this Go 1.26 repo.
 - No real remote executor session or new iOS keyboard run was performed. No
   macOS Actions job was started. The main user database was inspected read-only.
+
+### September 17 desktop list polish
+
+The shared toolbar now exposes Board/List in both layouts, proper Group/Sort
+select controls, and Saved views. Desktop list rows have a 48px minimum height
+and separators. Keyboard help includes v, Shift+V, and Shift+O; key badges align
+to the top rather than stretching with wrapped descriptions.
+
+Production build passed. At 813×858, browser checks covered both layout
+switch directions, the sort menu, and the help dialog. Screenshots confirmed
+roomier rows and all shortcut badges at a consistent 20.5px height.

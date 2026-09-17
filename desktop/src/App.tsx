@@ -663,9 +663,9 @@ export default function App() {
                 {(state.filterOpen || state.filter !== "" || state.activeView !== "") && (
                   <FilterBar />
                 )}
+                <ListToolbar />
                 {inList ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-1 px-4 pb-4">
-                    <ListToolbar />
                     <TaskList tasks={filteredTasks} options={state.listOptions} />
                   </div>
                 ) : (

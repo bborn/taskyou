@@ -111,13 +111,13 @@ const TaskRow = memo(function TaskRow({
     <div
       data-task-row={task.id}
       className={cn(
-        "group cursor-pointer rounded-md px-2 py-0.5 transition-colors",
+        "group flex min-h-12 cursor-pointer flex-col justify-center rounded-md border-b border-border/50 px-3 py-3 transition-colors",
         selected ? "bg-accent text-accent-foreground" : "hover:bg-surface-2",
       )}
       onClick={() => store.selectTask(task.id)}
       onDoubleClick={() => store.openDetail(task.id)}
     >
-      <div className="flex items-baseline gap-2">
+      <div className="flex items-center gap-3">
         <span
           className={cn(
             "size-1.5 shrink-0 translate-y-[-1px] rounded-full",
@@ -136,7 +136,7 @@ const TaskRow = memo(function TaskRow({
             {task.project}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-[13px]" title={task.title}>
+        <span className="min-w-0 flex-1 truncate text-sm" title={task.title}>
           {task.title}
         </span>
         <span className="flex shrink-0 items-center gap-1.5">
