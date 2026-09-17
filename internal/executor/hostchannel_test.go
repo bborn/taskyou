@@ -6,9 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
@@ -215,5 +218,63 @@ func TestFailedCapturePreservesWindowExistence(t *testing.T) {
 	c.consume(strings.NewReader("S\n!\nH\n"), map[string]string{})
 	if _, _, known = c.Window("daemon:task-42"); known {
 		t.Fatal("failed enumeration published absence")
+	}
+}
+
+// Stopping a channel on purpose — daemon shutdown — must not leave the host
+// recorded as "reconnecting": nothing is, and the row outlives the process.
+func TestStoppedHostChannelDoesNotRecordReconnecting(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &hostChannel{database: d, host: "far-host", stop: cancel, done: make(chan struct{})}
+
+	dialled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	go c.run(ctx, func(ctx context.Context) (*exec.Cmd, io.Reader, error) {
+		select {
+		case dialled <- struct{}{}:
+		default:
+		}
+		// A healthy agent: one complete tick, then a stream that stays open
+		// until the channel is stopped.
+		r, w := io.Pipe()
+		go func() {
+			_, _ = io.WriteString(w, "S\n.\n")
+			select {
+			case <-ctx.Done():
+			case <-release:
+			}
+			_ = w.Close()
+		}()
+		return exec.Command("true"), r, nil
+	})
+
+	select {
+	case <-dialled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("never dialled")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if h, _ := d.RemoteHostHealth("far-host"); h.State == "online" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never recorded the tick")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	c.Close()
+	close(release)
+	h, err := d.RemoteHostHealth("far-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Problem != "" {
+		t.Fatalf("stopped channel recorded problem %q", h.Problem)
 	}
 }

@@ -308,7 +308,13 @@ func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec
 			delay = hostChannelRetryDelay
 		}
 		if c.database != nil {
-			_ = c.database.RecordHostHealth(c.host, "Connection interrupted; reconnecting", false)
+			if ctx.Err() != nil {
+				// Stopped on purpose. Nothing will redial, and the row outlives
+				// this process, so it must not claim a reconnect is under way.
+				_ = c.database.RecordHostHealth(c.host, "", false)
+			} else {
+				_ = c.database.RecordHostHealth(c.host, "Connection interrupted; reconnecting", false)
+			}
 		}
 		// The agent exited: the host rebooted, the link dropped, tmux went away.
 		// Snapshots go stale on their own (hostSnapshotTTL), so callers fall back

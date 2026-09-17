@@ -106,10 +106,16 @@ func (db *DB) RemoteHostHealth(host string) (HostHealth, error) {
 	if err != nil {
 		return h, err
 	}
+	// Only a recorded problem means a channel is trying to reconnect. A quiet
+	// host with no problem simply has no channel open: no task there needs one,
+	// or the coordinator that had one has shut down.
 	seen, _ := time.Parse(time.RFC3339Nano, h.LastSeen)
-	if h.Problem != "" || time.Since(seen) > 30*time.Second {
+	switch {
+	case h.Problem != "":
 		h.State = "reconnecting"
-	} else {
+	case time.Since(seen) > 30*time.Second:
+		h.State = "idle"
+	default:
 		h.State = "online"
 	}
 	return h, nil
