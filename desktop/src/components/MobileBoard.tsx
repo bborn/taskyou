@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, X } from "lucide-react";
 import type { Task } from "../api/types";
 import { api } from "../api/client";
 import { parseFilter } from "../lib/board";
@@ -89,6 +89,7 @@ function readDraft(baseFilter: string) {
 
 // Keep unfinished selections across closing/reloading; Apply still owns the list.
 function MobileFilters({ onClose }: { onClose: () => void }) {
+  const searchRef = useRef<HTMLInputElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const projects = useAppSelector((s) => s.projects);
   const tasks = useAppSelector((s) => s.tasks);
@@ -194,12 +195,28 @@ function MobileFilters({ onClose }: { onClose: () => void }) {
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain overflow-x-hidden space-y-3 pb-4">
           {/* 16px text: iOS Safari zooms the page when focusing anything smaller. */}
-          <Input
-            value={searchInput}
-            className="h-11 text-base md:text-base"
-            placeholder="Search title, body, or #123"
-            onChange={(e) => setText(e.target.value)}
-          />
+          <div className="relative">
+            <Input
+              ref={searchRef}
+              value={searchInput}
+              className="h-11 pr-12 text-base md:text-base"
+              placeholder="Search title, body, or #123"
+              onChange={(e) => setText(e.target.value)}
+            />
+            {searchInput.length > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="absolute top-0 right-0 size-11 text-muted-foreground"
+                aria-label="Clear search"
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => { setText(""); searchRef.current?.focus(); }}
+              >
+                <X className="size-4" aria-hidden="true" />
+              </Button>
+            )}
+          </div>
 
           {savedViews.length > 0 && (
             <Section title="Views">
