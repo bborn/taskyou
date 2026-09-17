@@ -130,9 +130,9 @@ build-linux:
 
 # Install to GOBIN (usually ~/go/bin) - installs as 'ty', 'taskyou' (symlink), and 'taskd'
 install:
-	go build -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/ty ./cmd/task
+	go build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/ty ./cmd/task
 	ln -sf ty $(shell go env GOBIN)/taskyou
-	go build -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/taskd ./cmd/taskd
+	go build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/taskd ./cmd/taskd
 
 # Clean build artifacts
 clean:
