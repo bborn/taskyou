@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { Check, ListFilter, X } from "lucide-react";
+import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
+import { Check, ChevronDown } from "lucide-react";
 import type { Task } from "../api/types";
 import { api } from "../api/client";
 import { parseFilter } from "../lib/board";
-import { GROUP_BY_OPTIONS, SORT_OPTIONS, type ListGroupBy, type ListSort } from "../lib/list";
+import { normalizeListOptions, DEFAULT_LIST_OPTIONS, GROUP_BY_OPTIONS, SORT_OPTIONS, type ListGroupBy, type ListSort } from "../lib/list";
 import { store, useAppSelector } from "../store";
+import { usePersistedToggle } from "../hooks/use-persisted-toggle";
 import { TaskList } from "./TaskList";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -45,20 +47,6 @@ function pillFor(status: string): FilterKey | null {
 
 type FilterKey = (typeof FILTERS)[number]["key"];
 
-const ACCENT: Record<FilterKey, string> = {
-  blocked: "text-status-blocked",
-  processing: "text-status-processing",
-  backlog: "text-status-backlog",
-  done: "text-foreground",
-};
-
-const EMPTY: Record<FilterKey, string> = {
-  blocked: "Nothing waiting on you.",
-  processing: "Nothing running right now.",
-  backlog: "Backlog is empty.",
-  done: "Nothing finished yet.",
-};
-
 const STATUS_TOKEN = /\bis:[a-z-]+/gi;
 const PROJECT_TOKEN = /\[[^\]]*\]?/g;
 
@@ -74,37 +62,58 @@ function textOf(filter: string): string {
   return filter.replace(STATUS_TOKEN, "").replace(PROJECT_TOKEN, "").replace(/\s+/g, " ").trim();
 }
 
-/**
- * Phone board: one scrolling list, and ONE filter control.
- *
- * Project chips, a status pill and a search button could not share 390px —
- * every arrangement sliced a chip. They are all the same filter string
- * underneath (`is:running [offerlab] text`), so they are now one field that
- * opens a sheet. Saved views and the list arrangement join that same sheet
- * rather than growing a second control, for the same reason.
- *
- * The list itself is TaskList — the same component and the same sections the
- * desktop list uses, rendered as cards because a dense five-column row is not a
- * touch target. This board used to hand-roll its own pinned-first, newest-first
- * ordering, which is how it and the desktop list came to disagree about what
- * order tasks go in.
- */
-export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
+export function MobileBoard({ tasks, filterOpen, onFilterClose }: {
+  tasks: Task[];
+  filterOpen: boolean;
+  onFilterClose: () => void;
+}) {
+  const options = useAppSelector((s) => s.listOptions);
+  return <div className="flex min-h-0 flex-1 flex-col">
+    <TaskList tasks={tasks} options={options} variant="card" />
+    {filterOpen && <MobileFilters onClose={onFilterClose} />}
+  </div>;
+}
+
+const DRAFT_KEY = "ty:mobile-filter-draft";
+function readDraft(baseFilter: string) {
+  try {
+    const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+    if (draft?.baseFilter === baseFilter && typeof draft.filter === "string" &&
+        typeof draft.search === "string" && typeof draft.view === "string" && draft.options) {
+      return { filter: draft.filter as string, search: draft.search as string,
+        view: draft.view as string, options: normalizeListOptions(draft.options) };
+    }
+  } catch { /* Invalid or unavailable storage falls back to the applied settings. */ }
+  return null;
+}
+
+// Keep unfinished selections across closing/reloading; Apply still owns the list.
+function MobileFilters({ onClose }: { onClose: () => void }) {
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const projects = useAppSelector((s) => s.projects);
   const tasks = useAppSelector((s) => s.tasks);
-  const filter = useAppSelector((s) => s.filter);
-  const listOptions = useAppSelector((s) => s.listOptions);
+  const appliedFilter = useAppSelector((s) => s.filter);
+  const [draft] = useState(() => readDraft(appliedFilter));
+  const [filter, setFilter] = useState(draft?.filter ?? appliedFilter);
+  const appliedOptions = useAppSelector((s) => s.listOptions);
+  const [listOptions, setListOptions] = useState(draft?.options ?? appliedOptions);
   const savedViews = useAppSelector((s) => s.savedViews);
-  const activeView = useAppSelector((s) => s.activeView);
-  const [sheetOpen, setSheetOpen] = useState(false);
+  const appliedView = useAppSelector((s) => s.activeView);
+  const [activeView, setActiveView] = useState(draft?.view ?? appliedView);
   // Keep keystrokes verbatim: the serialized filter trims whitespace, which
   // otherwise eats the space before the user can type the next word.
-  const [searchInput, setSearchInput] = useState("");
+  const [searchInput, setSearchInput] = useState(() => draft?.search ?? textOf(appliedFilter));
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({baseFilter: appliedFilter,
+        filter, search: searchInput, view: activeView, options: listOptions}));
+    } catch { /* Keep the controls usable when storage is disabled. */ }
+  }, [appliedFilter, filter, searchInput, activeView, listOptions]);
 
   const parsed = parseFilter(filter);
   const activeStatus: FilterKey | null = (parsed.status as FilterKey | undefined) ?? null;
   const activeProject = parsed.project ?? null;
-  const searchText = textOf(filter);
 
   // Counts ignore the dimension they describe: the status counts drop the status
   // token from the query, the project counts drop the project token. They are
@@ -113,8 +122,8 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
   // underneath it.
   const statusQuery = useMemo(() => withToken(filter, STATUS_TOKEN, null), [filter]);
   const projectQuery = useMemo(() => withToken(filter, PROJECT_TOKEN, null), [filter]);
-  const statusTasks = useFilteredTasks(statusQuery, sheetOpen, tasks);
-  const projectTasks = useFilteredTasks(projectQuery, sheetOpen, tasks);
+  const statusTasks = useFilteredTasks(statusQuery, true, tasks);
+  const projectTasks = useFilteredTasks(projectQuery, true, tasks);
 
   const { statusCounts, projectChips, grandTotal, projectTotal } = useMemo(() => {
     const byStatus = new Map<string, number>();
@@ -144,93 +153,46 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
   // to be that status's total — or everything when no status is chosen.
   const totalForProjects = projectTotal;
 
-  // Picking a status or a project is a decision; close the sheet so you land
-  // back on the list. Typing is not, so the text field leaves it open.
+  // Selection edits the draft; only Apply changes the board.
   function setStatus(key: FilterKey | null) {
     const token = key ? `is:${FILTERS.find((f) => f.key === key)!.token}` : null;
-    store.setFilter(withToken(filter, STATUS_TOKEN, token));
-    setSheetOpen(false);
+    setFilter(withToken(filter, STATUS_TOKEN, token));
+    setActiveView("");
   }
   function setProject(name: string | null) {
-    store.setFilter(withToken(filter, PROJECT_TOKEN, name ? `[${name}]` : null));
-    setSheetOpen(false);
+    setFilter(withToken(filter, PROJECT_TOKEN, name ? `[${name}]` : null));
+    setActiveView("");
   }
   function setText(next: string) {
     setSearchInput(next);
     const status = filter.match(STATUS_TOKEN)?.[0];
     const project = filter.match(PROJECT_TOKEN)?.[0];
-    store.setFilter([status, project, next.trim()].filter(Boolean).join(" "));
+    setFilter([status, project, next.trim()].filter(Boolean).join(" "));
+    setActiveView("");
   }
-  function clearAll() {
+  function reset() {
     store.clearFilter();
+    store.setListOptions(DEFAULT_LIST_OPTIONS);
+    setFilter("");
+    setSearchInput("");
+    setActiveView("");
+    setListOptions(DEFAULT_LIST_OPTIONS);
   }
-
-  const statusLabel = activeView
-    ? activeView
-    : activeStatus
-      ? FILTERS.find((f) => f.key === activeStatus)!.label
-      : "All tasks";
-  const filtered =
-    activeStatus !== null || activeProject !== null || searchText !== "" || activeView !== "";
-
-  const emptyMessage = filtered
-    ? activeStatus && !activeProject && !searchText
-      ? EMPTY[activeStatus]
-      : "No tasks match that filter."
-    : "No tasks yet.";
+  function apply() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* Storage may be disabled. */ }
+    if (activeView) void store.applyView(activeView);
+    else store.setFilter(filter);
+    store.setListOptions(listOptions);
+    onClose();
+  }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {/* One control: status, project and text in a single field. */}
-      <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-        <button
-          onClick={() => {
-            setSearchInput(textOf(filter));
-            setSheetOpen(true);
-          }}
-          className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border bg-surface-1 px-3 text-left text-[13px]"
-        >
-          <ListFilter className="size-4 shrink-0 text-muted-foreground" />
-          <span
-            className={cn(
-              "shrink-0 font-medium",
-              activeStatus ? ACCENT[activeStatus] : "text-foreground",
-            )}
-          >
-            {statusLabel}
-          </span>
-          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-            {filteredTasks.length}
-          </span>
-          {activeProject && (
-            <span className="min-w-0 truncate text-muted-foreground">· {activeProject}</span>
-          )}
-          {searchText && <span className="min-w-0 truncate text-muted-foreground">· {searchText}</span>}
-        </button>
-        {filtered && (
-          <button
-            onClick={clearAll}
-            aria-label="Clear filter"
-            className="flex size-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground active:bg-surface-2"
-          >
-            <X className="size-4" />
-          </button>
-        )}
-      </div>
-
-      <TaskList
-        tasks={filteredTasks}
-        options={listOptions}
-        variant="card"
-        emptyMessage={emptyMessage}
-      />
-
-      <Dialog open={sheetOpen} onOpenChange={setSheetOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Filter</DialogTitle>
+      <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+        <DialogContent className="max-w-md flex flex-col gap-0 overflow-hidden" onOpenAutoFocus={(event) => { event.preventDefault(); titleRef.current?.focus(); }}>
+          <DialogHeader className="shrink-0 pb-4">
+            <DialogTitle ref={titleRef} tabIndex={-1} className="outline-none">Filter</DialogTitle>
           </DialogHeader>
-
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain overflow-x-hidden space-y-3 pb-4">
           {/* 16px text: iOS Safari zooms the page when focusing anything smaller. */}
           <Input
             value={searchInput}
@@ -240,23 +202,27 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
           />
 
           {savedViews.length > 0 && (
-            <>
-              <Section title="Views" />
+            <Section title="Views">
+              <Row label="All tasks" selected={!activeView && !filter.trim()} onClick={() => {
+                setActiveView(""); setFilter(""); setSearchInput("");
+              }} />
               {savedViews.map((view) => (
                 <Row
                   key={view.id}
                   label={view.name}
                   selected={activeView === view.name}
                   onClick={() => {
-                    void store.applyView(view.name);
-                    setSheetOpen(false);
+                    const clear = activeView === view.name;
+                    setActiveView(clear ? "" : view.name);
+                    setFilter(clear ? "" : view.query);
+                    setSearchInput(clear ? "" : textOf(view.query));
                   }}
                 />
               ))}
-            </>
+            </Section>
           )}
 
-          <Section title="Status" />
+          <Section title="Status" defaultOpen>
           <Row
             label="All statuses"
             count={grandTotal}
@@ -273,7 +239,8 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
             />
           ))}
 
-          <Section title="Project" />
+          </Section>
+          <Section title="Projects">
           <Row
             label="All projects"
             count={totalForProjects}
@@ -291,32 +258,41 @@ export function MobileBoard({ tasks: filteredTasks }: { tasks: Task[] }) {
             />
           ))}
 
+          </Section>
           {/* Arrangement lives in this sheet rather than a second control, for
               the same reason everything else does: 390px only fits one. */}
-          <Section title="Group by" />
+          <Section title="Group by">
           <Chips
             options={GROUP_BY_OPTIONS}
             value={listOptions.groupBy}
-            onChange={(groupBy: ListGroupBy) => store.setListOptions({ ...listOptions, groupBy })}
+            onChange={(groupBy: ListGroupBy) => setListOptions({ ...listOptions, groupBy })}
           />
-          <Section title="Sort" />
+          </Section>
+          <Section title="Sort">
           <Chips
             options={SORT_OPTIONS}
             value={listOptions.sort}
-            onChange={(sort: ListSort) => store.setListOptions({ ...listOptions, sort })}
+            onChange={(sort: ListSort) => setListOptions({ ...listOptions, sort })}
           />
+          </Section>
+          </div>
+          <div className="flex shrink-0 gap-3 border-t pt-3">
+            <Button variant="outline" className="h-11 flex-1" onClick={reset}>Reset</Button>
+            <Button className="h-11 flex-1" onClick={apply}>Apply</Button>
+          </div>
         </DialogContent>
       </Dialog>
-    </div>
   );
 }
 
-function Section({ title }: { title: string }) {
-  return (
-    <div className="mt-1 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
-      {title}
-    </div>
-  );
+function Section({ title, children, defaultOpen = false }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
+  const [open, setOpen] = usePersistedToggle(`ty:filter-section:${title}`, defaultOpen);
+  return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className="group/filter-section border-t">
+    <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between text-xs font-semibold text-muted-foreground [&::-webkit-details-marker]:hidden">
+      {title}<ChevronDown className="size-4 transition-transform group-open/filter-section:rotate-180" />
+    </summary>
+    <div className="flex flex-col gap-1 pb-2">{children}</div>
+  </details>;
 }
 
 function Chips<T extends string>({
@@ -335,7 +311,7 @@ function Chips<T extends string>({
           key={opt}
           onClick={() => onChange(opt)}
           className={cn(
-            "h-9 rounded-lg px-3 text-[13px] capitalize",
+            "h-11 rounded-lg px-3 text-[13px] capitalize",
             opt === value
               ? "bg-primary font-medium text-primary-foreground"
               : "bg-surface-2 text-muted-foreground",
@@ -364,8 +340,9 @@ function Row({
   return (
     <button
       onClick={onClick}
+      aria-pressed={selected}
       className={cn(
-        "-mx-1 flex h-11 items-center gap-2.5 rounded-lg px-3 text-left text-[15px] active:bg-surface-2",
+        "flex h-11 shrink-0 items-center gap-2.5 rounded-lg px-3 text-left text-[15px] active:bg-surface-2",
         selected ? "font-medium text-foreground" : "text-muted-foreground",
       )}
     >
@@ -375,7 +352,7 @@ function Row({
           style={{ background: color || "var(--muted-foreground)" }}
         />
       )}
-      <span className={cn("min-w-0 truncate", count === undefined && "flex-1")}>{label}</span>
+      <span className={cn("min-w-0 flex-1 truncate", count === undefined && "flex-1")}>{label}</span>
       {count !== undefined && (
         <span className="ml-auto shrink-0 text-[13px] tabular-nums opacity-70">{count}</span>
       )}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { motion } from "motion/react";
-import { Plus, Search, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
+import { Plus, Search, ListFilter, Settings2, ChevronLeft, Menu, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
 import { buildColumns } from "./lib/board";
@@ -43,6 +43,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 export default function App() {
   const state = useAppState();
   const isMobile = useIsMobile();
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // popstate handlers close over stale state, so the drawer's open-ness has to
   // be readable from inside one.
@@ -598,7 +599,12 @@ export default function App() {
         >
           <Plus className="size-4" /> New
         </Button>
-        {/* The phone board has its own search field. */}
+        {isMobile && state.view.kind === "board" && (
+          <Button variant="ghost" size="icon" className="relative size-11" aria-label="Filter tasks" aria-haspopup="dialog" onClick={() => setMobileFilterOpen(true)}>
+            <ListFilter className="size-4" />
+            {state.filter.trim() && <span aria-label="Filters active" className="absolute right-2 top-2 size-1.5 rounded-full bg-primary" />}
+          </Button>
+        )}
         {!isMobile && (
           <Button
             variant="ghost"
@@ -650,7 +656,7 @@ export default function App() {
       >
           {state.view.kind === "board" &&
             (isMobile ? (
-              <MobileBoard tasks={filteredTasks} />
+              <MobileBoard tasks={filteredTasks} filterOpen={mobileFilterOpen} onFilterClose={() => setMobileFilterOpen(false)} />
             ) : (
               <div className="flex min-h-0 flex-1 flex-col gap-2">
                 {(state.filterOpen || state.filter !== "" || state.activeView !== "") && (

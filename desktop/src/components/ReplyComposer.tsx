@@ -1,13 +1,10 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { SendHorizonal } from "lucide-react";
+import { SendHorizonal, Paperclip } from "lucide-react";
 import { ApiError, api } from "../api/client";
 import type { Task } from "../api/types";
 import { store } from "../store";
 import { useIsCoarsePointer } from "../hooks/use-mobile";
 import { Button } from "@/components/ui/button";
-
-/** One-tap answers for the two things an agent asks for most often. */
-const QUICK = ["yes", "continue"];
 
 /**
  * Shell ported from bb's promptbox (apps/app/src/components/promptbox/
@@ -20,7 +17,7 @@ const QUICK = ["yes", "continue"];
  * reserved for an overlaid send button, the 68px floor and 50dvh ceiling, and
  * the controls sitting inside the card along the bottom edge.
  */
-export function ReplyComposer({ task }: { task: Task }) {
+export function ReplyComposer({ task, onAttach }: { task: Task; onAttach: () => void }) {
   const draftKey = `ty-reply-draft-${task.id}`;
   const [message, setMessage] = useState(() => {
     try { return sessionStorage.getItem(draftKey) ?? ""; }
@@ -64,7 +61,6 @@ export function ReplyComposer({ task }: { task: Task }) {
     setSending(true);
     try {
       await api.sendInput(task.id, body, force);
-      // A quick answer must not discard a different reply being composed.
       if (text === message) updateMessage("");
       setBusyText(null);
       store.toast({ title: "Sent to the agent", kind: "success" });
@@ -97,13 +93,16 @@ export function ReplyComposer({ task }: { task: Task }) {
         style={liftForKeyboard}
         className="shrink-0 border-t bg-surface-1 px-3 pt-3 pb-[max(0.75rem,var(--ty-safe-area-bottom,env(safe-area-inset-bottom)))]"
       >
+        <div className="flex gap-2">
+        <Button variant="outline" className="h-11" onClick={onAttach}><Paperclip className="size-4" /> Attach files</Button>
         <Button
-          className="h-11 w-full text-sm"
+          className="h-11 flex-1 text-sm"
           disabled={task.status === "queued"}
           onClick={() => void store.executeTask(task.id)}
         >
           {task.status === "queued" ? "Queued…" : "Execute"}
         </Button>
+        </div>
       </div>
     );
   }
@@ -177,24 +176,8 @@ export function ReplyComposer({ task }: { task: Task }) {
         {/* Controls live inside the card along the bottom edge, where bb keeps
             its attach / model / mic cluster. */}
         <div className="flex items-center gap-1.5 px-2.5 pt-1 pb-2">
-          {QUICK.map((word) => (
-            <Button
-              key={word}
-              variant="ghost"
-              className="h-8 px-2 text-[13px] text-muted-foreground max-md:h-10 max-md:px-2.5"
-              disabled={sending}
-              onClick={() => void send(word)}
-            >
-              {word}
-            </Button>
-          ))}
-          <Button
-            variant="ghost"
-            className="ml-auto h-8 px-2 text-[13px] text-muted-foreground max-md:h-10 max-md:px-2.5"
-            disabled={sending}
-            onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}
-          >
-            Retry…
+          <Button variant="ghost" className="h-11 px-2.5 text-sm text-muted-foreground" disabled={sending} onClick={onAttach}>
+            <Paperclip className="size-4" /> Attach files
           </Button>
         </div>
       </div>

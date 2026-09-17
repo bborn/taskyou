@@ -53,3 +53,11 @@ Tested the production preview on an iPhone 11 through macOS iPhone Mirroring, us
 - Add files opens the native Photo Library / Take Photo or Video / Choose Files menu. No personal file was selected or uploaded.
 
 **Limitation:** iPhone Mirroring suppressed the full software keyboard even with text inputs focused; only the input accessory controls appeared. This verifies a subset of native Safari behavior, not software-keyboard overlap, viewport panning, or installed-PWA behavior. Those remain unverified and need direct phone interaction with screen capture or a simulator. No agent execution was triggered.
+
+## Mobile controls follow-up
+
+- Filter now opens from a header icon. Apply commits pending selections; Reset clears active filters and list arrangement immediately.
+- Filter drafts, section disclosures, task-group disclosures, and the conversation disclosure are remembered in this browser. Applied filters and arrangement continue using the server settings.
+- Views includes All tasks, and selecting the current saved view again clears the pending view selection.
+- The reply composer exposes Attach files; the redundant yes/continue shortcuts are removed and Retry is available in task actions.
+- Browser verification: draft and disclosure state survive reload; Reset stays cleared without Apply; a synthetic text file uploads successfully through the file picker; the footer stays visible without horizontal overflow at 320×568. Production build passes. This follow-up was not tested with the iOS software keyboard.
