@@ -638,8 +638,9 @@ export default function App() {
           variant="ghost"
           size="icon"
           className={isMobile ? "size-9" : "size-7"}
-          title="Settings (⌘,)"
-          onClick={() => store.openSettings()}
+          title={state.view.kind === "settings" ? "Close settings (⌘,)" : "Settings (⌘,)"}
+          aria-pressed={state.view.kind === "settings"}
+          onClick={() => state.view.kind === "settings" ? store.openBoard() : store.openSettings()}
         >
           <Settings2 className="size-4" />
         </Button>
