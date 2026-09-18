@@ -2738,6 +2738,9 @@ Examples:
 	inputCmd.Flags().Bool("force", false, "Send even while the agent is working (interrupts it)")
 	rootCmd.AddCommand(inputCmd)
 
+	// Answer subcommand - show or answer a blocked task's pending question
+	rootCmd.AddCommand(newAnswerCmd())
+
 	// Pi Wrapper subcommand - internal use for RPC mode
 	rootCmd.AddCommand(piWrapperCmd)
 

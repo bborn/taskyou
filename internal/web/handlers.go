@@ -150,6 +150,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	for i, t := range tasks {
 		result[i] = toTaskJSON(t)
 	}
+	s.attachQuestions(result)
 	jsonOK(w, result)
 }
 
@@ -260,8 +261,12 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		tasksummary.KickoffRewrite(s.db, task.ID)
 	}
 
+	tj := toTaskJSON(task)
+	if q, err := s.db.GetPendingQuestion(task.ID); err == nil {
+		tj.Question = toQuestionJSON(q)
+	}
 	jsonOK(w, map[string]interface{}{
-		"task": toTaskJSON(task),
+		"task": tj,
 		"logs": toLogJSONSlice(logs),
 	})
 }
@@ -605,50 +610,82 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(3 * time.Minute))
 	}
 
-	// A remote task's pane is on another machine's tmux server, so it is found
-	// by the code that owns that connection rather than by a tag lookup here —
-	// but the delivery itself is the same one every other surface uses, so a
-	// remote agent is no more likely to be typed over mid-turn than a local one.
+	route, rerr := s.resolveInputRoute(r, task)
+	if rerr != nil {
+		jsonErr(w, rerr.msg, rerr.status)
+		return
+	}
+	if len(req.AttachmentIDs) > 0 {
+		var (
+			paths []string
+			err   error
+		)
+		if route.remote != nil {
+			runner := executor.RemoteRunner{Host: route.remote.RemoteHost, WorkDir: route.remote.Workdir}
+			paths, err = executor.StageAttachments(r.Context(), s.db, task.ID, route.remote.Workdir, &runner, req.AttachmentIDs)
+			if err != nil {
+				jsonErr(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+		} else {
+			paths, err = executor.StageAttachments(r.Context(), s.db, task.ID, s.taskWorkdir(task), nil, req.AttachmentIDs)
+			if err != nil {
+				jsonErr(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		req.Message += executor.AttachmentPrompt(paths)
+	}
+	s.writeInput(w, r, route.sender, route.target, req)
+}
+
+// inputRoute is how a prompt reaches one task's agent: the sender, the target
+// pane, and — for a task placed on another host — what was learned finding it.
+type inputRoute struct {
+	sender *agentsend.Sender
+	target inputTarget
+	remote *terminalInfoJSON
+}
+
+// routeError is a failure to find anywhere to deliver, with the status the
+// endpoint answers with.
+type routeError struct {
+	status int
+	msg    string
+}
+
+func (e *routeError) Error() string { return e.msg }
+
+// resolveInputRoute finds where a prompt for task goes. Every endpoint that
+// types into an agent resolves it here, so they all reach it the same way.
+//
+// A remote task's pane is on another machine's tmux server, so it is found by
+// the code that owns that connection rather than by a tag lookup here — but the
+// delivery itself is the same one every other surface uses, so a remote agent
+// is no more likely to be typed over mid-turn than a local one.
+func (s *Server) resolveInputRoute(r *http.Request, task *db.Task) (inputRoute, *routeError) {
 	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		info := s.remoteTerminalInfo(ctx, task, false)
 		cancel()
 		if info.Error != "" {
-			jsonErr(w, info.Error, http.StatusBadGateway)
-			return
+			return inputRoute{}, &routeError{status: http.StatusBadGateway, msg: info.Error}
 		}
 		if info.ClaudePaneID == "" {
-			jsonErr(w, "task has no remote executor pane", http.StatusConflict)
-			return
-		}
-		if len(req.AttachmentIDs) > 0 {
-			runner := executor.RemoteRunner{Host: info.RemoteHost, WorkDir: info.Workdir}
-			paths, err := executor.StageAttachments(r.Context(), s.db, task.ID, info.Workdir, &runner, req.AttachmentIDs)
-			if err != nil {
-				jsonErr(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			req.Message += executor.AttachmentPrompt(paths)
+			return inputRoute{}, &routeError{status: http.StatusConflict, msg: "task has no remote executor pane"}
 		}
 		terminal := paneTerminal{ctx: r.Context(), runner: executor.RemoteRunner{Host: info.RemoteHost}}
-		sender := agentsend.NewForHost(terminalRunner{terminal}, s.db, info.RemoteHost)
-		s.writeInput(w, r, sender, inputTarget{task: task, pane: info.ClaudePaneID}, req)
-		return
+		return inputRoute{
+			sender: agentsend.NewForHost(terminalRunner{terminal}, s.db, info.RemoteHost),
+			target: inputTarget{task: task, pane: info.ClaudePaneID},
+			remote: &info,
+		}, nil
 	}
 
 	if s.runner == nil {
-		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
-		return
+		return inputRoute{}, &routeError{status: http.StatusInternalServerError, msg: "command runner not configured"}
 	}
-	if len(req.AttachmentIDs) > 0 {
-		paths, err := executor.StageAttachments(r.Context(), s.db, task.ID, s.taskWorkdir(task), nil, req.AttachmentIDs)
-		if err != nil {
-			jsonErr(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		req.Message += executor.AttachmentPrompt(paths)
-	}
-	s.writeInput(w, r, s.agentSender(), inputTarget{task: task}, req)
+	return inputRoute{sender: s.agentSender(), target: inputTarget{task: task}}, nil
 }
 
 // inputTarget is where one input request is going: a task, and — for a remote
@@ -1312,10 +1349,13 @@ type taskJSON struct {
 	PR              *prStatusJSON `json:"pr,omitempty"`
 	Summary         string        `json:"summary,omitempty"`
 	Stand           string        `json:"stand,omitempty"`
-	CreatedAt       string        `json:"created_at"`
-	UpdatedAt       string        `json:"updated_at"`
-	StartedAt       string        `json:"started_at,omitempty"`
-	CompletedAt     string        `json:"completed_at,omitempty"`
+	// Question is what the agent is blocked on asking, when it asked through
+	// taskyou_needs_input. Only ever set on a blocked task.
+	Question    *questionJSON `json:"question,omitempty"`
+	CreatedAt   string        `json:"created_at"`
+	UpdatedAt   string        `json:"updated_at"`
+	StartedAt   string        `json:"started_at,omitempty"`
+	CompletedAt string        `json:"completed_at,omitempty"`
 }
 
 // prStatusJSON is the live PR badge payload surfaced on board cards: the PR's

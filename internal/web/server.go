@@ -114,6 +114,8 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetryTask)
 	mux.HandleFunc("POST /api/tasks/{id}/pin", s.handlePinTask)
 	mux.HandleFunc("POST /api/tasks/{id}/input", s.handleTaskInput)
+	mux.HandleFunc("GET /api/tasks/{id}/question", s.handleGetQuestion)
+	mux.HandleFunc("POST /api/tasks/{id}/answer", s.handleAnswerQuestion)
 	mux.HandleFunc("POST /api/tasks/{id}/annotations", s.handleTaskAnnotations)
 
 	// Browser bridge (executor ↔ ty-chrome extension)
