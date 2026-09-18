@@ -177,7 +177,8 @@ function OptionText({ n, label, description }: { n: number; label: string; descr
   return (
     <span className="flex min-w-0 flex-col gap-0.5">
       <span className="text-sm font-medium">
-        <span className="mr-1.5 font-mono text-xs text-muted-foreground">{n}</span>
+        {/* The number mirrors the TUI's keys; a screen reader wants the label. */}
+        <span aria-hidden className="mr-1.5 font-mono text-xs text-muted-foreground">{n}</span>
         {label}
       </span>
       {description && <span className="text-xs font-normal text-muted-foreground">{description}</span>}
