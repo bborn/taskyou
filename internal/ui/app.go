@@ -119,6 +119,13 @@ type KeyMap struct {
 	SavedViews     key.Binding
 	// How the list is arranged: group by, sort
 	ListOptions key.Binding
+	// Answering a blocked task's structured question from the detail view
+	// (taskyou_needs_input with options). Active only while one is pending.
+	AnswerOption key.Binding // 1-9: pick that option (toggle it, for multi_choice)
+	NextOption   key.Binding
+	PrevOption   key.Binding
+	ToggleOption key.Binding // multi_choice: toggle the highlighted option
+	SubmitAnswer key.Binding // pick the highlighted option / send the toggled ones
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -316,6 +323,26 @@ func DefaultKeyMap() KeyMap {
 		ListOptions: key.NewBinding(
 			key.WithKeys("O"),
 			key.WithHelp("O", "arrange list"),
+		),
+		AnswerOption: key.NewBinding(
+			key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
+			key.WithHelp("1-9", "answer question"),
+		),
+		NextOption: key.NewBinding(
+			key.WithKeys("j"),
+			key.WithHelp("j", "next option"),
+		),
+		PrevOption: key.NewBinding(
+			key.WithKeys("k"),
+			key.WithHelp("k", "previous option"),
+		),
+		ToggleOption: key.NewBinding(
+			key.WithKeys(" "),
+			key.WithHelp("space", "toggle option"),
+		),
+		SubmitAnswer: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "send answer"),
 		),
 	}
 }
@@ -844,6 +871,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg, detailRefreshMsg, detailCleanupMsg, detailPaneResultMsg, reloadTokenMsg:
 		isSystemMsg = true
+	case questionAnsweredMsg:
+		// An answer can land while a modal is open over the detail view; the
+		// panel it came from must still hear how it went.
+		isSystemMsg = true
 	case placementFinishedMsg:
 		isSystemMsg = true
 	case starterPackInstalledMsg:
@@ -1240,6 +1271,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.detailView, cmd = m.detailView.Update(msg.result)
 			cmds = append(cmds, cmd)
+		}
+
+	case questionAnsweredMsg:
+		if m.detailView != nil && m.detailView == msg.owner {
+			m.detailView.handleQuestionAnswered(msg)
 		}
 
 	case reloadTokenMsg:
@@ -3050,6 +3086,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Clear origin column when exiting detail view
 		m.kanban.ClearOriginColumn()
 		return m, m.detachDetail(true)
+	}
+
+	// A pending structured question takes the keys that answer it — digits,
+	// j/k, space, enter — ahead of the scrolling they otherwise drive.
+	if m.detailView != nil {
+		if handled, cmd := m.detailView.HandleQuestionKey(keyMsg, m.keys); handled {
+			return m, cmd
+		}
 	}
 
 	// Handle queue/close/retry from detail view

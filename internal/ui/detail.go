@@ -28,6 +28,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/qmd"
+	"github.com/bborn/workflow/internal/question"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -316,6 +317,16 @@ type DetailModel struct {
 	// as information, not as a failure, because nothing failed.
 	paneNotice string
 
+	// The structured question the task's agent is blocked on (see
+	// detail_question.go), and the keyboard's progress answering it: the
+	// highlighted option, the toggled ones for multi_choice, and the last
+	// delivery problem.
+	question       *db.PendingQuestion
+	questionCursor int
+	questionPicked map[int]bool
+	questionNotice string
+	answerInFlight bool
+
 	// paneSetupHalted is the reason pane setup stopped deliberately and must NOT
 	// be retried automatically: a missing worktree, a refused pane adopt, or a
 	// tripped spawn breaker. It is the terminal state the respawn loop lacked —
@@ -512,6 +523,9 @@ func (m *DetailModel) UpdateTask(t *db.Task) tea.Cmd {
 
 	m.task = t
 	m.loadWorkflowSteps()
+	if t.Status != db.StatusBlocked {
+		m.setQuestion(nil)
+	}
 	if m.ready {
 		m.setViewportContent()
 	}
@@ -798,6 +812,8 @@ type detailRefreshMsg struct {
 	memoryMB                                   int
 	serverListening, shellRunning              bool
 	claudePaneID, shellPaneID                  string
+	question                                   *db.PendingQuestion
+	questionChecked                            bool
 }
 
 func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
@@ -815,6 +831,9 @@ func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
 	lastLogCount, logsLoading := m.lastLogCount, m.logsLoading
 	return func() tea.Msg {
 		result.task, _ = worker.database.GetTask(taskCopy.ID)
+		if q, err := worker.database.GetPendingQuestion(taskCopy.ID); err == nil {
+			result.question, result.questionChecked = q, true
+		}
 		result.hostHealth, _ = worker.database.RemoteHostHealth(taskCopy.PlacementTarget)
 		count, err := worker.database.GetTaskLogCount(taskCopy.ID)
 		if err == nil && count != lastLogCount && !logsLoading {
@@ -850,6 +869,9 @@ func (m *DetailModel) handleRefreshSnapshot(msg detailRefreshMsg) tea.Cmd {
 	// that newer state instead of restoring a stale database snapshot.
 	if msg.task != nil && m.task == msg.previousTask {
 		m.task = msg.task
+	}
+	if msg.questionChecked && !m.answerInFlight {
+		m.setQuestion(msg.question)
 	}
 	if msg.logs != nil && m.lastLogCount == msg.previousLogCount {
 		m.logs = msg.logs
@@ -941,6 +963,11 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Load logs
 	logs, _ := database.GetTaskLogs(t.ID, 100)
 	m.logs = logs
+
+	// Before the viewport is sized: the question panel takes header rows.
+	if q, err := database.GetPendingQuestion(t.ID); err == nil {
+		m.setQuestion(q)
+	}
 
 	m.initViewport()
 
@@ -2938,7 +2965,12 @@ func (m *DetailModel) renderHeader() string {
 		lines = append(lines, errorStyle.Render(truncateRunes("⚠ "+m.paneError, maxW)))
 	}
 
-	if stand := tasksummary.DisplayStand(t.Summary); stand != "" {
+	// A pending question replaces the stand, which is usually that same question
+	// in prose, and takes whatever rows the pane can spare.
+	if m.question != nil {
+		headerRows := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, append(lines, "")...))
+		lines = append(lines, m.renderQuestionPanel(maxW, m.questionPanelBudget(headerRows))...)
+	} else if stand := tasksummary.DisplayStand(t.Summary); stand != "" {
 		standColor := ColorMuted
 		if m.focused && t.Status == db.StatusBlocked {
 			standColor = ColorWarning
@@ -3272,6 +3304,16 @@ func (m *DetailModel) renderHelp() string {
 	// the row is collapsed; everything else is tucked behind '?'.
 	keys := []helpKey{
 		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation, true},
+	}
+
+	// A pending question's answer keys lead: answering is why the task is blocked.
+	if m.question != nil {
+		n := len(question.Choices(m.question))
+		desc := "answer"
+		if m.question.Kind == db.QuestionMultiChoice {
+			desc = "toggle · enter send"
+		}
+		keys = append(keys, helpKey{fmt.Sprintf("1-%d", n), desc, m.answerInFlight, true})
 	}
 
 	// Show scroll hint when content is scrollable

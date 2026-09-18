@@ -188,6 +188,31 @@
       "api": [
         "PATCH /api/settings"
       ]
+    },
+    "AnswerOption": {
+      "api": [
+        "GET /api/tasks/{id}/question",
+        "POST /api/tasks/{id}/answer"
+      ],
+      "note": "Question card on a blocked task: tap an option button (a checkbox for multi_choice); Yes/No for confirm"
+    },
+    "NextOption": {
+      "note": "Tab / arrow keys move focus between the question card's option buttons"
+    },
+    "PrevOption": {
+      "note": "Shift+Tab / arrow keys move focus between the question card's option buttons"
+    },
+    "ToggleOption": {
+      "api": [
+        "POST /api/tasks/{id}/answer"
+      ],
+      "note": "multi_choice checkboxes on the question card"
+    },
+    "SubmitAnswer": {
+      "api": [
+        "POST /api/tasks/{id}/answer"
+      ],
+      "note": "Question card's Send button (multi_choice / Other), or tapping a single-choice option"
     }
   },
   "gui_only": [
