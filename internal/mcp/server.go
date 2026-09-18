@@ -17,6 +17,7 @@ import (
 	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/pipeline"
+	"github.com/bborn/workflow/internal/question"
 )
 
 // Server is an MCP server that provides workflow tools to Claude.
@@ -168,13 +169,42 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 				},
 				{
 					Name:        "taskyou_needs_input",
-					Description: "Request input from the user. Call this when you need clarification or additional information to proceed.",
+					Description: needsInputDescription,
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
 							"question": map[string]interface{}{
 								"type":        "string",
 								"description": "The question to ask the user",
+							},
+							"kind": map[string]interface{}{
+								"type":        "string",
+								"enum":        question.Kinds(),
+								"description": "How the user answers. 'text' (default): in their own words. 'choice': pick exactly one of options. 'multi_choice': pick any of options. 'confirm': Yes or No (no options). Defaults to 'choice' when options are given.",
+							},
+							"options": map[string]interface{}{
+								"type":        "array",
+								"minItems":    question.MinOptions,
+								"maxItems":    question.MaxOptions,
+								"description": fmt.Sprintf("The answers to pick from, for choice and multi_choice: %d to %d, each a short label (the answer you get back) with an optional one-line description.", question.MinOptions, question.MaxOptions),
+								"items": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"label": map[string]interface{}{
+											"type":        "string",
+											"description": "A short, distinct answer, e.g. \"Postgres\"",
+										},
+										"description": map[string]interface{}{
+											"type":        "string",
+											"description": "Optional detail shown under the label, e.g. the trade-off",
+										},
+									},
+									"required": []string{"label"},
+								},
+							},
+							"allow_other": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Also let the user answer in their own words instead of (or, for multi_choice, as well as) picking an option.",
 							},
 						},
 						"required": []string{"question"},
@@ -416,24 +446,48 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		})
 
 	case "taskyou_needs_input":
-		question, _ := params.Arguments["question"].(string)
+		q, err := parseNeedsInput(params.Arguments)
+		if err != nil {
+			// A tool error, not a protocol error: the agent reads it and can fix
+			// the call, where a JSON-RPC error reads as the tool being broken.
+			s.sendResult(id, toolCallResult{
+				IsError: true,
+				Content: []contentBlock{{Type: "text", Text: "taskyou_needs_input: " + err.Error() + ". Nothing was asked; fix the call and try again."}},
+			})
+			return
+		}
+		q.TaskID = s.taskID
 
 		// Log the question
-		s.db.AppendTaskLog(s.taskID, "question", question)
+		s.db.AppendTaskLog(s.taskID, "question", q.Question)
+
+		// Record it where every surface can read it — the options are what let a
+		// person answer from a phone with a tap. Stored before the status moves,
+		// so whatever wakes on the task turning blocked finds its question.
+		if err := s.db.SetPendingQuestion(q); err != nil {
+			s.db.AppendTaskLog(s.taskID, "system", "Could not record the question's options: "+err.Error())
+		}
 
 		// Update task status to blocked
-		s.db.SetTaskStatus(s.taskID, db.StatusBlocked, db.ActorMCP,
+		if err := s.db.SetTaskStatus(s.taskID, db.StatusBlocked, db.ActorMCP,
 			"the agent called taskyou_needs_input and is waiting on a human",
-			db.Observedf("agent question: %s", truncateForEvidence(question)))
+			db.Observedf("agent question: %s", truncateForEvidence(q.Question))); err != nil {
+			// A question is only live while the task is blocked on it. One left
+			// behind on a task that never got there would surface the next time
+			// the task blocks for some other reason.
+			if t, _ := s.db.GetTask(s.taskID); t == nil || t.Status != db.StatusBlocked {
+				s.db.ClearPendingQuestion(s.taskID)
+			}
+		}
 
 		// Trigger callback
 		if s.onNeedsInput != nil {
-			s.onNeedsInput(question)
+			s.onNeedsInput(q.Question)
 		}
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: "Input requested. The user will be notified."},
+				{Type: "text", Text: needsInputResult(q)},
 			},
 		})
 
@@ -922,4 +976,120 @@ func truncateForEvidence(s string) string {
 		return s[:300] + "…"
 	}
 	return s
+}
+
+// needsInputDescription is what an agent reads to decide how to ask. The
+// options are the point: an agent that knows the answer is one of a few things
+// should let a person give it with a tap, not make them type it.
+const needsInputDescription = `Request input from the user. Call this when you need clarification or additional information to proceed. The task moves to 'blocked' and a human is notified; their answer arrives as your next message.
+
+When the answer is a discrete decision — which of a few approaches, which of several items, yes or no — offer the answers as options so the user can reply with one tap on their phone or one keypress in the terminal:
+- kind "choice": pick exactly one of 2-6 options. You receive "Selected: <label>".
+- kind "multi_choice": pick any of 2-6 options. You receive "Selected: <label>, <label>".
+- kind "confirm": yes or no (no options). You receive "Yes" or "No".
+Keep labels short and distinct (they are what you get back) and put the trade-off in each option's description. Set allow_other to also accept an answer in the user's own words, which arrives as they wrote it.
+
+Use a plain question (kind "text", the default) when the answer needs explaining — open-ended requirements, missing credentials, anything you cannot enumerate. The user may always reply in their own words instead of picking.`
+
+// parseNeedsInput builds the question from taskyou_needs_input's arguments and
+// checks it. The errors are for the agent: they say what to change.
+func parseNeedsInput(args map[string]interface{}) (*db.PendingQuestion, error) {
+	q := &db.PendingQuestion{}
+
+	text, ok := args["question"].(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("question is required")
+	}
+	q.Question = text
+
+	if v, present := args["kind"]; present && v != nil {
+		kind, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("kind must be a string, one of %s", strings.Join(question.Kinds(), ", "))
+		}
+		q.Kind = kind
+	}
+
+	if v, present := args["allow_other"]; present && v != nil {
+		allow, ok := v.(bool)
+		if !ok {
+			return nil, fmt.Errorf("allow_other must be true or false")
+		}
+		q.AllowOther = allow
+	}
+
+	if v, present := args["options"]; present && v != nil {
+		opts, err := parseOptions(v)
+		if err != nil {
+			return nil, err
+		}
+		q.Options = opts
+	}
+
+	if err := question.Normalize(q); err != nil {
+		return nil, err
+	}
+	return q, nil
+}
+
+// parseOptions accepts the documented [{label, description}] shape, plus two
+// that agents send in practice: bare strings, and the whole array serialised
+// as a JSON string.
+func parseOptions(v interface{}) ([]db.QuestionOption, error) {
+	const shape = `options must be an array of {"label": "...", "description": "..."} objects`
+	if s, ok := v.(string); ok {
+		var decoded interface{}
+		if err := json.Unmarshal([]byte(s), &decoded); err != nil {
+			return nil, fmt.Errorf("%s", shape)
+		}
+		v = decoded
+	}
+	items, ok := v.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s", shape)
+	}
+	opts := make([]db.QuestionOption, 0, len(items))
+	for i, item := range items {
+		switch o := item.(type) {
+		case string:
+			opts = append(opts, db.QuestionOption{Label: o})
+		case map[string]interface{}:
+			label, ok := o["label"].(string)
+			if !ok {
+				return nil, fmt.Errorf("option %d needs a string label", i+1)
+			}
+			desc := ""
+			if d, present := o["description"]; present && d != nil {
+				if desc, ok = d.(string); !ok {
+					return nil, fmt.Errorf("option %d's description must be a string", i+1)
+				}
+			}
+			opts = append(opts, db.QuestionOption{Label: label, Description: desc})
+		default:
+			return nil, fmt.Errorf("%s (option %d is neither)", shape, i+1)
+		}
+	}
+	return opts, nil
+}
+
+// needsInputResult tells the agent what happens next. A plain question keeps
+// the reply it always had.
+func needsInputResult(q *db.PendingQuestion) string {
+	const asked = "Input requested. The user will be notified."
+	if !question.IsStructured(q) {
+		return asked
+	}
+	var example string
+	switch q.Kind {
+	case db.QuestionConfirm:
+		example = `"Yes" or "No"`
+	case db.QuestionMultiChoice:
+		example = `"Selected: <label>, <label>"`
+	default:
+		example = `"Selected: <label>"`
+	}
+	if q.AllowOther {
+		example += ", or an answer in their own words"
+	}
+	return fmt.Sprintf("%s They can answer by picking; the answer arrives as your next message: %s. Stop here and wait for it.", asked, example)
 }
