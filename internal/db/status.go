@@ -590,6 +590,15 @@ func (db *DB) applyTransition(task *Task, to string, actor Actor, reason string,
 	`, task.ID, task.Status, to, string(actor), reason, ev.marshal(), OutcomeApplied); err != nil {
 		return fmt.Errorf("append status event: %w", err)
 	}
+	// A pending question only exists while the task is blocked on it. Whatever
+	// moved the task on — the answer arriving, a retry, the agent carrying on
+	// without one — has overtaken it, so it goes in the same transaction: no
+	// surface can see the task out of blocked with its old question still up.
+	if to != StatusBlocked {
+		if _, err := tx.Exec(`DELETE FROM task_questions WHERE task_id = ?`, task.ID); err != nil {
+			return fmt.Errorf("clear pending question: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit status transaction: %w", err)
 	}

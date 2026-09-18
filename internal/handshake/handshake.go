@@ -52,11 +52,17 @@ import (
 //
 // 4: attachment bytes moved to local files (db.SchemaVersion 3). Older
 // executors would read the empty compatibility blob and silently lose files.
-const Protocol = 4
+//
+// 5: pending questions (task_questions, db.SchemaVersion 4), cleared by the
+// status transition that takes a task out of blocked. That transition usually
+// runs in a hook, i.e. the DAEMON's binary; one from before this leaves the row
+// behind, and a newer client shows the old question again the next time the
+// task blocks for some other reason.
+const Protocol = 5
 
 // ContractFingerprint pins the contract inputs Protocol covers. See
 // contract_test.go; it prints the replacement value when the inputs move.
-const ContractFingerprint = "955cf702ca9431fd"
+const ContractFingerprint = "b087433a7e3bac6a"
 
 // Severity ranks a finding. The zero value is intentionally invalid so a
 // finding always carries an explicit one.

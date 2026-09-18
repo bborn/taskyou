@@ -212,7 +212,9 @@ const modelClaudeSlugMigrationKey = "migration:clear_model_claude_slug_v1"
 // handshake.Protocol must be bumped whenever a schema change means a daemon and
 // a client of different builds would disagree about a row — see
 // internal/handshake.
-const SchemaVersion = 3
+//
+// 4: task_questions (structured taskyou_needs_input questions).
+const SchemaVersion = 4
 
 // SchemaVersionKey is where SchemaVersion is stamped in the settings table.
 const SchemaVersionKey = "schema_version"
@@ -413,6 +415,19 @@ func (db *DB) migrate() error {
 			started INTEGER NOT NULL DEFAULT 0,
 			completed INTEGER NOT NULL DEFAULT 0,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// The question a blocked task's agent is waiting on (taskyou_needs_input),
+		// with the answers it offered. One row per task at most; cleared in the
+		// same transaction that moves the task out of blocked. See questions.go.
+		`CREATE TABLE IF NOT EXISTS task_questions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+			question TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'text',
+			options TEXT NOT NULL DEFAULT '[]',
+			allow_other INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_status_events_task ON task_status_events(task_id, id)`,
