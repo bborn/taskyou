@@ -8,7 +8,9 @@ import type {
   Dependencies,
   ExecutorInfo,
   LogLine,
+  PendingQuestion,
   Project,
+  QuestionAnswer,
   SavedView,
   SavedViewResult,
   Task,
@@ -139,6 +141,12 @@ export const api = {
   // the agent's own output.
   sendInput: (id: number, message: string, force = false, attachmentIds: number[] = []) =>
     request<{ ok: boolean }>("POST", `/api/tasks/${id}/input`, { message, enter: true, force, attachment_ids: attachmentIds }),
+  // The question a blocked task's agent asked, and the answer to it. The answer
+  // travels the same delivery as sendInput; code "question_changed" means the
+  // agent asked something else (or it was answered elsewhere) since this one.
+  question: (id: number) => request<{ question: PendingQuestion | null }>("GET", `/api/tasks/${id}/question`),
+  answerQuestion: (id: number, answer: QuestionAnswer) =>
+    request<{ ok: boolean; answer: string }>("POST", `/api/tasks/${id}/answer`, answer),
   taskLogs: (id: number, limit = 200) => request<LogLine[]>("GET", `/api/tasks/${id}/logs?limit=${limit}`),
   // 60 turns is a long scroll on a phone and ~50KB instead of ~175KB; older
   // history is a deliberate request, not something to ship on every poll.

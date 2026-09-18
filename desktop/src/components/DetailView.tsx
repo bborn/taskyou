@@ -21,6 +21,8 @@ import { mergeRecentLogs } from "../lib/logs";
 import { Markdown } from "./Markdown";
 import { TerminalPane } from "./TerminalPane";
 import { ReplyComposer } from "./ReplyComposer";
+import { QuestionCard } from "./QuestionCard";
+import { isStructured } from "../lib/question";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -121,6 +123,9 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [messageError, setMessageError] = useState("");
   const [showChat, setShowChat] = usePersistedToggle("ty:conversation:expanded", true);
   const [actionsOpen, setActionsOpen] = useState(false);
+  // The question just answered here, hidden until the refresh that drops it
+  // from the task lands — a second tap must not send a second answer.
+  const [answeredQuestion, setAnsweredQuestion] = useState<number | null>(null);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [history, setHistory] = useState<LogLine[] | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
@@ -245,6 +250,10 @@ export function DetailView({ taskId }: { taskId: number }) {
   }
 
   const blocked = task.status === "blocked";
+  // A question the agent offered answers for is answered with a tap; a plain
+  // one is answered in the reply box / Reply dialog, as it always was.
+  const question =
+    blocked && isStructured(task.question) && task.question.id !== answeredQuestion ? task.question : null;
   const refreshDeps = () => api.deps(task.id).then(setDeps).catch(() => {});
 
   // The executor's actual conversation, read from the Claude session
@@ -520,6 +529,17 @@ export function DetailView({ taskId }: { taskId: number }) {
 
       <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-[140px] min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-3.5 break-words select-text md:px-5">
+          {/* Desktop: the question the agent is waiting on leads the body. */}
+          {!isMobile && question && (
+            <QuestionCard
+              key={question.id}
+              task={task}
+              question={question}
+              onAnswered={setAnsweredQuestion}
+              className="mb-4 max-w-2xl"
+            />
+          )}
+
           {/* Phone: the conversation is why you opened this, so it comes before
               the ticket body, placement, dependencies and attachments. */}
           {isMobile && conversationSection}
@@ -614,7 +634,22 @@ export function DetailView({ taskId }: { taskId: number }) {
         {/* A phone gets a reply box where the desktop gets the live terminal:
             xterm needs a keyboard and ~80 columns. */}
         {isMobile ? (
-          <ReplyComposer key={task.id} task={task} onAttach={() => setAttachmentsOpen(true)} />
+          <>
+            {/* Above the reply box, in thumb reach: one tap answers. Capped so
+                a long list scrolls inside itself rather than pushing the
+                conversation off the screen. */}
+            {question && (
+              <div className="max-h-[45dvh] shrink-0 overflow-y-auto border-t px-3 pt-2.5">
+                <QuestionCard
+                  key={question.id}
+                  task={task}
+                  question={question}
+                  onAnswered={setAnsweredQuestion}
+                />
+              </div>
+            )}
+            <ReplyComposer key={task.id} task={task} onAttach={() => setAttachmentsOpen(true)} />
+          </>
         ) : (
           <>
             <div

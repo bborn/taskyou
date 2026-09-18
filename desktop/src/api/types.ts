@@ -34,10 +34,39 @@ export interface Task {
   pr?: PRStatus;
   summary?: string;
   stand?: string;
+  /** What the agent is blocked on asking (taskyou_needs_input). Only on a
+   * blocked task. */
+  question?: PendingQuestion;
   created_at: string;
   updated_at: string;
   started_at?: string;
   completed_at?: string;
+}
+
+export type QuestionKind = "text" | "choice" | "multi_choice" | "confirm";
+
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** A blocked task's pending question. `options` are the answers to pick,
+ * numbered from 1 in this order — a confirm's are Yes and No; a text question
+ * has none. Mirrors questionJSON in internal/web/questions.go. */
+export interface PendingQuestion {
+  id: number;
+  question: string;
+  kind: QuestionKind;
+  options: QuestionOption[];
+  allow_other: boolean;
+  created_at: string;
+}
+
+/** POST /api/tasks/{id}/answer. `choices` are 1-based option numbers. */
+export interface QuestionAnswer {
+  question_id: number;
+  choices?: number[];
+  other?: string;
 }
 
 export type PRState = "open" | "draft" | "merged" | "closed";
