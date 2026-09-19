@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef } from "react";
 import type { LogLine } from "../api/types";
+import { QUESTION_OPTIONS, optionsFor } from "../lib/question";
 
 const TYPE_ICONS: Record<string, string> = {
   system: "⚙",
@@ -24,13 +25,22 @@ export function LogList({ logs, follow = true }: { logs: LogLine[]; follow?: boo
 
   return (
     <div className="flex flex-col gap-0.5 font-mono text-[11.5px]">
-      {logs.map((log) => <LogRow key={log.id} log={log} />)}
+      {logs.map((log, i) =>
+        // Offered answers are shown on their question's row, not as JSON.
+        log.line_type === QUESTION_OPTIONS ? null : (
+          <LogRow
+            key={log.id}
+            log={log}
+            options={log.line_type === "question" ? optionsFor(logs, i)?.map((o) => o.label).join(" · ") : undefined}
+          />
+        ),
+      )}
       <div ref={endRef} />
     </div>
   );
 }
 
-const LogRow = memo(function LogRow({ log }: { log: LogLine }) {
+const LogRow = memo(function LogRow({ log, options }: { log: LogLine; options?: string }) {
   return (
     <div className={`flex items-baseline gap-2 ${
       log.line_type === "error" ? "text-status-blocked"
@@ -47,6 +57,7 @@ const LogRow = memo(function LogRow({ log }: { log: LogLine }) {
           paths agents log, which otherwise run off a phone screen. */}
       <span className="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
         {log.content}
+        {options && <span className="text-muted-foreground"> ({options})</span>}
       </span>
     </div>
   );
