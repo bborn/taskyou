@@ -76,11 +76,6 @@ func getUISessionName() string {
 	return fmt.Sprintf("task-ui-%s", getSessionID())
 }
 
-// getDaemonSessionName returns the task-daemon session name for this instance.
-func getDaemonSessionName() string {
-	return fmt.Sprintf("task-daemon-%s", getSessionID())
-}
-
 // taskEmitter holds the process-wide events emitter so short-lived CLI
 // commands can flush pending hooks via waitForEventHooks before exit.
 var taskEmitter *events.Emitter
@@ -6496,25 +6491,6 @@ func getProcessMemoryMB(pid int) int {
 	return rssKB / 1024 // Convert to MB
 }
 
-// killSession kills a specific task's tmux window in task-daemon.
-func killSession(taskID int) error {
-	daemonSession := getDaemonSessionName()
-	windowName := fmt.Sprintf("task-%d", taskID)
-	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
-
-	// Check if window exists
-	if err := agentTmuxCmd("list-panes", "-t", windowTarget).Run(); err != nil {
-		return fmt.Errorf("no window for task %d", taskID)
-	}
-
-	// Kill the window
-	if err := agentTmuxCmd("kill-window", "-t", windowTarget).Run(); err != nil {
-		return fmt.Errorf("failed to kill window: %w", err)
-	}
-
-	return nil
-}
-
 // killSessionAcrossDaemons kills a task's tmux window across all task-daemon-* sessions.
 // Returns true if a window was found and killed.
 //
@@ -7012,8 +6988,8 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 
 	// Kill agent session if running. Use the across-daemons variant because the
 	// CLI invocation's session ID rarely matches the daemon that originally
-	// spawned the window — the scoped killSession would silently miss it and
-	// leak the agent process. See sessions_test.go for repro.
+	// spawned the window — a kill scoped to the current daemon session
+	// would silently miss it and leak the agent process. See sessions_test.go for repro.
 	killSessionAcrossDaemons(int(oldTask.ID))
 
 	// Clean up worktree and agent sessions if they exist
@@ -7134,8 +7110,8 @@ func hardDeleteTask(taskID int64) error {
 	// Kill agent session if running. Use the across-daemons variant: the CLI's
 	// session ID rarely matches the daemon that originally spawned the window
 	// (UI launches with WORKTREE_SESSION_ID set to its own PID; the daemon
-	// process has its own PID), so a scoped killSession would silently miss
-	// the window and leak the agent. See sessions_test.go for repro.
+	// process has its own PID), so a kill scoped to the current daemon
+	// session would silently miss the window and leak the agent. See sessions_test.go for repro.
 	killSessionAcrossDaemons(int(taskID))
 
 	// Clean up the worktree if it exists. Note: unlike the pre-soft-delete
