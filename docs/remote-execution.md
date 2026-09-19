@@ -66,8 +66,9 @@ is used for probe results, while its `ssh` field is the actual SSH destination.
 ## Observe and recover
 
 The task detail shows its host, placement reason, connection state and last
-successful observation. `unknown` means no observation yet; `reconnecting` means
-an error or an observation older than 30 seconds. Neither means the task failed.
+successful observation. `unknown` means no observation yet; `idle` means an
+observation older than 30 seconds; `reconnecting` means an error. None means
+the task failed.
 Failed window enumeration cannot make every task appear missing, and failed
 pane capture cannot make an existing window disappear.
 
