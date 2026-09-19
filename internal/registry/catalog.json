@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "name": "TaskYou community plugins",
+  "updated_at": "2026-09-16",
+  "plugins": [
+    {
+      "id": "rpi",
+      "name": "Research → Plan → Implement",
+      "description": "Turns a goal into neutral research questions, researches the codebase blind to the goal, designs and plans it behind two human gates, then implements and simplifies it — every step gated on your build and tests — and opens a PR.",
+      "author": "taskyou",
+      "source": "https://github.com/taskyou/plugins",
+      "subdir": "rpi",
+      "homepage": "https://github.com/taskyou/plugins/tree/main/rpi",
+      "category": "workflows",
+      "tags": ["workflow", "plan", "review", "pr", "gate"],
+      "provides": ["workflow"],
+      "requires": ["a `make verify` (or equivalent) build+test command"]
+    },
+    {
+      "id": "plan-code-review",
+      "name": "Plan → Code → Review",
+      "description": "Plan, then code, then two reviewers in parallel, then collect — all on one shared branch. The original built-in TaskYou workflow, now a plugin.",
+      "author": "taskyou",
+      "source": "https://github.com/taskyou/plugins",
+      "subdir": "plan-code-review",
+      "homepage": "https://github.com/taskyou/plugins/tree/main/plan-code-review",
+      "category": "workflows",
+      "tags": ["workflow", "review", "parallel"],
+      "provides": ["workflow"]
+    },
+    {
+      "id": "arc-solve",
+      "name": "ARC-AGI-3 solver",
+      "description": "Plays a live ARC-AGI-3 game and completes a level, with a gate that replays the solution against the real game so a win cannot be faked.",
+      "author": "taskyou",
+      "source": "https://github.com/taskyou/plugins",
+      "subdir": "arc-solve",
+      "homepage": "https://github.com/taskyou/plugins/tree/main/arc-solve",
+      "category": "workflows",
+      "tags": ["workflow", "benchmark", "arc", "eval"],
+      "provides": ["workflow"],
+      "requires": ["an ARC API key at ~/.config/arc/key"]
+    },
+    {
+      "id": "claude-profile-router",
+      "name": "Claude profile router",
+      "description": "Sends each task to whichever Claude account has the most rate-limit headroom left, and holds it in the queue when every account is spent.",
+      "author": "taskyou",
+      "source": "https://github.com/taskyou/plugins",
+      "subdir": "claude-profile-router",
+      "homepage": "https://github.com/taskyou/plugins/tree/main/claude-profile-router",
+      "category": "routing",
+      "tags": ["routing", "rate-limit", "claude", "accounts"],
+      "provides": ["hook", "action"],
+      "requires": ["jq or python3", "two or more Claude config dirs"]
+    },
+    {
+      "id": "desktop-notify",
+      "name": "Desktop notifications",
+      "description": "Native desktop notifications when a task finishes, fails, or needs you. The smallest useful plugin — a good one to read before writing your own.",
+      "author": "taskyou",
+      "source": "https://github.com/bborn/taskyou",
+      "subdir": "examples/plugins/desktop-notify",
+      "homepage": "https://github.com/bborn/taskyou/tree/main/examples/plugins/desktop-notify",
+      "category": "notifications",
+      "tags": ["notifications", "desktop", "example"],
+      "provides": ["hook", "action"]
+    },
+    {
+      "id": "slack",
+      "name": "Slack notifications",
+      "description": "Posts task updates to a Slack channel through an incoming webhook, so a blocked task reaches you where you already are.",
+      "author": "taskyou",
+      "source": "https://github.com/bborn/taskyou",
+      "subdir": "examples/plugins/slack",
+      "homepage": "https://github.com/bborn/taskyou/tree/main/examples/plugins/slack",
+      "category": "notifications",
+      "tags": ["notifications", "slack", "chat", "webhook"],
+      "provides": ["hook"],
+      "requires": ["a Slack incoming-webhook URL in config.env"]
+    },
+    {
+      "id": "worktree",
+      "name": "Worktree inspector",
+      "description": "On-demand actions over a task's git worktree: show its diff, or run the project's tests inside it, without leaving the board.",
+      "author": "taskyou",
+      "source": "https://github.com/bborn/taskyou",
+      "subdir": "examples/plugins/worktree",
+      "homepage": "https://github.com/bborn/taskyou/tree/main/examples/plugins/worktree",
+      "category": "development",
+      "tags": ["git", "diff", "tests", "actions"],
+      "provides": ["action"]
+    },
+    {
+      "id": "heartbeat",
+      "name": "Heartbeat service (example)",
+      "description": "A minimal plugin *service* — a long-running process the daemon supervises for its whole lifetime. Copy it as the skeleton for a sidecar, poller, or webhook listener.",
+      "author": "taskyou",
+      "source": "https://github.com/bborn/taskyou",
+      "subdir": "examples/plugins/heartbeat",
+      "homepage": "https://github.com/bborn/taskyou/tree/main/examples/plugins/heartbeat",
+      "category": "development",
+      "tags": ["service", "example", "daemon", "skeleton"],
+      "provides": ["service"]
+    }
+  ]
+}

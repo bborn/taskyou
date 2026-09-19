@@ -866,7 +866,7 @@ func (m *CommandPaletteModel) renderActionList(b *strings.Builder, width int) {
 			Foreground(ColorMuted).
 			Italic(true).
 			Padding(1, 0).
-			Render("No matching plugin actions. See docs/plugins.md."))
+			Render("No matching plugin actions — press m on the board to browse and install plugins."))
 		return
 	}
 	for i, it := range m.filteredActions {

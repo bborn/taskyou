@@ -61,7 +61,7 @@ func (e *Executor) routeTask(ctx context.Context, task *db.Task, allowHold bool)
 	// makes for pinned projects applies harder across a machine boundary: a
 	// config dir carries per-profile OAuth logins, which cannot be shared, least
 	// of all by pointing at a path on a different computer.
-	if isRemotePlacement(task.PlacementTarget) {
+	if IsRemotePlacement(task.PlacementTarget) {
 		return true
 	}
 	// A project that names its own config dir has already chosen a profile, and

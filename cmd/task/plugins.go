@@ -4,28 +4,38 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/hooks"
+	"github.com/bborn/workflow/internal/registry"
 )
 
-// newPluginsCmd returns the `ty plugins` command group for inspecting installed
-// task plugins (self-contained hook bundles under ~/.config/task/plugins/).
+// newPluginsCmd returns the `ty plugins` command group: browse and search the
+// catalog, install and update plugins, and inspect what's installed.
 func newPluginsCmd() *cobra.Command {
 	pluginsCmd := &cobra.Command{
 		Use:   "plugins",
-		Short: "List and inspect installed task plugins",
+		Short: "Find, install, and inspect task plugins",
 		Long: `Task plugins are self-contained directories under ~/.config/task/plugins/
-that react to task events. Each plugin has a plugin.yaml manifest declaring
-which events it handles; drop a plugin directory in and it is active. Any number
-of plugins may handle the same event.`,
+that add workflows, routines, event hooks, actions, and services. Any number of
+plugins may handle the same event.
+
+Start with discovery rather than a URL:
+
+  ty plugins browse              # the whole catalog
+  ty plugins search slack        # find one
+  ty plugins info slack          # read about it
+  ty plugins add slack           # install it by name
+
+A git URL or local path still works, for anything not in the catalog.
+The TUI has the same catalog behind the ` + "`m`" + ` key.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			listPlugins()
 		},
@@ -33,7 +43,7 @@ of plugins may handle the same event.`,
 
 	pluginsCmd.AddCommand(&cobra.Command{
 		Use:   "list",
-		Short: "List installed plugins and the events they handle",
+		Short: "List installed plugins and what they provide",
 		Run:   func(cmd *cobra.Command, args []string) { listPlugins() },
 	})
 
@@ -45,31 +55,83 @@ of plugins may handle the same event.`,
 		},
 	})
 
+	searchCmd := &cobra.Command{
+		Use:          "search <query>",
+		Short:        "Search the plugin catalog",
+		Args:         cobra.MinimumNArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			refresh, _ := cmd.Flags().GetBool("refresh")
+			return searchCatalog(cmd.Context(), strings.Join(args, " "), refresh)
+		},
+	}
+	searchCmd.Flags().Bool("refresh", false, "Re-fetch the catalog instead of using the cached copy")
+	pluginsCmd.AddCommand(searchCmd)
+
+	browseCmd := &cobra.Command{
+		Use:          "browse",
+		Aliases:      []string{"catalog", "available"},
+		Short:        "List every plugin in the catalog, grouped by category",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			refresh, _ := cmd.Flags().GetBool("refresh")
+			return browseCatalog(cmd.Context(), refresh)
+		},
+	}
+	browseCmd.Flags().Bool("refresh", false, "Re-fetch the catalog instead of using the cached copy")
+	pluginsCmd.AddCommand(browseCmd)
+
+	pluginsCmd.AddCommand(&cobra.Command{
+		Use:          "info <id>",
+		Short:        "Show everything known about one plugin, installed or not",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return pluginInfo(cmd.Context(), args[0])
+		},
+	})
+
 	addCmd := &cobra.Command{
-		Use:   "add <git-url|path> [--name N]",
-		Short: "Install a plugin from a git repo (or update it if already installed)",
-		Long: `Clone a plugin repository into the plugins dir. The repo root must be a
-plugin (a plugin.yaml, optionally with a workflows/ subdir). Re-running add on the
-same plugin updates it in place with git pull.`,
+		Use:     "add <id|git-url|path>",
+		Aliases: []string{"install"},
+		Short:   "Install a plugin by catalog name, git URL, or local path",
+		Long: `Install a plugin. The argument can be:
+
+  a catalog name   ty plugins add slack        (see ` + "`ty plugins search`" + `)
+  owner/repo       ty plugins add taskyou/plugins
+  a git URL        ty plugins add https://github.com/taskyou/plugins
+  a local path     ty plugins add ./my-plugin
+
+Installing by catalog name takes just that plugin, even when it lives inside a
+collection repo. Installing a whole repo installs every plugin in it. Re-running
+add on something already installed updates it in place.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, _ := cmd.Flags().GetString("name")
-			installed, updated, err := addPlugin(args[0], hooks.DefaultPluginsDir(), name)
-			if err != nil {
-				return err
-			}
-			verb := "Installed"
-			if updated {
-				verb = "Updated"
-			}
-			fmt.Printf("%s %d plugin(s): %s. Run `ty plugins list` to see what they provide.\n",
-				verb, len(installed), strings.Join(installed, ", "))
-			return nil
+			subdir, _ := cmd.Flags().GetString("subdir")
+			return addPluginCmd(cmd.Context(), args[0], name, subdir)
 		},
 	}
 	addCmd.Flags().String("name", "", "Install under this directory name (default: derived from the source)")
+	addCmd.Flags().String("subdir", "", "Install only this subdirectory of the source repo")
 	pluginsCmd.AddCommand(addCmd)
+
+	updateCmd := &cobra.Command{
+		Use:          "update [name]",
+		Aliases:      []string{"upgrade"},
+		Short:        "Update an installed plugin (or all of them) from its source",
+		Args:         cobra.MaximumNArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return updateOnePlugin(cmd.Context(), args[0])
+			}
+			return updateAllPlugins(cmd.Context())
+		},
+	}
+	pluginsCmd.AddCommand(updateCmd)
 
 	removeCmd := &cobra.Command{
 		Use:     "remove <name>",
@@ -84,7 +146,7 @@ source may restore it).`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, inCheckout, err := removePlugin(args[0], hooks.DefaultPluginsDir())
+			dir, inCheckout, err := hooks.Remove(args[0], hooks.DefaultPluginsDir())
 			if err != nil {
 				return err
 			}
@@ -120,141 +182,309 @@ source may restore it).`,
 	return pluginsCmd
 }
 
-// addPlugin installs (or updates) a plugin from a git source into pluginsDir. A
-// fresh install is a shallow clone into pluginsDir/<name>; an existing install of
-// the same name is updated in place with `git pull`. It returns the installed
-// directory name, whether it was an update, and validates that what landed is a
-// real plugin (rolling back a bad fresh clone so no stray dir is left behind).
-func addPlugin(source, pluginsDir, name string) (installed []string, updated bool, err error) {
-	if name == "" {
-		name = derivePluginName(source)
+// loadCatalog returns the catalog entries, printing a one-line warning when every
+// remote source was unreachable so a stale listing never looks authoritative.
+func loadCatalog(ctx context.Context, refresh bool) []registry.Entry {
+	loader := registry.Default()
+	res := loader.Load(ctx)
+	if refresh {
+		res = loader.Refresh(ctx)
 	}
-	if name == "" {
-		return nil, false, fmt.Errorf("could not derive a plugin name from %q; pass --name", source)
-	}
-	if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
-		return nil, false, fmt.Errorf("create plugins dir: %w", err)
-	}
-	target := filepath.Join(pluginsDir, name)
-
-	switch {
-	case isGitCheckout(target):
-		if out, err := runGit(target, "pull", "--ff-only"); err != nil {
-			return nil, false, fmt.Errorf("update %s: %w\n%s", name, err, out)
-		}
-		updated = true
-	case dirExists(target):
-		return nil, false, fmt.Errorf("%s already exists and is not a git checkout; remove it or use --name", target)
-	default:
-		if out, err := runGit("", "clone", "--depth", "1", source, target); err != nil {
-			return nil, false, fmt.Errorf("clone %s: %w\n%s", source, err, out)
+	for _, o := range res.Origins {
+		if o.Err != nil && o.URL != registry.BundledOrigin {
+			fmt.Fprintf(os.Stderr, "warning: catalog %s unavailable (%v); using the copy shipped with ty\n", o.URL, o.Err)
 		}
 	}
-
-	// Validate what landed contains at least one usable plugin — a single plugin at
-	// the root, or several nested in a collection. Roll back a bad FRESH clone so no
-	// stray dir is left behind.
-	installed = installedPluginNames(pluginsDir, target)
-	if len(installed) == 0 {
-		if !updated {
-			os.RemoveAll(target)
-		}
-		return nil, false, fmt.Errorf("%s contains no usable plugins (need a plugin.yaml with a hook, action, or workflow)", source)
-	}
-	return installed, updated, nil
+	return res.Entries
 }
 
-// removePlugin uninstalls the plugin named name by deleting its directory. The
-// name is matched against the loaded plugins' manifest names (what `plugins list`
-// shows), falling back to the directory's base name, so it works even when a
-// plugin's directory name differs from its manifest name.
-//
-// It returns the removed directory and whether that directory sat inside a
-// multi-plugin collection checkout — in which case only the plugin's own subdir is
-// deleted (leaving the shared git checkout and its siblings), and a later `add` of
-// the source may restore it. The plugin dir is verified to live strictly inside
-// pluginsDir before anything is deleted, so a corrupt manifest can't point removal
-// at an arbitrary path.
-func removePlugin(name, pluginsDir string) (dir string, inCheckout bool, err error) {
-	if pluginsDir == "" {
-		return "", false, fmt.Errorf("no plugins directory configured")
+// installedIDs maps every catalog ID that is already installed to its directory.
+func installedIDs(entries []registry.Entry) map[string]string {
+	dir := hooks.DefaultPluginsDir()
+	plugins, _ := hooks.LoadPlugins(dir)
+	out := map[string]string{}
+	for _, e := range entries {
+		if installedDir, ok := hooks.IsInstalled(dir, e.ID, plugins); ok {
+			out[e.ID] = installedDir
+		}
 	}
-	plugins, _ := hooks.LoadPlugins(pluginsDir)
-	var match *hooks.Plugin
+	return out
+}
+
+func searchCatalog(ctx context.Context, query string, refresh bool) error {
+	entries := loadCatalog(ctx, refresh)
+	hits := registry.Search(entries, query)
+	if len(hits) == 0 {
+		fmt.Printf("No plugins match %q.\n", query)
+		if guesses := registry.DidYouMean(entries, query, 3); len(guesses) > 0 {
+			fmt.Printf("Close by: %s\n", strings.Join(guesses, ", "))
+		}
+		fmt.Println("Run `ty plugins browse` to see the whole catalog.")
+		return nil
+	}
+	fmt.Printf("%d of %d plugins match %q:\n\n", len(hits), len(entries), query)
+	printEntryTable(hits, installedIDs(entries))
+	fmt.Println("\nInstall one with: ty plugins add <id>   ·   details: ty plugins info <id>")
+	return nil
+}
+
+func browseCatalog(ctx context.Context, refresh bool) error {
+	entries := loadCatalog(ctx, refresh)
+	if len(entries) == 0 {
+		fmt.Println("The plugin catalog is empty.")
+		return nil
+	}
+	installed := installedIDs(entries)
+	fmt.Printf("%d plugins available (%d installed):\n", len(entries), len(installed))
+	// Column widths measured across the WHOLE catalog, so the category groups line
+	// up with each other instead of each finding its own alignment.
+	cols := entryColumns(entries)
+	for _, category := range append(registry.Categories(entries), "") {
+		var group []registry.Entry
+		for _, e := range entries {
+			if e.Category == category {
+				group = append(group, e)
+			}
+		}
+		if len(group) == 0 {
+			continue
+		}
+		label := category
+		if label == "" {
+			label = "other"
+		}
+		fmt.Printf("\n%s\n", strings.ToUpper(label))
+		printEntryRows(group, installed, cols)
+	}
+	fmt.Println("\nInstall one with: ty plugins add <id>   ·   details: ty plugins info <id>")
+	return nil
+}
+
+// entryCols are the measured widths of the id and name columns.
+type entryCols struct{ id, name int }
+
+func entryColumns(entries []registry.Entry) entryCols {
+	var cols entryCols
+	for _, e := range entries {
+		cols.id = max(cols.id, len([]rune(e.ID)))
+		cols.name = max(cols.name, len([]rune(e.DisplayName())))
+	}
+	return cols
+}
+
+// printEntryTable renders entries as an aligned id/name/description table with an
+// installed marker.
+func printEntryTable(entries []registry.Entry, installed map[string]string) {
+	printEntryRows(entries, installed, entryColumns(entries))
+}
+
+func printEntryRows(entries []registry.Entry, installed map[string]string, cols entryCols) {
+	for _, e := range entries {
+		mark := " "
+		if _, ok := installed[e.ID]; ok {
+			mark = "✓"
+		}
+		fmt.Printf("  %s %-*s  %-*s  %s\n", mark,
+			cols.id, e.ID, cols.name, e.DisplayName(), firstSentence(e.Description, 72))
+	}
+}
+
+// firstSentence trims a description to one readable line for table output.
+func firstSentence(s string, limit int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if i := strings.Index(s, ". "); i > 0 && i < limit {
+		return s[:i+1]
+	}
+	if len(s) > limit {
+		return strings.TrimSpace(s[:limit-1]) + "…"
+	}
+	return s
+}
+
+func pluginInfo(ctx context.Context, id string) error {
+	entries := loadCatalog(ctx, false)
+	dir := hooks.DefaultPluginsDir()
+	plugins, _ := hooks.LoadPlugins(dir)
+
+	entry, inCatalog := registry.Find(entries, id)
+	var local *hooks.Plugin
 	for i := range plugins {
-		if plugins[i].Name == name || filepath.Base(plugins[i].Dir) == name {
-			match = &plugins[i]
+		if strings.EqualFold(plugins[i].Name, id) || strings.EqualFold(filepath.Base(plugins[i].Dir), id) {
+			local = &plugins[i]
 			break
 		}
 	}
-	if match == nil {
-		return "", false, fmt.Errorf("no plugin named %q installed in %s; run `ty plugins list` to see what's installed", name, pluginsDir)
+	if !inCatalog && local == nil {
+		if guesses := registry.DidYouMean(entries, id, 3); len(guesses) > 0 {
+			return fmt.Errorf("no plugin %q, installed or in the catalog — did you mean %s?", id, strings.Join(guesses, ", "))
+		}
+		return fmt.Errorf("no plugin %q, installed or in the catalog (run `ty plugins browse`)", id)
 	}
 
-	dir = match.Dir
-	// Safety: refuse to delete anything that is not strictly under pluginsDir.
-	rel, relErr := filepath.Rel(pluginsDir, dir)
-	if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", false, fmt.Errorf("refusing to remove %s: not inside plugins dir %s", dir, pluginsDir)
-	}
-
-	inCheckout = insideCollectionCheckout(dir, pluginsDir)
-	if err := os.RemoveAll(dir); err != nil {
-		return "", false, fmt.Errorf("remove %s: %w", dir, err)
-	}
-	return dir, inCheckout, nil
-}
-
-// insideCollectionCheckout reports whether dir is a plugin nested inside a shared
-// git checkout (a collection repo cloned by `plugins add`), rather than being its
-// own checkout. It's true when dir itself is not a git checkout but an ancestor
-// strictly between it and pluginsDir is.
-func insideCollectionCheckout(dir, pluginsDir string) bool {
-	if isGitCheckout(dir) {
-		return false
-	}
-	for parent := filepath.Dir(dir); len(parent) > len(pluginsDir); parent = filepath.Dir(parent) {
-		if isGitCheckout(parent) {
-			return true
+	if inCatalog {
+		fmt.Printf("%s (%s)\n", entry.DisplayName(), entry.ID)
+		fmt.Printf("  %s\n\n", strings.Join(strings.Fields(entry.Description), " "))
+		if entry.Author != "" {
+			fmt.Printf("  author     %s\n", entry.Author)
+		}
+		if entry.Category != "" {
+			fmt.Printf("  category   %s\n", entry.Category)
+		}
+		if len(entry.Tags) > 0 {
+			fmt.Printf("  tags       %s\n", strings.Join(entry.Tags, ", "))
+		}
+		if len(entry.Provides) > 0 {
+			fmt.Printf("  provides   %s\n", strings.Join(entry.Provides, ", "))
+		}
+		src := entry.Source
+		if entry.Subdir != "" {
+			src += " (" + entry.Subdir + ")"
+		}
+		fmt.Printf("  source     %s\n", src)
+		if entry.Homepage != "" {
+			fmt.Printf("  homepage   %s\n", entry.Homepage)
+		}
+		for i, r := range entry.Requires {
+			label := "requires"
+			if i > 0 {
+				label = "        "
+			}
+			fmt.Printf("  %s   %s\n", label, r)
 		}
 	}
-	return false
-}
 
-// derivePluginName turns a git URL or path into a plugin directory name.
-func derivePluginName(source string) string {
-	s := strings.TrimSuffix(strings.TrimRight(source, "/"), ".git")
-	return filepath.Base(s)
-}
-
-func isGitCheckout(dir string) bool { return dirExists(filepath.Join(dir, ".git")) }
-
-func dirExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
-}
-
-func runGit(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
+	if local == nil {
+		fmt.Printf("\nNot installed. Install it with: ty plugins add %s\n", entry.ID)
+		return nil
 	}
-	return cmd.CombinedOutput()
+	fmt.Printf("\nInstalled at %s\n", local.Dir)
+	printPluginProvides(*local, "  ")
+	if src, ok := hooks.LoadSources(dir)[filepath.Base(local.Dir)]; ok {
+		fmt.Printf("  from       %s", src.Source)
+		if src.Subdir != "" {
+			fmt.Printf(" (%s)", src.Subdir)
+		}
+		if src.InstalledAt != "" {
+			fmt.Printf(" · %s", src.InstalledAt)
+		}
+		fmt.Println()
+	}
+	return nil
 }
 
-// installedPluginNames returns the names of every plugin LoadPlugins discovers at
-// or under target — one for a single-plugin repo, several for a collection repo.
-// Matched by Dir prefix since a plugin's manifest name may differ from its dir.
-func installedPluginNames(pluginsDir, target string) []string {
-	plugins, _ := hooks.LoadPlugins(pluginsDir)
-	var names []string
+func addPluginCmd(ctx context.Context, arg, name, subdir string) error {
+	entries := loadCatalog(ctx, false)
+	req, err := hooks.Resolve(ctx, arg, entries)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		req.Name = name
+	}
+	if subdir != "" {
+		req.Subdir = subdir
+	}
+	fmt.Printf("Installing from %s…\n", req.Source)
+	res, err := hooks.Install(ctx, hooks.DefaultPluginsDir(), req)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s %d plugin(s): %s\n", res.Verb(), len(res.Plugins), strings.Join(res.Plugins, ", "))
+	printPostInstallHints(res)
+	return nil
+}
+
+// printPostInstallHints tells the user what they can now *do*, which is the step
+// an install that just says "Installed" leaves them to guess at. With several
+// plugins in one repo each gets its own heading, so the commands are attributable.
+func printPostInstallHints(res hooks.InstallResult) {
+	plugins, _ := hooks.LoadPlugins(hooks.DefaultPluginsDir())
+	multi := len(res.Plugins) > 1
+	for _, name := range res.Plugins {
+		for _, p := range plugins {
+			if p.Name != name {
+				continue
+			}
+			indent := "  "
+			if multi {
+				fmt.Printf("  %s\n", p.Name)
+				indent = "    "
+			}
+			printPluginProvides(p, indent)
+		}
+	}
+}
+
+// printPluginProvides lists a plugin's capabilities and how to invoke each,
+// indented by prefix so it sits correctly under either a bare heading or a
+// plugin's own indented entry in `plugins list`.
+func printPluginProvides(p hooks.Plugin, prefix string) {
+	events := make([]string, 0, len(p.Hooks))
+	for e := range p.Hooks {
+		events = append(events, e)
+	}
+	sort.Strings(events)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	for _, e := range events {
+		fmt.Fprintf(tw, "%shook\t%s\t→ %s\n", prefix, e, p.Hooks[e])
+	}
+	for _, a := range p.Actions {
+		fmt.Fprintf(tw, "%saction\t%s\tty plugins run %s %s\n", prefix, a.DisplayLabel(), p.Name, a.ID)
+	}
+	for _, w := range p.Workflows {
+		fmt.Fprintf(tw, "%sworkflow\t%s\tty pipeline -d %s \"<goal>\"\n", prefix, w, w)
+	}
+	for _, s := range p.Services {
+		fmt.Fprintf(tw, "%sservice\t%s\tsupervised while the daemon runs\n", prefix, s.Name)
+	}
+	for _, r := range p.Routines {
+		fmt.Fprintf(tw, "%sroutine\t%s\tty run %s\n", prefix, r, r)
+	}
+	_ = tw.Flush()
+}
+
+func updateOnePlugin(ctx context.Context, name string) error {
+	res, err := hooks.Update(ctx, hooks.DefaultPluginsDir(), name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Updated %s (%s).\n", name, strings.Join(res.Plugins, ", "))
+	return nil
+}
+
+func updateAllPlugins(ctx context.Context) error {
+	dir := hooks.DefaultPluginsDir()
+	plugins, _ := hooks.LoadPlugins(dir)
+	if len(plugins) == 0 {
+		fmt.Printf("No plugins installed in %s.\n", dir)
+		return nil
+	}
+	// Update by install root, not by manifest name: one `plugins add` of a
+	// collection repo is one checkout holding many plugins, and pulling it once
+	// updates all of them.
+	seen := map[string]bool{}
+	var failures int
 	for _, p := range plugins {
-		if p.Dir == target || strings.HasPrefix(p.Dir, target+string(os.PathSeparator)) {
-			names = append(names, p.Name)
+		root, _, ok := hooks.InstallRoot(dir, p.Dir)
+		if !ok {
+			root = p.Dir
 		}
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		res, err := hooks.Update(ctx, dir, p.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %s: %v\n", filepath.Base(root), err)
+			failures++
+			continue
+		}
+		fmt.Printf("  %s updated (%s)\n", filepath.Base(root), strings.Join(res.Plugins, ", "))
 	}
-	sort.Strings(names)
-	return names
+	if failures > 0 {
+		return fmt.Errorf("%d plugin(s) could not be updated", failures)
+	}
+	return nil
 }
 
 func runPluginAction(ctx context.Context, pluginName, actionID string, taskID int64) error {
@@ -305,7 +535,8 @@ func listPlugins() {
 
 	if len(plugins) == 0 {
 		fmt.Printf("No plugins installed in %s\n", dir)
-		fmt.Println("Add one by creating <name>/plugin.yaml there. See docs/plugins.md.")
+		fmt.Println("Find one with `ty plugins browse` or `ty plugins search <term>`, then " +
+			"`ty plugins add <id>`. In the TUI, press m.")
 		return
 	}
 
@@ -319,26 +550,8 @@ func listPlugins() {
 		if p.Description != "" {
 			fmt.Printf("    %s\n", p.Description)
 		}
-		events := make([]string, 0, len(p.Hooks))
-		for e := range p.Hooks {
-			events = append(events, e)
-		}
-		sort.Strings(events)
-		for _, e := range events {
-			fmt.Printf("    hook   %-18s → %s\n", e, p.Hooks[e])
-		}
-		for _, a := range p.Actions {
-			fmt.Printf("    action %-18s → %s  (ty plugins run %s %s)\n", a.DisplayLabel(), a.Command, p.Name, a.ID)
-		}
-		for _, w := range p.Workflows {
-			fmt.Printf("    workflow %-16s (ty pipeline -d %s \"<goal>\")\n", w, w)
-		}
-		for _, s := range p.Services {
-			fmt.Printf("    service  %-16s → %s  (supervised while the daemon runs)\n", s.Name, s.Command)
-		}
-		for _, r := range p.Routines {
-			fmt.Printf("    routine  %-16s (ty run %s)\n", r, r)
-		}
+		printPluginProvides(p, "    ")
 		fmt.Println()
 	}
+	fmt.Println("More: ty plugins browse · ty plugins search <term> · ty plugins update")
 }

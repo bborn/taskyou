@@ -60,6 +60,7 @@ const (
 	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 	ViewRoutines             // global routines fleet-health view
 	ViewActionPicker         // modal list of plugin actions for the current task
+	ViewPluginBrowser        // searchable plugin catalog: browse, install, remove
 	ViewRepoClone            // clone a pasted repo URL, then continue as a folder
 	ViewSavedViews           // modal list of saved filter views
 	ViewListOptions          // modal for the list's grouping and sort
@@ -83,6 +84,7 @@ type KeyMap struct {
 	Refresh            key.Binding
 	Settings           key.Binding
 	Routines           key.Binding
+	Plugins            key.Binding
 	Help               key.Binding
 	Quit               key.Binding
 	ChangeStatus       key.Binding
@@ -142,7 +144,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.ToggleListView, k.SavedViews, k.ListOptions},
-		{k.CommandPalette, k.Settings, k.Routines},
+		{k.CommandPalette, k.Settings, k.Routines, k.Plugins},
 		{k.ChangeStatus, k.PlaceTask, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -214,6 +216,10 @@ func DefaultKeyMap() KeyMap {
 		Routines: key.NewBinding(
 			key.WithKeys("u"),
 			key.WithHelp("u", "routines"),
+		),
+		Plugins: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", "plugins"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -387,6 +393,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.Refresh = applyBinding(km.Refresh, cfg.Refresh)
 	km.Settings = applyBinding(km.Settings, cfg.Settings)
 	km.Routines = applyBinding(km.Routines, cfg.Routines)
+	km.Plugins = applyBinding(km.Plugins, cfg.Plugins)
 	km.Help = applyBinding(km.Help, cfg.Help)
 	km.Quit = applyBinding(km.Quit, cfg.Quit)
 	km.ChangeStatus = applyBinding(km.ChangeStatus, cfg.ChangeStatus)
@@ -558,6 +565,8 @@ type AppModel struct {
 	// Settings view state
 	settingsView *SettingsModel
 	routinesView *RoutinesModel
+	// pluginBrowser is the searchable plugin catalog (m).
+	pluginBrowser *PluginBrowserModel
 
 	// Retry view state
 	retryView *RetryModel
@@ -976,6 +985,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewRoutines && m.routinesView != nil {
 			return m.updateRoutines(msg)
 		}
+		if m.currentView == ViewPluginBrowser && m.pluginBrowser != nil {
+			return m.updatePluginBrowser(msg)
+		}
 		if m.currentView == ViewRetry && m.retryView != nil {
 			return m.updateRetry(msg)
 		}
@@ -1000,6 +1012,29 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case pluginInstalledMsg:
+		// Only reaches here when the browser was closed mid-install (while it is
+		// open the message is routed to it). The clone still finished, so say so
+		// on the board rather than dropping the outcome on the floor.
+		m.hasWorkflows = hasInstalledWorkflows()
+		if msg.err != nil {
+			m.notification = IconBlocked() + " " + installFailureText(msg.id, msg.err)
+		} else {
+			m.notification = IconDone() + " " + installSuccessText(msg.result)
+		}
+		m.notifyUntil = time.Now().Add(8 * time.Second)
+		return m, nil
+
+	case pluginRemovedMsg:
+		m.hasWorkflows = hasInstalledWorkflows()
+		if msg.err != nil {
+			m.notification = IconBlocked() + " " + msg.err.Error()
+		} else {
+			m.notification = IconDone() + " Removed " + msg.name + "."
+		}
+		m.notifyUntil = time.Now().Add(6 * time.Second)
+		return m, nil
+
 	case tea.KeyMsg:
 		// Global keys
 		if key.Matches(msg, m.keys.Quit) {
@@ -1043,6 +1078,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.welcomeView.missingWorkflows {
 					return m, m.startStarterPackInstall()
 				}
+			case "m":
+				// Browsing the catalog is the alternative to taking the starter
+				// pack sight unseen, so it has to be reachable from here too —
+				// the Welcome fork is where a new user learns what ty can do.
+				return m.openPluginBrowser("")
 			case "esc", "ctrl+c":
 				m.welcomeView = nil
 				m.currentView = ViewDashboard
@@ -1924,6 +1964,10 @@ func (m *AppModel) View() string {
 		if m.routinesView != nil {
 			return m.routinesView.View()
 		}
+	case ViewPluginBrowser:
+		if m.pluginBrowser != nil {
+			return m.pluginBrowser.View()
+		}
 	case ViewRetry:
 		if m.retryView != nil {
 			return m.retryView.View()
@@ -2467,6 +2511,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.previousView = m.currentView
 		m.currentView = ViewRoutines
 		return m, m.routinesView.Init()
+
+	case key.Matches(msg, m.keys.Plugins):
+		return m.openPluginBrowser("")
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
@@ -4461,6 +4508,40 @@ func (m *AppModel) updateRoutines(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.routinesView.done {
 		m.currentView = m.previousView
 		m.routinesView = nil
+		return m, nil
+	}
+	return m, cmd
+}
+
+// openPluginBrowser switches to the plugin catalog, optionally pre-filled with a
+// search query. It is the one entry point, so the key, the palette and the
+// first-run nudge all land in the same place.
+func (m *AppModel) openPluginBrowser(query string) (tea.Model, tea.Cmd) {
+	m.pluginBrowser = NewPluginBrowserModel(m.width, m.height)
+	if query != "" {
+		m.pluginBrowser.SetQuery(query)
+	}
+	if m.currentView != ViewPluginBrowser {
+		m.previousView = m.currentView
+	}
+	m.currentView = ViewPluginBrowser
+	return m, m.pluginBrowser.Init()
+}
+
+func (m *AppModel) updatePluginBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.pluginBrowser == nil {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.pluginBrowser, cmd = m.pluginBrowser.Update(msg)
+	if m.pluginBrowser.Done() {
+		// Installing a plugin can be what makes `ty pipeline` do anything at all,
+		// so re-check on the way out: the board's readiness copy and the nudge
+		// both hang off whether any workflow now resolves.
+		m.hasWorkflows = hasInstalledWorkflows()
+		m.showPluginNudge = false
+		m.currentView = m.previousView
+		m.pluginBrowser = nil
 		return m, nil
 	}
 	return m, cmd

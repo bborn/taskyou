@@ -245,8 +245,9 @@ func (e *Executor) recordPlacement(task *db.Task, target, reason, workDir string
 	e.dropLocalProfileForRemote(task)
 }
 
-// isRemotePlacement reports whether a placement target names another machine.
-func isRemotePlacement(target string) bool {
+// IsRemotePlacement reports whether a placement target names another machine.
+// "" and "local" are this machine; anything else is an ssh destination.
+func IsRemotePlacement(target string) bool {
 	t := strings.TrimSpace(target)
 	return t != "" && t != "local"
 }
@@ -260,7 +261,7 @@ func isRemotePlacement(target string) bool {
 // a retry then reuses the recorded value forever. The host has its own login;
 // the right profile there is its default, which is what an empty value selects.
 func (e *Executor) dropLocalProfileForRemote(task *db.Task) {
-	if task == nil || !isRemotePlacement(task.PlacementTarget) {
+	if task == nil || !IsRemotePlacement(task.PlacementTarget) {
 		return
 	}
 	if strings.TrimSpace(task.ClaudeConfigDir) == "" {
