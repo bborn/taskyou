@@ -207,6 +207,7 @@ func remoteInputFixture(t *testing.T, database *db.DB, task *db.Task) string {
 printf '%s\n' "$*" >> "$TY_TEST_REMOTE_COMMANDS"
 case "$*" in
   *list-panes*) echo %91 ;;
+  *capture-pane*) echo "remote pane says hello" ;;
   *set-buffer*|*paste-buffer*|*send-keys*) : ;;
   *) exit 1 ;;
 esac
@@ -217,4 +218,34 @@ esac
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TY_TEST_REMOTE_COMMANDS", commandsPath)
 	return commandsPath
+}
+
+// `ty output`'s web twin has the same blind spot: a remotely placed task's pane
+// is on that host's tmux server, and capturing it here only ever came back
+// empty — which the GUI showed as a task producing nothing.
+func TestRemoteTaskOutputReadsTheRemotePane(t *testing.T) {
+	srv, database, local := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "remote output", Status: db.StatusProcessing})
+	remoteInputFixture(t, database, task)
+
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/tasks/%d/output", task.ID), nil)
+	req.SetPathValue("id", fmt.Sprint(task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTaskOutput(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("output: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.Output, "remote pane says hello") {
+		t.Fatalf("output did not come from the remote pane: %q", body.Output)
+	}
+	if len(local.snapshot()) != 0 {
+		t.Fatalf("remote output touched local tmux: %v", local.snapshot())
+	}
 }

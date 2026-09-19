@@ -2618,7 +2618,8 @@ Examples:
 		Long: `Send input directly to a running task's executor via tmux.
 
 This allows you to interact with a blocked or running task without going through
-the retry mechanism. The input is sent directly to the executor's tmux pane.
+the retry mechanism. The input is sent directly to the executor's tmux pane —
+on this machine, or over ssh to the host the task was placed on.
 
 By default the message is submitted (Enter is pressed after the text), so the
 agent actually receives it. Pass --no-submit to only drop the text in the input
@@ -2690,48 +2691,26 @@ Examples:
 				os.Exit(1)
 			}
 
-			// Everything below goes through the one delivery path (see
-			// internal/agentsend): the pane is found by the task's tmux tag rather
-			// than by the pane id on the row, which tmux may since have handed to
-			// another task's pane.
-			sender := agentsend.New(&execCommandRunner{}, database)
-
-			// If --key specified, send that first.
-			if specialKey != "" {
-				if err := sender.SendKeys(taskID, specialKey); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending key: "+err.Error()))
-					os.Exit(1)
-				}
+			// Delivery goes through the one shared path (see internal/agentsend)
+			// on whichever tmux server the task was placed on — this machine's
+			// agent server, or the host's over ssh. The pane is found by the
+			// task's tmux tag rather than by the pane id on the row, which tmux
+			// may since have handed to another task's pane.
+			err = runTaskInput(cmd.Context(), database, task, inputOptions{
+				message:   message,
+				key:       specialKey,
+				justEnter: justEnter,
+				noSubmit:  noSubmit,
+				force:     force,
+			}, os.Stdout)
+			if errors.Is(err, agentsend.ErrBusy) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(err.Error()+
+					"\nWait for it to finish, or pass --force to interrupt it."))
+				os.Exit(1)
 			}
-
-			submit := shouldSubmitInput(message, justEnter, noSubmit)
-			if message != "" {
-				err := sender.Send(agentsend.Prompt{
-					TaskID: taskID,
-					Text:   message,
-					Force:  force,
-					Submit: submit,
-				})
-				if errors.Is(err, agentsend.ErrBusy) {
-					fmt.Fprintln(os.Stderr, errorStyle.Render(err.Error()+
-						"\nWait for it to finish, or pass --force to interrupt it."))
-					os.Exit(1)
-				}
-				if err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending input: "+err.Error()))
-					os.Exit(1)
-				}
-			} else if submit {
-				if err := sender.SendKeys(taskID, "Enter"); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending Enter: "+err.Error()))
-					os.Exit(1)
-				}
-			}
-
-			if message != "" && !submit {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d (not submitted)", taskID)))
-			} else {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error sending input: "+err.Error()))
+				os.Exit(1)
 			}
 		},
 	}
@@ -2751,7 +2730,8 @@ Examples:
 		ValidArgsFunction: completeTaskIDs,
 		Long: `Capture recent output from a running task's executor pane.
 
-This allows you to see what the executor has outputted without attaching to the tmux pane.
+This allows you to see what the executor has outputted without attaching to the
+tmux pane, whether the task is running here or on the host it was placed on.
 
 Examples:
   task output 42
@@ -2788,24 +2768,14 @@ Examples:
 				os.Exit(1)
 			}
 
-			// Get the pane ID
-			paneID := task.ClaudePaneID
-			if paneID == "" {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d has no executor pane (not running?)", taskID)))
-				fmt.Fprintln(os.Stderr, dimStyle.Render("Tip: use 'task show' to see what the task accomplished"))
-				os.Exit(1)
-			}
-
-			// Capture pane content
-			captureCmd := agentTmuxCmd("capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines))
-			output, err := captureCmd.Output()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Executor pane no longer exists for task #%d", taskID)))
+			// The pane is read on whichever tmux server the task was placed on:
+			// a remotely placed task's window is on that host, and looking for it
+			// here only ever reported a live agent as missing.
+			if err := runTaskOutput(cmd.Context(), task, lines, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(err.Error()))
 				fmt.Fprintln(os.Stderr, dimStyle.Render("Tip: use 'task show' to see what the task accomplished, or 'task show --logs' for full activity"))
 				os.Exit(1)
 			}
-
-			fmt.Print(string(output))
 		},
 	}
 	outputCmd.Flags().IntP("lines", "n", 50, "Number of lines to capture")

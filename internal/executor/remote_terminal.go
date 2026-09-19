@@ -23,7 +23,7 @@ var ErrRemoteTerminalEnded = errors.New("no remote executor session running for 
 // InspectRemoteTerminal discovers the live agent and optionally ensures a
 // persistent workdir shell. Both the TUI and HTTP terminal use this operation.
 func InspectRemoteTerminal(ctx context.Context, task *db.Task, workdir string, ensureShell bool) (RemoteTerminal, error) {
-	if task == nil || !isRemotePlacement(task.PlacementTarget) || task.DaemonSession == "" {
+	if task == nil || !IsRemotePlacement(task.PlacementTarget) || task.DaemonSession == "" {
 		return RemoteTerminal{}, ErrRemoteTerminalEnded
 	}
 	ctx = WithRunner(ctx, RemoteRunner{Host: task.PlacementTarget})

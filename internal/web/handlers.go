@@ -609,7 +609,7 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 	// by the code that owns that connection rather than by a tag lookup here —
 	// but the delivery itself is the same one every other surface uses, so a
 	// remote agent is no more likely to be typed over mid-turn than a local one.
-	if task.PlacementTarget != "" && task.PlacementTarget != "local" {
+	if executor.IsRemotePlacement(task.PlacementTarget) {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		info := s.remoteTerminalInfo(ctx, task, false)
 		cancel()
@@ -618,7 +618,8 @@ func (s *Server) handleTaskInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if info.ClaudePaneID == "" {
-			jsonErr(w, "task has no remote executor pane", http.StatusConflict)
+			jsonErr(w, "task #"+strconv.FormatInt(task.ID, 10)+" has no live agent pane on "+
+				task.PlacementTarget+" in tmux session "+task.DaemonSession, http.StatusConflict)
 			return
 		}
 		if len(req.AttachmentIDs) > 0 {
@@ -754,30 +755,53 @@ func (s *Server) handleTaskOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.runner == nil {
-		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
-		return
-	}
-
-	// Read from the pane tmux says is this task's agent. The stored id is the
-	// fallback for windows made before panes were tagged; on its own it can name
-	// another task's pane and show its output as this task's.
-	paneID, err := s.agentSender().AgentPane(task.ID)
-	if err != nil {
-		paneID = task.ClaudePaneID
-	}
-	if paneID == "" {
-		jsonErr(w, "task has no executor pane", http.StatusBadRequest)
-		return
-	}
-
 	lines := "200"
 	if v := r.URL.Query().Get("lines"); v != "" {
 		lines = v
 	}
 
+	// A remotely placed task's pane is on that host's tmux server. Capturing it
+	// here only ever came back empty, which the GUI showed as a task with no
+	// output rather than one running somewhere else.
+	runner, paneID := s.runner, ""
+	if executor.IsRemotePlacement(task.PlacementTarget) {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		info := s.remoteTerminalInfo(ctx, task, false)
+		cancel()
+		if info.Error != "" {
+			jsonErr(w, info.Error, http.StatusBadGateway)
+			return
+		}
+		if info.ClaudePaneID == "" {
+			jsonErr(w, "task has no executor pane on "+task.PlacementTarget, http.StatusBadRequest)
+			return
+		}
+		paneID = info.ClaudePaneID
+		runner = terminalRunner{paneTerminal{ctx: r.Context(), runner: executor.RemoteRunner{Host: info.RemoteHost}}}
+	}
+
+	if runner == nil {
+		jsonErr(w, "command runner not configured", http.StatusInternalServerError)
+		return
+	}
+
+	if paneID == "" {
+		// Read from the pane tmux says is this task's agent. The stored id is the
+		// fallback for windows made before panes were tagged; on its own it can name
+		// another task's pane and show its output as this task's.
+		var err error
+		paneID, err = s.agentSender().AgentPane(task.ID)
+		if err != nil {
+			paneID = task.ClaudePaneID
+		}
+		if paneID == "" {
+			jsonErr(w, "task has no executor pane", http.StatusBadRequest)
+			return
+		}
+	}
+
 	// -J joins wrapped lines so clients can reflow to their own width.
-	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-J", "-S", "-"+lines)
+	output, err := runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-J", "-S", "-"+lines)
 	if err != nil {
 		jsonErr(w, "executor pane not available", http.StatusGone)
 		return

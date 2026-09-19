@@ -88,8 +88,8 @@ func TestIsRemotePlacement(t *testing.T) {
 		{"", false}, {"local", false}, {" local ", false},
 		{"mona", true}, {"ol-agents", true},
 	} {
-		if got := isRemotePlacement(tt.target); got != tt.want {
-			t.Errorf("isRemotePlacement(%q) = %v, want %v", tt.target, got, tt.want)
+		if got := IsRemotePlacement(tt.target); got != tt.want {
+			t.Errorf("IsRemotePlacement(%q) = %v, want %v", tt.target, got, tt.want)
 		}
 	}
 }
