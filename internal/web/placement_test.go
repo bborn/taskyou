@@ -57,3 +57,43 @@ func TestPlacementAPIRejectsUnsupportedExecutorWithoutMoving(t *testing.T) {
 		t.Fatal("unsupported executor was placed")
 	}
 }
+
+// A browser and a desktop app can only hand the OS a URL, so the one thing they
+// cannot do with a placed task's worktree path is open it — and the path alone
+// invites them to open this machine's copy of it instead. The placement payload
+// carries the URL that opens the real one over ssh.
+func TestPlacementAPICarriesAURLThatOpensTheRemoteWorktree(t *testing.T) {
+	s, d, _ := setupServer(t)
+	task := &db.Task{Title: "Ship remote worker", Executor: "claude"}
+	if err := d.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTaskPlacementDecision(task.ID, "ol-agents", "plugin", "/home/olgm/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTaskRemoteWorktree(task.ID, "/home/olgm/app/.task-worktrees/1-ship", "task/1-ship"); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (target, uri string) {
+		w := httptest.NewRecorder()
+		s.srv.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/tasks/1/placement", nil))
+		var got struct {
+			Target  string `json:"target"`
+			CodeURI string `json:"code_uri"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Target, got.CodeURI
+	}
+	if _, uri := read(); uri != "vscode://vscode-remote/ssh-remote+ol-agents/home/olgm/app/.task-worktrees/1-ship" {
+		t.Errorf("code_uri = %q", uri)
+	}
+	// A task on this machine has nothing to open remotely, and must not pretend to.
+	if err := d.SetTaskPlacementDecision(task.ID, "local", "pinned", ""); err != nil {
+		t.Fatal(err)
+	}
+	if target, uri := read(); uri != "" {
+		t.Errorf("a %s task offered a remote editor URI: %q", target, uri)
+	}
+}

@@ -11,7 +11,8 @@ import {
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
 import type { ChatMessage, Dependencies, LogLine, Task } from "../api/types";
-import { openExternal, openInEditor } from "../tauri";
+import { openExternal } from "../tauri";
+import { hasTaskCode, openTaskCode, runsOnAnotherHost } from "../lib/code";
 import { store, useAppState } from "../store";
 import { PlacementPanel } from "./PlacementPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
@@ -376,12 +377,14 @@ export function DetailView({ taskId }: { taskId: number }) {
         <Button variant="outline" size="sm" onClick={() => store.setForm({ kind: "edit", taskId: task.id })}>
           Edit
         </Button>
-        {task.worktree_path && !isMobile && (
+        {hasTaskCode(task) && !isMobile && (
           <Button
             variant="outline"
             size="sm"
-            title="Open worktree in editor (o)"
-            onClick={() => void openInEditor(task.worktree_path!)}
+            title={runsOnAnotherHost(task)
+              ? `Open worktree on ${task.placement_target} in editor (o)`
+              : "Open worktree in editor (o)"}
+            onClick={() => void openTaskCode(task)}
           >
             <Code2 className="size-3.5" /> Editor
           </Button>

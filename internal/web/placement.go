@@ -29,7 +29,13 @@ func (s *Server) handleGetPlacement(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, map[string]any{"target": placement.Target, "workdir": placement.WorkDir, "reason": placement.Reason, "decided": placement.Decided, "health": health, "remote_worktree": remoteDir})
+	// code_uri opens the remote worktree in the viewer's editor. A browser and a
+	// desktop app can only hand the OS a URL, and the path on its own is a path
+	// this machine very likely also has — with a different checkout in it.
+	jsonOK(w, map[string]any{"target": placement.Target, "workdir": placement.WorkDir,
+		"reason": placement.Reason, "decided": placement.Decided, "health": health,
+		"remote_worktree": remoteDir,
+		"code_uri":        executor.RemoteCodeURI(executor.CodeLocation{Host: placement.Target, Path: remoteDir})})
 }
 
 func (s *Server) handleSetPlacement(w http.ResponseWriter, r *http.Request) {

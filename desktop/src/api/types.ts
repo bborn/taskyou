@@ -201,6 +201,9 @@ export interface Placement {
  target: string;
  workdir: string;
  remote_worktree: string;
+ // URL that opens remote_worktree in the viewer's editor over ssh; "" when the
+ // task runs on this machine.
+ code_uri: string;
  reason: string;
  decided: boolean;
  health: { state: string; last_seen?: string; problem?: string };

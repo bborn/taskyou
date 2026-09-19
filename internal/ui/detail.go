@@ -352,6 +352,7 @@ type DetailModel struct {
 
 	// Server detection for task port
 	serverListening bool      // true when a server is listening on the task's port
+	serverURL       string    // where that server is, on this machine or on the task's host
 	lastServerCheck time.Time // throttle server port checks
 
 	// Related tasks from QMD semantic search
@@ -797,6 +798,7 @@ type detailRefreshMsg struct {
 	memoryChecked, serverChecked, shellChecked bool
 	memoryMB                                   int
 	serverListening, shellRunning              bool
+	serverURL                                  string
 	claudePaneID, shellPaneID                  string
 }
 
@@ -810,7 +812,7 @@ func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
 	worker := &DetailModel{task: &taskCopy, database: m.database, claudePaneID: m.claudePaneID, workdirPaneID: m.workdirPaneID, cachedWindowTarget: m.cachedWindowTarget}
 	result := detailRefreshMsg{owner: m, previousTask: previous, previousLogCount: m.lastLogCount, claudePaneID: m.claudePaneID, shellPaneID: m.workdirPaneID}
 	result.memoryChecked = time.Since(m.lastMemoryCheck) >= 3*time.Second
-	result.serverChecked = time.Since(m.lastServerCheck) >= 2*time.Second
+	result.serverChecked = time.Since(m.lastServerCheck) >= serverCheckInterval(m.task)
 	result.shellChecked = time.Since(m.lastShellProcessPoll) >= 2*time.Second
 	lastLogCount, logsLoading := m.lastLogCount, m.logsLoading
 	return func() tea.Msg {
@@ -826,7 +828,7 @@ func (m *DetailModel) refreshSnapshotCmd() tea.Cmd {
 		}
 		if result.serverChecked {
 			worker.checkServerListening()
-			result.serverListening = worker.serverListening
+			result.serverListening, result.serverURL = worker.serverListening, worker.serverURL
 		}
 		if result.shellChecked {
 			result.shellRunning = worker.HasRunningShellProcess()
@@ -856,7 +858,7 @@ func (m *DetailModel) handleRefreshSnapshot(msg detailRefreshMsg) tea.Cmd {
 		m.lastLogCount = msg.logCount
 	}
 	if msg.serverChecked && m.task.Port == msg.previousTask.Port {
-		m.serverListening = msg.serverListening
+		m.serverListening, m.serverURL = msg.serverListening, msg.serverURL
 		m.lastServerCheck = time.Now()
 	}
 	if msg.shellChecked && m.workdirPaneID == msg.shellPaneID {
@@ -1208,24 +1210,15 @@ func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
 	uiTmux(ctx, "set-option", "-p", "-t", paneID, viewerOption, "remote").Run()
 	log.Info("attachRemotePane: attached task %d to %s in pane %s", m.task.ID, loc.Host, paneID)
 
-	// Say where the pane goes and which prefix reaches its tmux, in the two places
-	// a user actually looks: the pane's own border title and the status bar.
-	uiTmux(ctx, "select-pane", "-t", paneID, "-T",
-		fmt.Sprintf("%s (remote) — prefix %s", loc.Host, executor.RemoteInnerPrefixHuman)).Run()
-	uiTmux(ctx, "set-option", "-t", m.uiSessionName, "status", "on").Run()
-	uiTmux(ctx, "set-option", "-t", m.uiSessionName, "status-right-length", "80").Run()
-	uiTmux(ctx, "set-option", "-t", m.uiSessionName, "status-right",
-		fmt.Sprintf(" remote pane: %s is its tmux prefix ", executor.RemoteInnerPrefixHuman)).Run()
-	uiTmux(ctx, "set-option", "-t", m.uiSessionName, "pane-border-lines", "heavy").Run()
-	uiTmux(ctx, "set-option", "-t", m.uiSessionName, "pane-border-indicators", "arrows").Run()
+	// The pane says where it goes, and nothing else: there is no second prefix to
+	// learn, because the view on the host takes none (see executor.remoteAttachChain).
+	uiTmux(ctx, "select-pane", "-t", paneID, "-T", loc.Host+" (remote)").Run()
 
-	// Give the TUI its configured share of the window and keep the keyboard,
-	// matching what a local join leaves behind.
-	uiTmux(ctx, "resize-pane", "-t", tuiPaneID, "-y", m.getDetailPaneHeight()).Run()
-	uiTmux(ctx, "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
-	uiTmux(ctx, "select-pane", "-t", tuiPaneID).Run()
 	m.remotePaneID = paneID // Cleanup must see it even before the result is delivered.
-	m.bindPaneNavigation(ctx)
+	// Exactly the chrome a local view leaves behind — status line, borders,
+	// dimming, the TUI's share of the window, pane navigation — so switching
+	// between a local and a placed task changes nothing but the pane's contents.
+	m.styleDetailLayout(ctx, tuiPaneID)
 	if !m.shellPaneHidden {
 		if err := m.showRemoteShellPane(ctx, loc); err != nil {
 			m.logExecutorFailure(err.Error())
@@ -2428,29 +2421,52 @@ func (m *DetailModel) HasRunningShellProcess() bool {
 	return command != "" && command != userShell
 }
 
-// checkServerListening checks if a server is listening on the task's port.
-// Uses lsof to check for listening processes on the port.
+// serverCheckInterval is how often the task's port is worth asking about. A
+// local check is an lsof; a placed task's is a round trip to its host.
+func serverCheckInterval(task *db.Task) time.Duration {
+	if task != nil && executor.IsRemotePlacement(task.PlacementTarget) {
+		return 10 * time.Second
+	}
+	return 2 * time.Second
+}
+
+// checkServerListening checks whether a server is listening on the task's port,
+// on the machine the task is running on, and records the URL that reaches it.
+//
+// Both halves have to follow the task. A placed task's server listens on its
+// host: asking lsof here answers about this machine, and the URL a user is shown
+// has to name the host rather than localhost. Runs in the refresh worker.
 func (m *DetailModel) checkServerListening() {
 	if m.task == nil || m.task.Port == 0 {
-		m.serverListening = false
+		m.serverListening, m.serverURL = false, ""
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	// Use lsof to check if any process is listening on the task's port
-	// -i :PORT checks for processes using that port
-	// -sTCP:LISTEN filters for listening sockets only
-	cmd := osExec.CommandContext(ctx, "lsof", "-i", fmt.Sprintf(":%d", m.task.Port), "-sTCP:LISTEN")
-	err := cmd.Run()
-	// lsof returns exit code 0 if it finds a match, non-zero otherwise
-	m.serverListening = err == nil
+	// An unreachable host would cost every refresh its turn, so a host with a
+	// known transport problem is not asked: no server line beats a sluggish view.
+	if executor.IsRemotePlacement(m.task.PlacementTarget) && m.database != nil {
+		if health, err := m.database.RemoteHostHealth(m.task.PlacementTarget); err == nil && health.Problem != "" {
+			m.serverListening, m.serverURL = false, ""
+			return
+		}
+	}
+	m.serverListening = executor.PortListening(context.Background(), m.task)
+	m.serverURL = ""
+	if m.serverListening {
+		m.serverURL = executor.TaskServerURL(context.Background(), m.task, config.DefaultServerURL)
+	}
 }
 
 // GetServerURL returns the server URL if a server is listening on the task's port.
 func (m *DetailModel) GetServerURL() string {
 	if !m.serverListening || m.task == nil || m.task.Port == 0 {
+		return ""
+	}
+	if m.serverURL != "" {
+		return m.serverURL
+	}
+	if executor.IsRemotePlacement(m.task.PlacementTarget) {
+		// The port is on the host, and ty could not work out an address for it.
+		// Naming localhost here would point the user at their own machine.
 		return ""
 	}
 	return fmt.Sprintf("http://localhost:%d", m.task.Port)

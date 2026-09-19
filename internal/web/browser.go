@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 // browserRelay bridges the task executor and the ty-chrome extension. The
@@ -197,7 +198,19 @@ func (s *Server) materializeBrowserResult(task *db.Task, action string, raw json
 	return result
 }
 
+// resolveTaskRoot is the directory on THIS machine to write a task's browser
+// artefacts into, and "" when there is none.
+//
+// A placed task's work is a directory on its host. Writing a screenshot to the
+// same path here does not fail — the coordinator usually has a checkout of the
+// same project, and for a moved task the old worktree is still there — it writes
+// into the wrong repository, where the agent that asked for it will never look.
+// Nothing is written instead: the payload then reaches the agent inline, which is
+// what it did before any of this materialising existed.
 func (s *Server) resolveTaskRoot(task *db.Task) string {
+	if executor.TaskCodeLocation(s.db, task).Remote() {
+		return ""
+	}
 	root := task.WorktreePath
 	if root == "" && task.Project != "" {
 		if p, _ := s.db.GetProjectByName(task.Project); p != nil {

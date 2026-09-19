@@ -9,6 +9,7 @@ import (
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // placementExecutor builds an Executor whose plugins come from a temp dir, so a
@@ -319,4 +320,48 @@ func TestRemoteSessionNamespaceIsPerCoordinator(t *testing.T) {
 			t.Fatalf("missing exact session lookup for %s: %s", session, commands)
 		}
 	}
+}
+
+// An agent lays its whole screen out for the size of the session it starts in.
+// A local one is given 200x50 for exactly that reason (tmuxctl.DefaultWidth);
+// a remote one used to be left at tmux's 80x24, so opening a placed task showed
+// a session written for a third of the width, reflowing as it attached.
+func TestRemoteAgentSessionsStartAtTheSameSizeAsLocalOnes(t *testing.T) {
+	calls := filepath.Join(t.TempDir(), "calls")
+	// A host with no daemon session yet: the lookup fails, everything else works.
+	stubSSH(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(calls)+
+		"\ncase \"$*\" in *has-session*) exit 1 ;; esac\nexit 0\n")
+	ctx := WithRunner(context.Background(), RemoteRunner{Host: "build"})
+	session, err := findOrCreateRemoteDaemonSession(ctx, "aaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := unquoteRemoteCommands(string(commands))
+	created := ""
+	for _, line := range strings.Split(ran, "\n") {
+		if strings.Contains(line, "new-session") {
+			created = line
+		}
+	}
+	if created == "" {
+		t.Fatalf("no session was created on the host:\n%s", ran)
+	}
+	if !strings.Contains(created, strings.Join(tmuxctl.DefaultSizeArgs(), " ")) {
+		t.Errorf("remote agents start at tmux's 80x24 instead of %s:\n%s", tmuxctl.DefaultSize(), created)
+	}
+	// Windows created later — every other task placed on this host — have to
+	// start at that size too, including in a session an older ty left behind.
+	if !strings.Contains(ran, "set-option -t "+session+" default-size "+tmuxctl.DefaultSize()) {
+		t.Errorf("session %s does not size the windows opened in it later:\n%s", session, ran)
+	}
+}
+
+// unquoteRemoteCommands undoes the per-word shell quoting a remote command
+// travels through, so a test can read the tmux line the host would run.
+func unquoteRemoteCommands(recorded string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(recorded, `'\''`, "'"), "'", "")
 }

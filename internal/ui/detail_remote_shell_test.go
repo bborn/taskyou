@@ -113,3 +113,59 @@ func TestPaneTaskNavigationDefersFocusUntilTaskIsLoaded(t *testing.T) {
 		})
 	}
 }
+
+// A placed task's pane is dressed exactly like a local task's view pane, and it
+// is dressed by the same code: status line, borders, dimming, the TUI's share of
+// the window. The first version of the remote pane hand-rolled a subset of that
+// chrome and spent its status line teaching a second tmux prefix, so moving
+// between a local and a remote task changed the furniture as well as the pane.
+func TestRemoteAttachDressesThePaneLikeALocalView(t *testing.T) {
+	app, _ := refreshTestModel(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "commands")
+	t.Setenv("TY_TEST_TMUX_LOG", logPath)
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$TY_TEST_TMUX_LOG"
+case "$1" in
+ display-message) case "$*" in *'#{session_name}'*) echo task-ui;; *'#{pane_id}'*) echo %0;; esac ;;
+ list-panes) echo %0 ;;
+ split-window) echo %90 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "test")
+	t.Setenv("TMUX_PANE", "%0")
+	m := &DetailModel{database: app.db, task: &db.Task{ID: 42, DaemonSession: "task-daemon-7", PlacementTarget: "mona"}, shellPaneHidden: true}
+	if id := m.attachRemotePane(executor.RemoteTaskLocation{Host: "mona"}); id != "%90" {
+		t.Fatalf("attach returned %q", id)
+	}
+	raw, _ := os.ReadFile(logPath)
+	commands := string(raw)
+
+	// The chrome a local view leaves behind (see styleDetailLayout).
+	for _, want := range []string{
+		"status-left",
+		"status-style",
+		"window-style",
+		"window-active-style",
+		"pane-border-lines heavy",
+	} {
+		if !strings.Contains(commands, want) {
+			t.Errorf("remote pane is not dressed like a local view: no %q in\n%s", want, commands)
+		}
+	}
+	// Copying inside the pane is copying inside a nested client: without the
+	// relay the selection stays in a paste buffer on the other machine.
+	if !strings.Contains(commands, "set-clipboard on") {
+		t.Errorf("remote pane cannot copy to the user's clipboard:\n%s", commands)
+	}
+	// Nothing teaches a second prefix, because the view no longer takes one.
+	if strings.Contains(strings.ToLower(commands), "prefix ctrl") ||
+		strings.Contains(commands, "prefix C-a") ||
+		strings.Contains(strings.ToLower(commands), "is its tmux prefix") {
+		t.Errorf("the remote pane still advertises a prefix of its own:\n%s", commands)
+	}
+}
