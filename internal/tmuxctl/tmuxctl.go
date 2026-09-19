@@ -272,8 +272,11 @@ func ViewAttachScript(view string) string {
 // machine the user is not sitting at. `on` relays it instead, one hop per
 // nesting level, out to the terminal.
 //
-// set-clipboard is a server option, so this is set once on the server ty opens
-// its panes in and is not scoped to a session or restored afterwards.
+// set-clipboard is a server option — tmux has no session or pane scope for it —
+// so this is set once on the server ty opens its panes in and is not restored
+// afterwards. When `ty` runs inside the user's own tmux that is their server,
+// the way the root key bindings the detail view installs are: the alternative is
+// a task pane whose selections cannot leave it.
 func ClipboardRelayArgs() []string {
 	return []string{"set-option", "-s", "set-clipboard", "on"}
 }
