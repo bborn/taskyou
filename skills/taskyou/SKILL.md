@@ -262,9 +262,10 @@ prompts). Use them instead of the CLI — the CLI is for orchestrators outside
 the worktree, not the executor inside it.
 
 **Completion signaling (REQUIRED — nothing else watches for completion):**
-- `taskyou_complete` — Move your task to `done` with a summary. Call this
-  when you finish. Without it, the task stays in `processing`/`blocked` and
-  the orchestrator has to close it by hand.
+- `taskyou_complete` — Signal your work is finished with a summary. The task
+  parks in `blocked` for a human to close (a workflow step with dependents
+  moves to `done` instead). Call this when you finish. Without it, the task
+  stays in `processing`/`blocked` and the orchestrator has to close it by hand.
 - `taskyou_needs_input` — Move your task to `blocked` with a question for
   the user. Use this instead of prompting in the terminal.
 
