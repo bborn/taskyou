@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,8 +40,9 @@ answers, sends them to the agent:
   ty answer 42 use the staging bucket   # a plain question takes your own words
 
 The agent receives "Selected: <label>" (or "Yes"/"No", or your own words). The
-answer goes through the same delivery as ty input, so it is refused while the
-agent is still working.`,
+answer goes through the same delivery as ty input — to this machine's agent, or
+over ssh to the host a task was placed on — so it is refused while the agent is
+still working.`,
 		Args:          cobra.MinimumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -59,6 +61,13 @@ agent is still working.`,
 			}
 			defer database.Close()
 
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				return err
+			}
+			if task == nil {
+				return fmt.Errorf("task #%d not found", taskID)
+			}
 			q, err := database.GetPendingQuestion(taskID)
 			if err != nil {
 				return err
@@ -86,10 +95,7 @@ agent is still working.`,
 			if questionID == 0 {
 				questionID = q.ID
 			}
-			sender := agentsend.New(&execCommandRunner{}, database)
-			text, err := question.Answer(database, taskID, questionID, resp, func(p agentsend.Prompt) error {
-				return sender.Send(p)
-			})
+			text, host, err := runTaskAnswer(cmd.Context(), database, task, questionID, resp)
 			if errors.Is(err, agentsend.ErrBusy) {
 				return fmt.Errorf("%v\nWait for it to finish, then answer again", err)
 			}
@@ -102,7 +108,11 @@ agent is still working.`,
 				fmt.Println(string(out))
 				return nil
 			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("Answered task #%d: %s", taskID, text)))
+			on := ""
+			if host != "" {
+				on = " on " + host
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Answered task #%d%s: %s", taskID, on, text)))
 			return nil
 		},
 	}
@@ -110,6 +120,31 @@ agent is still working.`,
 	cmd.Flags().Bool("json", false, "Print the question (or the delivered answer) as JSON")
 	cmd.Flags().Int64("question-id", 0, "Refuse to answer unless this is still the pending question's id")
 	return cmd
+}
+
+// runTaskAnswer answers task's pending question and returns the text the agent
+// was sent and the host it went to ("" for this machine).
+//
+// The agent is found the way `ty input` finds it (resolveAgentTarget): this
+// machine's agent server, or the host a task was placed on, over ssh. It is
+// resolved only once the answer has been checked and the question claimed, so
+// a bad answer never costs an ssh round trip; if it cannot be reached the
+// question is put back.
+func runTaskAnswer(ctx context.Context, database *db.DB, task *db.Task, questionID int64, resp question.Response) (string, string, error) {
+	var host string
+	text, err := question.Answer(database, task.ID, questionID, resp, func(p agentsend.Prompt) error {
+		target, err := resolveAgentTarget(ctx, task)
+		if err != nil {
+			return err
+		}
+		pane, err := target.agentPane()
+		if err != nil {
+			return err
+		}
+		host = target.host
+		return target.sender(database).SendToPane(pane, p)
+	})
+	return text, host, err
 }
 
 // parseAnswerArgs turns the words after the task id into a Response. Each word

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -247,5 +248,37 @@ func TestHandleListTasks_CarriesPendingQuestions(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("blocked task missing from the list")
+	}
+}
+
+// A task placed on another host is answered through the same route /input
+// takes there (resolveInputRoute): its pane is found on the host, and the answer
+// arrives as a single paste and its Enter — nothing touches this machine's tmux.
+func TestRemoteTaskAnswerRoutesToRemoteAgentPane(t *testing.T) {
+	srv, database, local := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "remote question", Status: db.StatusBlocked})
+	commandsPath := remoteInputFixture(t, database, task)
+	q := cacheQuestion()
+	q.TaskID = task.ID
+	if err := database.SetPendingQuestion(q); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postAnswer(t, srv, task.ID, fmt.Sprintf(`{"question_id":%d,"choices":[3]}`, q.ID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("answer: %d %s", w.Code, w.Body.String())
+	}
+	commands, _ := os.ReadFile(commandsPath)
+	got := string(commands)
+	for _, want := range []string{"test-remote-host", "set-buffer", "Selected: In-process LRU", "paste-buffer", "%91", "send-keys", "Enter"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("remote delivery missing %q: %s", want, got)
+		}
+	}
+	if len(local.snapshot()) != 0 {
+		t.Fatalf("remote answer touched local tmux: %v", local.snapshot())
+	}
+	if got, _ := database.GetPendingQuestion(task.ID); got != nil {
+		t.Errorf("question still pending after a delivered answer: %+v", got)
 	}
 }
