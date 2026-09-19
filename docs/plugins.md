@@ -414,9 +414,6 @@ be installed, and ty says so when it falls back.
 - The `claude` and `codex` executors can be launched remotely. Other executors
   require local placement. Remote launches start a new agent session; moving
   carries code and a handoff, not the native agent conversation.
-- Attachments are staged in the local workspace, so they are not available to a
-  remotely-placed task. A file you drop into a remote agent's pane is a path on
-  *your* machine, and the agent cannot open it.
 - A host must already have a checkout of the project, mapped in the resolver's
   inventory. ty creates the task's worktree there, but does not clone a project
   the host has never seen.
