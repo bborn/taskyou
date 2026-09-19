@@ -17,7 +17,7 @@
 <li><a href="#the-tui--first-class">Terminal interface</a> and <a href="#keyboard-shortcuts">keyboard shortcuts</a></li>
 <li><a href="#the-gui">Desktop and browser installation</a></li>
 <li><a href="#workflows">Workflows</a>, <a href="#routines">routines</a>, and <a href="#plugins">plugins</a></li>
-<li><a href="#full-cli-scriptability">CLI commands</a>, <a href="#daemon-management">daemon management</a>, and <a href="#diagnosing-an-install">diagnosing an install</a></li>
+<li><a href="#full-cli-scriptability">CLI commands</a> and <a href="#daemon-management">daemon management</a></li>
 <li><a href="#task-executors">Executors</a> and <a href="#task-lifecycle">task lifecycle</a></li>
 <li><a href="#taskyouyml-configuration">Project configuration</a> and <a href="#worktree-setup-script">worktree setup</a></li>
 <li><a href="#ssh-access--deployment">SSH access and deployment</a></li>
@@ -27,139 +27,6 @@
 <h3 id="kanban-board">Kanban Board</h3>
 <p><a href="media/hero-board.png"><img src="media/hero-board.png" alt="Kanban Board"></a>
 <em>The main view showing tasks organized across Backlog, In Progress, Blocked, and Done columns</em></p>
-<h3 id="list-view">List View</h3>
-<p>Press <code>v</code> to swap the four columns for one flat line per task — the same board,
-at a quarter of the vertical cost. Pair it with a saved view and the whole
-&quot;what am I working on right now?&quot; answer fits on one screen:</p>
-<p><a href="media/list-view.png"><img src="media/list-view.png" alt="List view showing the Active saved view"></a>
-<em><code>v</code> for the list, with the <code>Active</code> view applied — in progress and blocked, nothing else</em></p>
-<p>Rows carry the same badges as cards (PR state and diff, running dot, permission
-mode, host, pin, dependency lock) plus an age hint. Every key that works on a
-card works on a row — the selection is shared, so <code>v</code> never loses your place.
-<code>B</code>/<code>P</code>/<code>L</code>/<code>D</code> jump to the first task of a status instead of focusing a column.</p>
-<h4 id="arranging-the-list">Arranging the list</h4>
-<p>Press <code>O</code>. Two choices, previewed live as you cycle them:</p>
-<table>
-<thead>
-<tr>
-<th></th>
-<th>Options</th>
-<th></th>
-</tr>
-</thead>
-<tbody><tr>
-<td><strong>Group by</strong></td>
-<td><code>status</code> · <code>project</code> · <code>none</code></td>
-<td>Sections, with a count per section</td>
-</tr>
-<tr>
-<td><strong>Sort</strong></td>
-<td><code>urgency</code> · <code>updated</code> · <code>created</code> · <code>title</code></td>
-<td>Order inside each section</td>
-</tr>
-</tbody></table>
-<p><a href="media/list-arrange.png"><img src="media/list-arrange.png" alt="The arrange-list widget"></a></p>
-<p>The current arrangement is always on screen under the header, so it is never a
-setting you have to remember you changed. It persists with the rest of the board
-state (<code>list_group_by</code>, <code>list_sort</code>), and is shared with the GUI: the desktop
-app and <code>ty serve</code> read the same keys, so the board you left in one is the board
-you come back to in the other.</p>
-<p>Whatever the grouping, <strong>pinned tasks lead the list</strong> in their own section:
-pinning means &quot;keep this in sight&quot;, and scattering pinned tasks through project
-sections is what pinning exists to prevent.</p>
-<p><strong>Row height is not an option.</strong> A row is one line — except a running or blocked
-task, which grows a second, dim line carrying the same live activity the kanban
-card shows: what its agent is doing, or the stand it is waiting on. That is the
-one thing a card says that a line cannot, and it is only ever true of live tasks;
-a backlog item has nothing to report, so a second line there would buy nothing.</p>
-<p>Redundancy is dropped rather than repeated: grouping by status keeps a coloured
-status glyph on each row but moves the word to the header, and grouping by
-project drops the per-row <code>[project]</code> tag entirely, giving the width to titles.</p>
-<h3 id="saved-views">Saved Views</h3>
-<p>A <strong>view</strong> is a name plus a filter query. Press <code>V</code> for the picker:</p>
-<p><a href="media/saved-views.png"><img src="media/saved-views.png" alt="The saved views picker"></a></p>
-<table>
-<thead>
-<tr>
-<th>Key</th>
-<th>Action</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>enter</code></td>
-<td>Apply the highlighted view</td>
-</tr>
-<tr>
-<td><code>n</code></td>
-<td>Save the current filter as a new view</td>
-</tr>
-<tr>
-<td><code>d</code> then <code>y</code></td>
-<td>Delete a view</td>
-</tr>
-<tr>
-<td><code>c</code></td>
-<td>Clear the filter</td>
-</tr>
-<tr>
-<td><code>esc</code></td>
-<td>Cancel</td>
-</tr>
-</tbody></table>
-<p>The display mode, the filter, and the applied view name are persisted, so the
-board you left is the board you come back to. Typing over an applied view
-detaches it — a view is a starting point, not a lock.</p>
-<p>Three starter views ship on first run: <strong>Active</strong> (<code>status:in-progress status:blocked</code>), <strong>Pinned</strong> (<code>is:pinned</code>), and <strong>In review</strong> (<code>has:pr status:blocked</code>). Delete one and it stays deleted.</p>
-<h4 id="filter-query-grammar">Filter query grammar</h4>
-<p>The same grammar works in the filter bar (<code>/</code>), in a saved view, in
-<code>ty list --filter</code>, and over the HTTP API:</p>
-<table>
-<thead>
-<tr>
-<th>Token</th>
-<th>Matches</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>status:blocked</code>, <code>is:blocked</code></td>
-<td>One status (<code>backlog</code>, <code>queued</code>, <code>processing</code>, <code>blocked</code>, <code>done</code>, <code>archived</code>)</td>
-</tr>
-<tr>
-<td><code>status:in-progress</code></td>
-<td>Queued <strong>and</strong> processing</td>
-</tr>
-<tr>
-<td><code>status:open</code></td>
-<td>Anything not done or archived</td>
-</tr>
-<tr>
-<td><code>is:pinned</code> / <code>is:unpinned</code></td>
-<td>Pin state</td>
-</tr>
-<tr>
-<td><code>is:workflow</code> / <code>is:task</code></td>
-<td>Workflow steps vs standalone tasks</td>
-</tr>
-<tr>
-<td><code>has:pr</code> / <code>no:pr</code></td>
-<td>Tasks with / without a pull request</td>
-</tr>
-<tr>
-<td><code>tag:release</code></td>
-<td>Tasks carrying a tag</td>
-</tr>
-<tr>
-<td><code>[offerlab]</code></td>
-<td>A project, by name or alias (repeatable; OR&#39;d together)</td>
-</tr>
-<tr>
-<td>anything else</td>
-<td>Free-text fuzzy search</td>
-</tr>
-</tbody></table>
-<p>Repeating <code>status:</code> ORs the statuses together; every other token ANDs. An
-unrecognised <code>word:value</code> is not a token — it stays searchable text rather than
-silently matching nothing.</p>
 <h3 id="task-detail-view">Task Detail View</h3>
 <p><a href="media/task-review-tui.png"><img src="media/task-review-tui.png" alt="Task Detail View"></a>
 <em>Viewing a task with Claude&#39;s output and shell access in split panes</em></p>
@@ -217,7 +84,6 @@ silently matching nothing.</p>
 <h2 id="features">Features</h2>
 <ul>
 <li><strong>Kanban Board</strong> - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)</li>
-<li><strong>List View &amp; Saved Views</strong> - <code>v</code> swaps the columns for a flat one-line-per-task list; <code>V</code> manages named filter views (<code>status:in-progress status:blocked</code>, <code>is:pinned</code>, <code>[offerlab]</code>). The filter and display mode persist across restarts (see <a href="#list-view">List View</a>)</li>
 <li><strong>Git Worktrees</strong> - Each task runs in an isolated worktree, no conflicts between parallel tasks</li>
 <li><strong>Pluggable Executors</strong> - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task</li>
 <li><strong>Workflows</strong> - Turn one goal into a multi-step DAG (e.g. plan → code → parallel review → collect), each step on its own executor/model, advancing automatically (see <a href="#workflows">Workflows</a>)</li>
@@ -466,21 +332,6 @@ reopen those once with the updated build to enable future automatic reloads.
 destructive reset that kills TaskYou tmux sessions.</p>
 <p>Upgrading does this for you: when a ty daemon is running, <code>ty upgrade</code> (and the
 install script it runs) finishes with <code>ty restart</code>.</p>
-<h3 id="diagnosing-an-install">Diagnosing an install</h3>
-<p><code>ty doctor</code> checks everything a working install depends on — daemon, its build
-and environment against this binary, tmux and the agent server, a live task&#39;s
-generated Claude hooks and MCP config, the database and its schema, the status
-log, executor binaries, GitHub auth — and changes none of it. <code>--json</code> gives a
-stable machine-readable report and <code>--strict</code> exits non-zero on warnings too,
-for a fleet sweep.</p>
-<pre><code class="language-bash">ty doctor                 # human report
-ty doctor --json          # {status, checks:[{id,status,summary,details}]}
-ty doctor --strict        # exit non-zero on warnings as well as errors
-</code></pre>
-<p>The daemon also records its build, protocol and key environment where clients
-can read it, so a TUI or CLI on a different build says so instead of misbehaving
-quietly. See <a href="https://github.com/bborn/taskyou/blob/main/docs/diagnostics.md">Diagnostics</a> for the handshake, the protocol
-number, and what happens on a remote or placed host running an older ty.</p>
 <h3 id="maintenance-commands">Maintenance commands</h3>
 <pre><code class="language-bash">./bin/ty purge-claude-config            # Remove stale ~/.claude.json entries
 ./bin/ty purge-claude-config --dry-run  # Preview what would be removed
@@ -494,23 +345,7 @@ number, and what happens on a remote or placed host running an older ty.</p>
 <li><strong>Task management</strong> - <code>ty create</code>, <code>ty execute</code>, <code>ty retry</code>, <code>ty status</code>, <code>ty pin</code>, <code>ty close</code>, <code>ty archive</code>, <code>ty delete</code></li>
 <li><strong>Direct executor interaction</strong> - <code>ty input</code> sends keystrokes/text to running executors, <code>ty output</code> reads their output</li>
 <li><strong>Session management</strong> - <code>ty sessions list</code>, <code>ty sessions cleanup</code></li>
-<li><strong>Saved views</strong> - <code>ty views</code> lists them, <code>ty views save &lt;name&gt; &quot;&lt;query&gt;&quot;</code> creates or replaces one, <code>ty views show &lt;name&gt;</code> prints what it matches, <code>ty views delete &lt;name&gt;</code> removes it</li>
-<li><strong>Filtered listing</strong> - <code>ty list --view active</code> applies a saved view; <code>ty list --filter &quot;status:in-progress status:blocked&quot;</code> applies a query inline (same grammar as the TUI filter bar)</li>
 </ul>
-<pre><code class="language-bash">ty views save active &quot;status:in-progress status:blocked&quot;
-ty views save offerlab &quot;[offerlab] status:open&quot;
-ty list --view active --json
-ty list --filter &quot;has:pr status:blocked&quot;      # waiting on review
-</code></pre>
-<p>Views are exposed over the HTTP API too: <code>GET</code>/<code>POST /api/views</code> and
-<code>GET</code>/<code>PATCH</code>/<code>DELETE /api/views/{name}</code>. <code>GET /api/views/{name}</code> returns the
-view plus the tasks it currently matches, so a client never has to reimplement
-the query grammar — which is exactly how the GUI applies a view.</p>
-<h3 id="in-the-gui">In the GUI</h3>
-<p>The desktop app and <code>ty serve</code> have the same three controls: <code>v</code> toggles the
-list, <code>V</code> opens the saved views, and <code>O</code> arranges it — plus clickable
-equivalents in the toolbar above the list. Grouping, sort and the applied view
-persist to the same settings keys the TUI uses.</p>
 <p>Because agents can send input to running executors via <code>ty input</code>, they can answer prompts, confirm dialogs, navigate menus, and fully control tasks mid-execution—no human intervention required.</p>
 <p>See <a href="https://github.com/bborn/taskyou/blob/main/docs/orchestrator.md">docs/orchestrator.md</a> for a complete guide to building your own orchestration agent.</p>
 <p><strong>Auto-cleanup:</strong> The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.</p>
@@ -591,18 +426,6 @@ persist to the same settings keys the TUI uses.</p>
 <tr>
 <td><code>/</code></td>
 <td>Filter tasks</td>
-</tr>
-<tr>
-<td><code>v</code></td>
-<td>Toggle list / board view</td>
-</tr>
-<tr>
-<td><code>V</code></td>
-<td>Saved views picker</td>
-</tr>
-<tr>
-<td><code>O</code></td>
-<td>Arrange list (group / sort / density)</td>
 </tr>
 <tr>
 <td><code>s</code></td>
@@ -923,54 +746,9 @@ openclaw onboard  # Run setup wizard
 <pre><code class="language-bash"># List all running executor processes
 ./bin/ty sessions list
 
-# Kill orphaned executor processes (and the side processes that outlived them)
+# Kill orphaned executor processes
 ./bin/ty sessions cleanup
-
-# See exactly what would be killed, and why, without killing anything
-./bin/ty sessions cleanup --dry-run
 </code></pre>
-<p><strong>Orphaned side processes.</strong> Killing a task&#39;s tmux window only SIGHUPs the pane&#39;s
-foreground process group. A dev server that was backgrounded, disowned, or
-<code>setsid</code>&#39;d has left that group, so once its parent shell dies it is reparented to
-<code>launchd</code>/<code>init</code> and survives every teardown, leaking gigabytes of swap over
-days. <code>ty sessions cleanup</code> therefore runs a second pass that finds those by the
-task worktree path on their command line and SIGTERMs (then SIGKILLs) them.
-<code>ty sessions suspend</code> does the same for the tasks it suspends.</p>
-<p>The sweep is deliberately conservative:</p>
-<ul>
-<li><strong>Blocked tasks are live work.</strong> In ty, <code>blocked</code> usually means &quot;waiting for a
-human&quot;. Their side processes are only reaped after a long stretch of <em>no
-activity at all</em>, measured from the last status change, log line, or UI visit.
-Their agent process is never reaped on staleness.</li>
-<li><strong>Absent is not deleted.</strong> A task that is not in this machine&#39;s database may
-have been placed here from another machine, so its processes are left alone.</li>
-<li><strong>Processing and queued tasks are never touched</strong>, nor is anything still
-running inside a live tmux pane.</li>
-</ul>
-<table>
-<thead>
-<tr>
-<th>Setting</th>
-<th>Default</th>
-<th>Meaning</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>reap_blocked_idle</code></td>
-<td><code>24h</code></td>
-<td>Idle time before a blocked or backlog task&#39;s side processes are reaped. <code>0</code>/<code>disabled</code> turns staleness reaping off.</td>
-</tr>
-<tr>
-<td><code>reap_orphan_min_age</code></td>
-<td><code>24h</code></td>
-<td>Minimum age for the no-worktree heuristic: a known JS dev server reparented to init with no terminal.</td>
-</tr>
-<tr>
-<td><code>reap_orphan_dev_servers</code></td>
-<td><code>true</code></td>
-<td>Set to <code>false</code> to disable that heuristic entirely.</td>
-</tr>
-</tbody></table>
 <p><strong>Direct executor interaction:</strong></p>
 <pre><code class="language-bash"># See what the executor is outputting
 ./bin/ty output &lt;id&gt;              # Last 50 lines
@@ -982,12 +760,6 @@ running inside a live tmux pane.</li>
 ./bin/ty input &lt;id&gt; --key Down --enter  # Navigate + confirm
 echo &quot;continue&quot; | ./bin/ty input &lt;id&gt;   # Pipe input
 </code></pre>
-<p>Both work wherever the task is running. A task a placement plugin put on
-another host has its executor pane in a tmux server over there, and <code>ty input</code>
-and <code>ty output</code> reach it over ssh — the same connection <code>ty show</code> prints an
-<code>ssh … tmux attach</code> line for. When there is no pane to reach, the error names
-the host and tmux session that were checked, so a finished agent reads
-differently from a lookup on the wrong machine.</p>
 <p><strong>Inside a task worktree:</strong></p>
 <p>When working in a task&#39;s worktree directory, you can interact with the executor directly. For Claude tasks:</p>
 <pre><code class="language-bash">cd /path/to/project/.task-worktrees/123-my-task/
@@ -1180,11 +952,7 @@ ty plugins list
 <p>Queue tasks as usual. ty-on selects a host configured for the task&#39;s project and
 executor. With one eligible host, it selects that host directly. With several,
 it uses <code>on ls</code> to pick the reachable host with the most free memory. Task detail
-shows the selected host and the reason.</p>
-<p>To choose the machine yourself, pick one in the <strong>Host</strong> selector the new-task
-form shows once hosts are configured (TUI advanced fields, GUI <strong>Advanced</strong>, or
-<code>ty create --host &lt;destination|local&gt;</code>); that overrides the automatic placement
-for that task. To move a task that already exists — which carries its work — use
+shows the selected host and the reason. You can also choose a host yourself with
 <strong>Change host</strong> in the desktop/browser, <code>@</code> in the TUI, or <code>ty place</code> in the CLI.</p>
 <p>Tasks fall back to local execution when no remote placement is available. To
 require a remote machine for a project, add this to its <code>.taskyou.yml</code>:</p>
