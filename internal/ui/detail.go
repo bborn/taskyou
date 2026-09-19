@@ -3184,10 +3184,17 @@ func (m *DetailModel) renderContent() string {
 		b.WriteString(Bold.Render("Execution Log"))
 		b.WriteString("\n\n")
 
-		for _, log := range m.logs {
-			// Skip internal-only log entries not meant for display
-			if log.LineType == "pending_tool" || log.LineType == "pr_done_marker" {
+		for i, log := range m.logs {
+			// Skip internal-only log entries not meant for display. Offered
+			// answers are shown on their question's line instead.
+			if log.LineType == "pending_tool" || log.LineType == "pr_done_marker" || log.LineType == db.LogQuestionOptions {
 				continue
+			}
+			content := log.Content
+			if log.LineType == "question" {
+				if opts := db.QuestionOptionsFor(m.logs, i); len(opts) > 0 {
+					content += "  (" + db.FormatQuestionOptions(opts) + ")"
+				}
 			}
 			icon := "  "
 			switch log.LineType {
@@ -3212,13 +3219,13 @@ func (m *DetailModel) renderContent() string {
 				line = fmt.Sprintf("%s %s %s",
 					Dim.Render(log.CreatedAt.Format("15:04:05")),
 					icon,
-					log.Content,
+					content,
 				)
 			} else {
 				line = fmt.Sprintf("%s %s %s",
 					dimmedStyle.Render(log.CreatedAt.Format("15:04:05")),
 					icon,
-					dimmedStyle.Render(log.Content),
+					dimmedStyle.Render(content),
 				)
 			}
 			b.WriteString(line)
