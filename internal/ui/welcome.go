@@ -110,6 +110,9 @@ func (m *WelcomeModel) View() string {
 	if m.missingWorkflows && !m.installing {
 		helpText += "  " + HelpKey.Render("i") + " " + HelpDesc.Render("starter pack")
 	}
+	if !m.installing {
+		helpText += "  " + HelpKey.Render("m") + " " + HelpDesc.Render("browse plugins")
+	}
 	help := HelpBar.Render(helpText)
 
 	hint := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(welcomeChoiceHint(m.cursor))

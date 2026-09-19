@@ -106,7 +106,7 @@ func (m *ActionPickerModel) View() string {
 		body.WriteString(lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Italic(true).
-			Render("No plugin actions installed. See docs/plugins.md."))
+			Render("No plugin actions installed — press m on the board to browse the plugin catalog."))
 	} else {
 		for i, it := range m.items {
 			body.WriteString(m.renderItem(it, i == m.selectedIndex, modalWidth-6))

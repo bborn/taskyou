@@ -206,6 +206,44 @@ export interface Placement {
  health: { state: string; last_seen?: string; problem?: string };
 }
 
+// CatalogPlugin is one row of the plugin browser: a catalog entry, a plugin
+// installed from outside the catalog (in_catalog false), or both.
+export interface CatalogPlugin {
+  id: string;
+  name: string;
+  description: string;
+  author?: string;
+  category?: string;
+  tags?: string[];
+  provides?: string[];
+  requires?: string[];
+  source?: string;
+  subdir?: string;
+  homepage?: string;
+  installed: boolean;
+  in_catalog: boolean;
+}
+
+export interface PluginCatalog {
+  plugins: CatalogPlugin[];
+  // stale: the catalog was served from cache or the copy shipped with ty, so a
+  // refresh is worth offering.
+  stale: boolean;
+}
+
+export interface InstalledPlugin {
+  name: string;
+  version?: string;
+  description?: string;
+  dir: string;
+  hooks?: string[];
+  actions?: string[];
+  workflows?: string[];
+  routines?: string[];
+  services?: string[];
+  source_id?: string;
+}
+
 /** A named filter query. The query grammar lives in internal/taskfilter and is
  * resolved server-side (GET /api/views/{name} returns the matching tasks), so
  * the GUI never has to reimplement it. */

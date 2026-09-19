@@ -22,7 +22,7 @@ const starterPackSource = "https://github.com/taskyou/plugins"
 const settingPluginNudgeSeen = "plugins_nudge_seen"
 
 // starterPackNotice is the Welcome fork's readiness line when no workflow exists.
-const starterPackNotice = "no workflows installed — press i to add the starter pack (taskyou/plugins)"
+const starterPackNotice = "no workflows installed — press i to add the starter pack, or m to browse plugins"
 
 // starterPackInstalledMsg carries the result of `ty plugins add` run off the UI loop.
 type starterPackInstalledMsg struct {
@@ -58,9 +58,9 @@ func pluginNudgeText(hasWorkflows, installing bool) string {
 		return "Installing the starter pack from taskyou/plugins…"
 	}
 	if !hasWorkflows {
-		return "No workflows installed yet — add the starter pack from taskyou/plugins  (i install · esc dismiss)"
+		return "No workflows installed yet — add the starter pack from taskyou/plugins  (i install · m browse · esc dismiss)"
 	}
-	return "TaskYou has plugins now — browse taskyou/plugins · ty plugins add <repo>  (i install · esc dismiss)"
+	return "TaskYou has a searchable plugin catalog now — press m to browse and install  (i starter pack · esc dismiss)"
 }
 
 // starterPackResultText summarizes an install in one short line; it lands in the
@@ -77,7 +77,7 @@ func starterPackResultText(output string, err error) string {
 	if summary == "" {
 		summary = "Installed the starter pack"
 	}
-	return IconDone() + " " + summary + " from taskyou/plugins · ty plugins list"
+	return IconDone() + " " + summary + " from taskyou/plugins · press m for the catalog"
 }
 
 // initPluginNudge decides whether to show the one-time plugins nudge and marks it

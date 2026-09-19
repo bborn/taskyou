@@ -15,6 +15,7 @@ import { useIsMobile } from "./hooks/use-mobile";
 import { useVisualViewportShell } from "./hooks/use-keyboard-inset";
 import { SetupCheck } from "./components/SetupCheck";
 import { RoutinesView } from "./components/RoutinesView";
+import { PluginsView } from "./components/PluginsView";
 import { DetailView } from "./components/DetailView";
 import { SettingsView } from "./components/SettingsView";
 import { Palette } from "./components/Palette";
@@ -95,6 +96,7 @@ export default function App() {
       if (Number.isInteger(deepTask) && deepTask > 0) store.openDetail(deepTask);
       else if (deepView === "settings") store.openSettings();
       else if (deepView === "routines") store.openRoutines();
+      else if (deepView === "plugins") store.openPlugins();
     } catch (e) {
       setBootMessage(e instanceof Error ? e.message : String(e));
       setBootPhase("error");
@@ -112,6 +114,8 @@ export default function App() {
           return void store.openSettings();
         case "routines":
           return void store.openRoutines();
+        case "plugins":
+          return void store.openPlugins();
         case "board":
           return void store.openBoard();
         case "search":
@@ -181,6 +185,7 @@ export default function App() {
       if (Number.isInteger(task) && task > 0) store.openDetail(task);
       else if (view === "settings") store.openSettings();
       else if (view === "routines") store.openRoutines();
+      else if (view === "plugins") store.openPlugins();
       else store.openBoard();
     }
     window.addEventListener("popstate", onPopState);
@@ -445,6 +450,8 @@ export default function App() {
             return void store.openSettings();
           case "u":
             return void store.openRoutines();
+          case "m":
+            return void store.openPlugins();
           case "[":
             return void store.toggleCollapsed("backlog");
           case "]":
@@ -541,7 +548,7 @@ export default function App() {
         "h-[calc(3rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]" : "h-11"}`}
       >
         {/* Everything the phone can't fit in the header lives behind this:
-            Routines, Settings, search, theme and permission mode. */}
+            Routines, Plugins, Settings, search, theme and permission mode. */}
         {isMobile && state.view.kind === "board" && (
           <Button
             variant="ghost"
@@ -673,6 +680,7 @@ export default function App() {
           {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} />}
           {state.view.kind === "settings" && <SettingsView />}
           {state.view.kind === "routines" && <RoutinesView />}
+          {state.view.kind === "plugins" && <PluginsView />}
       </motion.div>
 
       {isMobile && (

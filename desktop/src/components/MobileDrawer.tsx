@@ -7,6 +7,7 @@ import {
   Plus,
   Repeat,
   Search,
+  Puzzle,
   Settings2,
   Sun,
 } from "lucide-react";
@@ -25,7 +26,7 @@ const FLING_VELOCITY = 450;
 
 const EASE = [0.32, 0.72, 0, 1] as const;
 
-type ViewKind = "board" | "detail" | "settings" | "routines";
+type ViewKind = "board" | "detail" | "settings" | "routines" | "plugins";
 
 export function MobileDrawer({
   open,
@@ -98,6 +99,13 @@ export function MobileDrawer({
       label: "Routines",
       active: view === "routines",
       onClick: () => go(() => store.openRoutines()),
+    },
+    {
+      key: "plugins",
+      icon: Puzzle,
+      label: "Plugins",
+      active: view === "plugins",
+      onClick: () => go(() => store.openPlugins()),
     },
     {
       key: "settings",

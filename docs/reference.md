@@ -574,6 +574,8 @@ The skill works with Claude Code, Codex, Gemini, or any agent that can execute s
 | `V` | Saved views picker |
 | `O` | Arrange list (group / sort / density) |
 | `s` | Settings |
+| `m` | Plugin catalog (search, install, remove) |
+| `u` | Routines |
 | `?` | Toggle help |
 | `q` | Quit |
 
@@ -1035,16 +1037,41 @@ browser, and with `@` in the TUI. See [remote execution](remote-execution.md)
 for executor eligibility, required remote placement, connection health, and
 shared HTTP placement endpoints.
 
-Install one — or a whole collection, since a single git repo can hold many plugins —
-with one command:
+#### Finding one
+
+You should not have to know a repo URL to get a plugin. ty ships a **catalog** —
+a small JSON index of installable plugins, bundled into the binary and refreshed
+from [taskyou.dev/registry.json](https://taskyou.dev/registry.json) — and every
+surface searches it:
+
+- **TUI** — press `m` on the board: type to search, `enter` installs, `ctrl+d`
+  removes, `tab` switches between All / Installed / Available.
+- **GUI / browser** — the **Plugins** view (`m`, ⌘M, or the menu).
+- **CLI** —
 
 ```bash
-ty plugins add https://github.com/taskyou/plugins   # clone & install the collection
-ty plugins list                                     # see what they provide
+ty plugins browse            # the whole catalog, grouped by category
+ty plugins search slack      # find one
+ty plugins info slack        # what it does, what it needs, where it comes from
+ty plugins add slack         # install it by name
 ```
 
-Re-run the same command any time to update (it `git pull`s). Or drop a directory in
-by hand.
+Installing by catalog name takes **just that plugin**, even when it lives in a
+repo with nine others.
+
+#### Installing something that isn't in the catalog
+
+```bash
+ty plugins add taskyou/plugins                      # owner/repo shorthand
+ty plugins add https://github.com/taskyou/plugins   # a git URL: installs every plugin in it
+ty plugins add ./my-plugin                          # a local path
+ty plugins list                                     # see what they provide
+ty plugins update                                   # re-pull everything installed
+```
+
+`ty plugins update` knows where each plugin came from (recorded at install time),
+so it works for a single plugin lifted out of a collection as well as for a whole
+checkout. Or drop a directory into `~/.config/task/plugins/` by hand.
 
 #### Why you'd care: the community collection
 

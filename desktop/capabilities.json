@@ -101,6 +101,15 @@
     "OpenWorktree": {
       "note": "o / Editor button — opens worktree in code editor"
     },
+    "Plugins": {
+      "api": [
+        "GET /api/plugins",
+        "GET /api/plugins/catalog",
+        "POST /api/plugins/install",
+        "POST /api/plugins/remove"
+      ],
+      "note": "m / \u2318M \u2014 PluginsView: search the plugin catalog, read what each one does, install or remove it in one click"
+    },
     "Queue": {
       "api": [
         "POST /api/tasks/{id}/execute"
