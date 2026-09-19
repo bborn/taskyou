@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/agentsend"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 const annotationsMaxBody = 20 << 20 // 20 MB (screenshots)
@@ -66,6 +67,17 @@ func (s *Server) handleTaskAnnotations(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Annotations) == 0 {
 		jsonErr(w, "annotations required", http.StatusBadRequest)
+		return
+	}
+
+	// A bundle is only useful in the worktree the agent is reading. For a placed
+	// task that worktree is on its host, and the local paths tried below are the
+	// coordinator's own checkout of the same project — where the bundle would be
+	// written, reported as staged, and never read by anyone.
+	if loc := executor.TaskCodeLocation(s.db, task); loc.Remote() {
+		jsonErr(w, fmt.Sprintf(
+			"task #%d runs on %s, and annotation bundles are staged in the task's worktree — "+
+				"ty cannot put them on another host yet", task.ID, loc.Host), http.StatusConflict)
 		return
 	}
 
