@@ -12,7 +12,7 @@ import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
 import type { ChatMessage, Dependencies, LogLine, Task } from "../api/types";
 import { openExternal } from "../tauri";
-import { hasTaskCode, openTaskCode, runsOnAnotherHost } from "../lib/code";
+import { hasTaskCode, openTaskCodeReporting, runsOnAnotherHost } from "../lib/code";
 import { store, useAppState } from "../store";
 import { PlacementPanel } from "./PlacementPanel";
 import { AttachmentsPanel } from "./AttachmentsPanel";
@@ -384,7 +384,7 @@ export function DetailView({ taskId }: { taskId: number }) {
             title={runsOnAnotherHost(task)
               ? `Open worktree on ${task.placement_target} in editor (o)`
               : "Open worktree in editor (o)"}
-            onClick={() => void openTaskCode(task)}
+            onClick={() => openTaskCodeReporting(task)}
           >
             <Code2 className="size-3.5" /> Editor
           </Button>

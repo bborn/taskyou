@@ -86,6 +86,15 @@ func TestRemoteCodeURIIsOnlyBuiltForRemoteWork(t *testing.T) {
 	if got := RemoteCodeURI(CodeLocation{Path: "/srv/w/5250"}); got != "" {
 		t.Errorf("a local worktree produced a remote URI: %q", got)
 	}
+	// A checkout under a directory with a space in it is ordinary on a Mac, and
+	// an unescaped one produces a URI `open` rejects and window.open truncates.
+	spaced := RemoteCodeURI(CodeLocation{Host: "ol-agents", Path: "/Users/me/My Projects/app"})
+	if strings.Contains(spaced, " ") {
+		t.Errorf("remote code URI is not URL-escaped: %q", spaced)
+	}
+	if spaced != "vscode://vscode-remote/ssh-remote+ol-agents/Users/me/My%20Projects/app" {
+		t.Errorf("escaped URI = %q", spaced)
+	}
 }
 
 // An ssh destination is not necessarily a hostname: fleets name their hosts in
@@ -107,6 +116,21 @@ func TestHostAddressAsksSSHWhatItWouldActuallyDial(t *testing.T) {
 	}
 	if got := HostAddress(context.Background(), "local"); got != "" {
 		t.Errorf("a local task produced a host address: %q", got)
+	}
+}
+
+// A lookup that failed must not be remembered. The fallback is an ssh alias, and
+// an alias is exactly what a browser cannot resolve — so caching one bad moment
+// (ssh missing from PATH, a failing Match exec block, a slow config) would pin a
+// useless address for as long as ty runs.
+func TestHostAddressDoesNotRememberAFailedLookup(t *testing.T) {
+	stubSSH(t, "#!/bin/sh\nexit 255\n")
+	if got := HostAddress(context.Background(), "flaky-lookup-host"); got != "flaky-lookup-host" {
+		t.Fatalf("failed lookup = %q, want the destination itself", got)
+	}
+	stubSSH(t, "#!/bin/sh\ncase \"$*\" in *-G*) echo 'hostname 10.1.2.3' ;; esac\nexit 0\n")
+	if got := HostAddress(context.Background(), "flaky-lookup-host"); got != "10.1.2.3" {
+		t.Errorf("second lookup = %q; the earlier failure was cached", got)
 	}
 }
 

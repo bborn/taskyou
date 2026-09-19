@@ -103,9 +103,14 @@ Actions that act on the task's code follow the task as well:
   address is the hostname `ssh -G` resolves for the destination, so a name that
   only exists in `~/.ssh/config` still produces a URL a browser can open. The
   port is probed on the host (`lsof`, falling back to `ss`).
-- **Browser annotations** are the exception: bundles are staged in the task's
-  worktree for the agent to read, and ty cannot yet put them on another host, so
-  it says so instead of writing them into the coordinator's checkout.
+- **Browser annotations and screenshots** are the exception. Both are staged in
+  the task's worktree for the agent to read, and ty cannot yet put files in a
+  worktree on another host, so it says so instead of writing them into the
+  coordinator's checkout: an annotation bundle is refused, and a screenshot or
+  DOM snapshot comes back with that reason in place of the payload rather than
+  inlined into the agent's output. The browser actions that carry nothing bulky
+  (navigate, click, eval) work as they do locally — the relay does not care which
+  machine the agent is on.
 
 ## Observe and recover
 

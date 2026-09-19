@@ -531,6 +531,27 @@ func TestBrowserArtefactsAreNotWrittenForATaskOnAnotherHost(t *testing.T) {
 	if root := srv.resolveTaskRoot(task); root != "" {
 		t.Errorf("browser artefacts would be written to %q, on the wrong machine", root)
 	}
+
+	// And the payload is dropped rather than handed back: a screenshot is up to
+	// 20 MB of base64 and this result is the agent's tool output.
+	shot := json.RawMessage(`{"ok":true,"data":"data:image/png;base64,` + tinyPNG + `"}`)
+	result, ok := srv.materializeBrowserResult(task, "screenshot", shot).(map[string]interface{})
+	if !ok {
+		t.Fatalf("screenshot result is not an object: %#v", result)
+	}
+	if _, inlined := result["data"]; inlined {
+		t.Error("a placed task's screenshot was inlined into the agent's output")
+	}
+	if problem, _ := result["error"].(string); !strings.Contains(problem, "ol-agents") {
+		t.Errorf("the result does not say why the screenshot is missing: %#v", result)
+	}
+	// An action that carries nothing bulky still works: the relay does not care
+	// which machine the agent is on.
+	clicked, _ := srv.materializeBrowserResult(task, "click", json.RawMessage(`{"ok":true,"clicked":"#save"}`)).(map[string]interface{})
+	if clicked["clicked"] != "#save" {
+		t.Errorf("a plain browser action was altered for a placed task: %#v", clicked)
+	}
+
 	task.PlacementTarget = ""
 	if root := srv.resolveTaskRoot(task); root != wt {
 		t.Errorf("a local task lost its worktree root: %q", root)

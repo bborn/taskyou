@@ -102,7 +102,7 @@
       "api": [
         "GET /api/tasks/{id}/placement"
       ],
-      "note": "o / Editor button — opens the worktree in a code editor; for a task placed on another host it opens that host's worktree over ssh, using the code_uri the placement endpoint returns"
+      "note": "o / Editor button — opens the worktree in a code editor; for a task placed on another host it opens that host's worktree over ssh, the desktop app runs the editor with --remote, the browser follows the code_uri the placement endpoint returns, and either way it reports why when it cannot"
     },
     "Plugins": {
       "api": [

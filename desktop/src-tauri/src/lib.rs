@@ -128,31 +128,55 @@ fn open_external(target: String) -> Result<(), String> {
 }
 
 /// Open a directory in the user's code editor; falls back to Finder.
+///
+/// `host` is the ssh destination a task was placed on, and it changes what the
+/// path means: the directory is over there, not here. The VS Code family opens
+/// such a directory over ssh with `--remote`; nothing else here can, and opening
+/// the same path locally is the worst answer available — this machine usually has
+/// a directory at that path too, holding a different checkout of the same
+/// project. So the remote case either reaches the host or says it cannot.
 #[tauri::command]
-fn open_in_editor(path: String) -> Result<(), String> {
+fn open_in_editor(path: String, host: Option<String>) -> Result<(), String> {
     if !path.starts_with('/') {
         return Err("path must be absolute".into());
     }
-    // Prefer VS Code's CLI when installed, then $EDITOR-style GUI fallbacks.
-    for editor in ["code", "cursor", "zed"] {
-        if Command::new("which")
+    let host = host.unwrap_or_default();
+    let installed = |editor: &str| {
+        Command::new("which")
             .arg(editor)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
-        {
-            return Command::new(editor)
-                .arg(&path)
-                .status()
-                .map_err(|e| e.to_string())
-                .and_then(|s| {
-                    if s.success() {
-                        Ok(())
-                    } else {
-                        Err(format!("{editor} failed"))
-                    }
-                });
+    };
+    // Prefer VS Code's CLI when installed, then $EDITOR-style GUI fallbacks.
+    // zed is skipped for a remote directory: it has no ssh-remote flag.
+    for editor in ["code", "cursor", "zed"] {
+        if !host.is_empty() && editor == "zed" {
+            continue;
         }
+        if !installed(editor) {
+            continue;
+        }
+        let mut cmd = Command::new(editor);
+        if !host.is_empty() {
+            cmd.arg("--remote").arg(format!("ssh-remote+{host}"));
+        }
+        return cmd
+            .arg(&path)
+            .status()
+            .map_err(|e| e.to_string())
+            .and_then(|s| {
+                if s.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{editor} failed"))
+                }
+            });
+    }
+    if !host.is_empty() {
+        return Err(format!(
+            "no editor here can open a directory on {host}; it is at {path} over there"
+        ));
     }
     open_external(path)
 }

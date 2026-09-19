@@ -394,7 +394,7 @@ type paneRemoteMsg struct{ message string }
 
 // paneRemoteAttachedMsg is returned when a remotely placed task's live tmux
 // session was rendered into a LOCAL pane. paneID is that pane; notice is the
-// line shown beside it, which documents the nested-tmux prefix.
+// line shown beside it, which names the host the pane is showing.
 type paneRemoteAttachedMsg struct {
 	paneID      string
 	notice      string

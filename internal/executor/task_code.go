@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -97,7 +98,12 @@ func RemoteCodeURI(loc CodeLocation) string {
 	if !loc.Remote() || loc.Path == "" {
 		return ""
 	}
-	return "vscode://vscode-remote/ssh-remote+" + loc.Host + strings.TrimSuffix(loc.Path, "/")
+	// The path goes into a URL, so it is escaped like one: a checkout under a
+	// directory with a space in it ("~/My Projects/app") would otherwise produce
+	// a URI that `open` rejects and window.open truncates at the space. url.URL
+	// escapes the path and nothing else, which is what a scheme handler wants.
+	u := url.URL{Scheme: "vscode", Host: "vscode-remote", Path: "/ssh-remote+" + loc.Host + strings.TrimSuffix(loc.Path, "/")}
+	return u.String()
 }
 
 // ShellLine is the command that puts a user in the task's directory themselves.
@@ -114,9 +120,11 @@ func ShellLine(loc CodeLocation) string {
 		shellQuote("cd "+shellQuoteRemotePath(loc.Path)+" && exec ${SHELL:-/bin/sh} -l"))
 }
 
-// hostAddressCache memoizes HostAddress. `ssh -G` reads configuration and makes
-// no connection, but the answer cannot change while ty runs and the callers are
-// on a two-second refresh.
+// hostAddressCache memoizes what `ssh -G` answered. Only an answer is cached:
+// a failed lookup falls back to the destination itself, and caching THAT would
+// pin an ssh alias — a name no browser can resolve — as the host's address for
+// the rest of the process's life, over one bad moment on PATH or in a
+// `Match exec` block.
 var (
 	hostAddressMu    sync.Mutex
 	hostAddressCache = map[string]string{}
@@ -147,16 +155,19 @@ func HostAddress(ctx context.Context, target string) string {
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	address := fallback
-	if out, err := exec.CommandContext(ctx, sshBin(), "-G", target).Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if name, value, found := strings.Cut(strings.TrimSpace(line), " "); found && name == "hostname" {
-				if value = strings.TrimSpace(value); value != "" {
-					address = value
-				}
-				break
-			}
+	out, err := exec.CommandContext(ctx, sshBin(), "-G", target).Output()
+	if err != nil {
+		return fallback
+	}
+	address := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if name, value, found := strings.Cut(strings.TrimSpace(line), " "); found && name == "hostname" {
+			address = strings.TrimSpace(value)
+			break
 		}
+	}
+	if address == "" {
+		return fallback
 	}
 	hostAddressMu.Lock()
 	hostAddressCache[target] = address

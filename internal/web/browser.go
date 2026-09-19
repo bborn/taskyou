@@ -156,7 +156,12 @@ func (s *Server) materializeBrowserResult(task *db.Task, action string, raw json
 
 	root := s.resolveTaskRoot(task)
 	if root == "" {
-		return result
+		// No directory to put a payload in. Handing the payload back instead is
+		// not a smaller failure: a screenshot is up to 20 MB of base64 and this
+		// result goes straight into the agent's tool output, so it would spend
+		// the agent's context on an image it cannot open anyway. Say what
+		// happened and drop it.
+		return withoutBulkyPayload(result, s.bulkyPayloadProblem(task))
 	}
 
 	dir := filepath.Join(root, ".taskyou", "browser")
@@ -198,6 +203,35 @@ func (s *Server) materializeBrowserResult(task *db.Task, action string, raw json
 	return result
 }
 
+// withoutBulkyPayload replaces a screenshot or DOM snapshot with the reason it
+// could not be staged. The other actions (navigate, click, eval) carry nothing
+// bulky and are left exactly as the browser answered — they work for a placed
+// task, because the relay does not care which machine the agent is on.
+func withoutBulkyPayload(result map[string]interface{}, problem string) map[string]interface{} {
+	dropped := false
+	for _, field := range []string{"data", "html"} {
+		if v, _ := result[field].(string); v != "" {
+			delete(result, field)
+			dropped = true
+		}
+	}
+	if dropped && problem != "" {
+		result["error"] = problem
+	}
+	return result
+}
+
+// bulkyPayloadProblem says why a payload has nowhere to go, in the terms the
+// agent can act on.
+func (s *Server) bulkyPayloadProblem(task *db.Task) string {
+	if loc := executor.TaskCodeLocation(s.db, task); loc.Remote() {
+		return fmt.Sprintf(
+			"this task runs on %s, and ty cannot yet stage browser files in a worktree on another host, "+
+				"so the payload was dropped rather than inlined here", loc.Host)
+	}
+	return "this task has no worktree to stage browser files in, so the payload was dropped rather than inlined here"
+}
+
 // resolveTaskRoot is the directory on THIS machine to write a task's browser
 // artefacts into, and "" when there is none.
 //
@@ -205,8 +239,8 @@ func (s *Server) materializeBrowserResult(task *db.Task, action string, raw json
 // same path here does not fail — the coordinator usually has a checkout of the
 // same project, and for a moved task the old worktree is still there — it writes
 // into the wrong repository, where the agent that asked for it will never look.
-// Nothing is written instead: the payload then reaches the agent inline, which is
-// what it did before any of this materialising existed.
+// Nothing is written instead, and the caller drops the payload rather than
+// inline it (see withoutBulkyPayload).
 func (s *Server) resolveTaskRoot(task *db.Task) string {
 	if executor.TaskCodeLocation(s.db, task).Remote() {
 		return ""
