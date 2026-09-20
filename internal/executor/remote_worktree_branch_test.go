@@ -60,7 +60,7 @@ func TestRemoteWorktreeScriptChecksOutTheCarriedBranchFromOrigin(t *testing.T) {
 	branch := "task/9-carried"
 	repo := scriptRepo(t, branch)
 
-	cmd := exec.Command("sh", "-c", remoteWorktreeScript(repo, "9-carried", branch))
+	cmd := exec.Command("sh", "-c", remoteWorktreeScript(repo, "9-carried", branch, modeFresh, ""))
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("script failed: %v\n%s", err, out)
@@ -84,7 +84,7 @@ func TestRemoteWorktreeScriptChecksOutTheCarriedBranchFromOrigin(t *testing.T) {
 func TestRemoteWorktreeScriptStartsFreshWhenTheBranchIsNew(t *testing.T) {
 	repo := scriptRepo(t, "task/9-carried")
 
-	cmd := exec.Command("sh", "-c", remoteWorktreeScript(repo, "10-brand-new", "task/10-brand-new"))
+	cmd := exec.Command("sh", "-c", remoteWorktreeScript(repo, "10-brand-new", "task/10-brand-new", modeFresh, ""))
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("script failed: %v\n%s", err, out)

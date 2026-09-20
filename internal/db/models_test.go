@@ -291,4 +291,45 @@ func TestValidateTaskModel(t *testing.T) {
 			t.Errorf("an ambient ANTHROPIC_BASE_URL should skip validation: %v", err)
 		}
 	})
+
+	// The escape hatch inspects only Claude routing signals (CLAUDE_CONFIG_DIR,
+	// ANTHROPIC_BASE_URL), so it must never suppress validation for a non-Claude
+	// executor — grok and cursor do not route through those signals, so a bad
+	// model on a grok/cursor task must be caught here regardless of a Claude
+	// proxy configured alongside it. A positive guard pins that a *valid*
+	// grok model is still accepted under the proxy (the fix re-validates, it
+	// does not over-reach and reject sound overrides).
+	t.Run("ambient base url must not suppress validation for non-Claude executor", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:11434")
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Executor: ExecutorGrok, Model: "claude-opus-5"}); err == nil {
+			t.Error("an ambient Claude proxy must not disable validation for a grok task; expected rejection of claude-opus-5")
+		}
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Executor: ExecutorCursor, Model: "phi-3"}); err == nil {
+			t.Error("an ambient Claude proxy must not disable validation for a cursor task; expected rejection of an unknown-vendor model phi-3")
+		}
+		// Positive guard: a sound grok override still passes under the proxy.
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Executor: ExecutorGrok, Model: "grok-4-fast"}); err != nil {
+			t.Errorf("a valid grok model should still pass under a Claude proxy: %v", err)
+		}
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Executor: ExecutorCursor, Model: "gpt-5"}); err != nil {
+			t.Errorf("a valid cursor model should still pass under a Claude proxy: %v", err)
+		}
+	})
+
+	t.Run("per-task config dir must not suppress validation for non-Claude executor", func(t *testing.T) {
+		task := &Task{Project: "stock", Executor: ExecutorGrok, Model: "claude-opus-5", ClaudeConfigDir: "~/.claude-ollama"}
+		if err := database.ValidateTaskModel(task); err == nil {
+			t.Error("a per-task Claude config dir must not disable validation for a grok task")
+		}
+	})
+
+	t.Run("project config dir must not suppress validation for non-Claude executor", func(t *testing.T) {
+		if err := database.ValidateTaskModel(&Task{Project: "ollama", Executor: ExecutorGrok, Model: "claude-opus-5"}); err == nil {
+			t.Error("a project-level Claude config dir must not disable validation for a grok task")
+		}
+		// Positive guard: a sound grok override still passes on a proxied project.
+		if err := database.ValidateTaskModel(&Task{Project: "ollama", Executor: ExecutorGrok, Model: "grok-4-fast"}); err != nil {
+			t.Errorf("a valid grok model should still pass on a proxied project: %v", err)
+		}
+	})
 }

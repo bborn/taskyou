@@ -138,15 +138,18 @@ func ValidateModel(executor, model string) error {
 }
 
 // ValidateTaskModel checks a task's model override against the executor that
-// will run it, skipping the check when the task is routed at a non-stock
-// backend. This is the entry point every write path should use — it resolves
-// the escape hatch (per-task config dir or env, the project's config dir, an
-// ambient ANTHROPIC_BASE_URL) that a bare ValidateModel call cannot see.
+// will run it, skipping the check only when a *Claude* task is routed at a
+// non-stock backend. This is the entry point every write path should use — it
+// resolves the escape hatch (per-task config dir or env, the project's config
+// dir, an ambient ANTHROPIC_BASE_URL) that a bare ValidateModel call cannot see.
+// The hatch is Claude-only: only Claude consumes CLAUDE_CONFIG_DIR and
+// ANTHROPIC_BASE_URL, so a grok or cursor task is always validated, even when
+// a Claude proxy is configured alongside it.
 func (db *DB) ValidateTaskModel(t *Task) error {
 	if t == nil || strings.TrimSpace(t.Model) == "" {
 		return nil
 	}
-	if db.taskModelBackendIsCustom(t) {
+	if resolveExecutor(t.Executor) == ExecutorClaude && db.taskModelBackendIsCustom(t) {
 		return nil
 	}
 	return ValidateModel(t.Executor, t.Model)

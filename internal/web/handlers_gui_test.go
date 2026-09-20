@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -229,6 +231,72 @@ func TestHandleAddAttachment_Invalid(t *testing.T) {
 			srv.handleAddAttachment(w, req)
 			if w.Code != tc.want {
 				t.Errorf("expected %d, got %d", tc.want, w.Code)
+			}
+		})
+	}
+}
+
+// tuiDetectMime mirrors internal/ui/attachments.go detectMimeType, which since
+// the MIME-detection fix uses the same stdlib-based logic the web handler's
+// handleAddAttachment uses (mime.TypeByExtension -> http.DetectContentType). It
+// is replicated here because detectMimeType is unexported. The point of this
+// test is the cross-surface path: store the type the TUI would have stored, then
+// serve it through the web GUI and confirm a renderable Content-Type + inline
+// disposition come back, so the browser renders inline instead of downloading.
+func tuiDetectMime(filename string, data []byte) string {
+	mt := mime.TypeByExtension(filepath.Ext(filename))
+	if mt == "" {
+		mt = http.DetectContentType(data)
+	}
+	if mt == "" {
+		mt = "application/octet-stream"
+	}
+	return mt
+}
+
+func TestAttachmentDownload_TuiCreatedServesInline(t *testing.T) {
+	srv, database, _ := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "tui-attached", Status: db.StatusBacklog})
+
+	cases := []struct {
+		name     string
+		filename string
+		data     []byte
+	}{
+		{"extensionless text", "notes", []byte("reminder notes\n")},
+		{"extensionless makefile", "Makefile", []byte("all: build\n\tgo build ./...\n")},
+		{"csv", "data.csv", []byte("name,age\nalice,30\n")},
+		{"yaml", "config.yaml", []byte("key: value\n")},
+		{"shell", "script.sh", []byte("#!/bin/sh\necho hi\n")},
+		{"webp image", "photo.webp", []byte("RIFF\x00\x00\x00\x00WEBP")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Simulate the TUI new-task / retry flow: it has already read the
+			// bytes, calls detectMimeType(path, data), and persists the result.
+			mimeType := tuiDetectMime(tc.filename, tc.data)
+			att, err := database.AddAttachment(task.ID, tc.filename, mimeType, tc.data)
+			if err != nil {
+				t.Fatalf("AddAttachment: %v", err)
+			}
+
+			// The web GUI serves rows created by either surface identically.
+			req := httptest.NewRequest("GET", fmt.Sprintf("/api/attachments/%d", att.ID), nil)
+			req.SetPathValue("id", fmt.Sprint(att.ID))
+			w := httptest.NewRecorder()
+			srv.handleGetAttachment(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			ct := w.Header().Get("Content-Type")
+			if ct == "application/octet-stream" {
+				t.Errorf("TUI-added %q served as application/octet-stream; expected a renderable type so the browser renders inline", tc.filename)
+			}
+			if cd := w.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "inline; filename=") {
+				t.Errorf("expected inline disposition, got %q", cd)
+			}
+			if got := w.Body.String(); got != string(tc.data) {
+				t.Errorf("body = %q, want %q", got, tc.data)
 			}
 		})
 	}

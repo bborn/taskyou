@@ -808,6 +808,192 @@ func TestBackfillPreservesOrderAndExistingHistory(t *testing.T) {
 	}
 }
 
+// TestBackfillRetriesAfterAPerTaskGenesisFailure is the regression test for the
+// orphaned-task bug: when a per-task genesis insert fails during the one-time
+// backfill, the done-marker MUST NOT be written, so the next migrate() finds
+// the failed task via the seed query's WHERE NOT EXISTS predicate and gives it
+// the genesis event it missed.
+//
+// The bug was that appendGenesisEvent swallowed the per-task insert error and
+// backfillStatusEvents then wrote statusEventBackfillKey = "1" unconditionally.
+// Once the marker was "1" the function's top-of-body gate returned nil on
+// every later call, so the orphaned task was never retried — its row said a
+// status, its log folded to "<no events>" forever, and CheckStatusConsistency
+// reported it for the rest of the database's life.
+//
+// The per-task insert failure is the transient SQLITE_BUSY / I/O case the
+// genesisEventSQL docstring names. A SQLite BEFORE INSERT trigger that
+// RAISE(ABORT)s only the orphaned task's row is the cheapest way to make a
+// single insert fail without dropping the table for everyone — it stands in
+// for the second-writer contention the single-connection pool inside one
+// process cannot reproduce.
+func TestBackfillRetriesAfterAPerTaskGenesisFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	database, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	// Build a legacy database: three tasks with rows but no status events, the
+	// shape every real installation is in before this migration targets it.
+	legacy := []struct {
+		title  string
+		status string
+	}{
+		{"Migrate the jobs table to UUID keys", StatusDone},
+		{"Backfill the customer tax ids", StatusArchived},
+		{"Rotate the API signing key", StatusBacklog},
+	}
+	var ids []int64
+	for _, l := range legacy {
+		task := newStatusTask(t, database, l.title, StatusBacklog)
+		ids = append(ids, task.ID)
+		if _, err := database.Exec(`UPDATE tasks SET status = ? WHERE id = ?`,
+			l.status, task.ID); err != nil {
+			t.Fatalf("seed legacy row %q: %v", l.title, err)
+		}
+	}
+	// Erase the log and the backfill marker, so the next run looks exactly
+	// like the first upgrade of an old database.
+	if _, err := database.Exec(`DELETE FROM task_status_events`); err != nil {
+		t.Fatalf("clear log: %v", err)
+	}
+	if err := database.SetSetting(statusEventBackfillKey, ""); err != nil {
+		t.Fatalf("clear backfill marker: %v", err)
+	}
+
+	// Inject a per-task insert failure for ONE task. The trigger's WHEN clause
+	// cannot use a bound parameter (SQLite rejects "trigger cannot use
+	// variables"), so the int64 is interpolated directly — safe in a test that
+	// controls the value.
+	orphaned := ids[1]
+	if _, err := database.Exec(fmt.Sprintf(`
+		CREATE TRIGGER trg_block_genesis_for_orphan BEFORE INSERT ON task_status_events
+		WHEN NEW.task_id = %d
+		BEGIN
+			SELECT RAISE(ABORT, 'forced genesis failure for orphaned task');
+		END
+	`, orphaned)); err != nil {
+		t.Fatalf("create failure-injection trigger: %v", err)
+	}
+
+	// Run the backfill directly. Two tasks should succeed; the orphan should
+	// fail its insert and the function should leave the marker unset.
+	if err := database.backfillStatusEvents(); err != nil {
+		t.Fatalf("backfillStatusEvents returned an error (%v) — a per-task insert "+
+			"failure must not abort migrate(), only leave the marker unset", err)
+	}
+
+	// The done-marker MUST NOT be set: a per-task failure means the next
+	// migrate() must re-find the orphan via the seed query's WHERE NOT EXISTS.
+	// This is the central assertion — it is what was unreachable while
+	// appendGenesisEvent swallowed the error.
+	marker, _ := database.GetSetting(statusEventBackfillKey)
+	if marker == "1" {
+		t.Fatal("the backfill wrote the done-marker while a genesis insert " +
+			"failed; the orphaned task will never be retried")
+	}
+
+	// The two tasks the trigger did not block got their genesis events; the
+	// orphan got nothing.
+	for i, id := range ids {
+		events, err := database.GetStatusEvents(id)
+		if err != nil {
+			t.Fatalf("GetStatusEvents(%d): %v", id, err)
+		}
+		if id == orphaned {
+			if len(events) != 0 {
+				t.Errorf("orphaned task #%d got %d event(s); the trigger should "+
+					"have blocked its insert", id, len(events))
+			}
+			continue
+		}
+		if len(events) != 1 {
+			t.Errorf("task #%d got %d genesis events, want 1", id, len(events))
+		}
+		if len(events) > 0 && events[0].To != legacy[i].status {
+			t.Errorf("task #%d genesis records %q, row says %q",
+				id, events[0].To, legacy[i].status)
+		}
+	}
+
+	// The consistency check reports the orphan: row says a status, events fold
+	// to "<no events>". This is the surface `ty debug status-consistency` and
+	// `ty doctor` expose — it is why a partial backfill failure is not silent.
+	mismatches, err := database.CheckStatusConsistency()
+	if err != nil {
+		t.Fatalf("CheckStatusConsistency: %v", err)
+	}
+	if len(mismatches) != 1 || mismatches[0].TaskID != orphaned {
+		t.Fatalf("want exactly the orphaned task #%d reported, got %v",
+			orphaned, mismatches)
+	}
+
+	// The contention clears (the trigger stood in for the transient
+	// SQLITE_BUSY). Drop it and re-run the backfill — the orphan must be
+	// recovered, because the done-marker was left unset and the function's
+	// top-of-body gate therefore does not short-circuit.
+	if _, err := database.Exec(`DROP TRIGGER trg_block_genesis_for_orphan`); err != nil {
+		t.Fatalf("drop failure-injection trigger: %v", err)
+	}
+	if err := database.backfillStatusEvents(); err != nil {
+		t.Fatalf("backfillStatusEvents retry: %v", err)
+	}
+
+	// Every task now has its single genesis event, stamped with the
+	// migration's actor, recording the row's status with a from of "".
+	for i, id := range ids {
+		events, err := database.GetStatusEvents(id)
+		if err != nil {
+			t.Fatalf("GetStatusEvents(%d) after retry: %v", id, err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("task #%d has %d events after retry, want 1", id, len(events))
+		}
+		g := events[0]
+		if g.To != legacy[i].status {
+			t.Errorf("task #%d genesis records %q after retry, row says %q",
+				id, g.To, legacy[i].status)
+		}
+		if g.From != "" {
+			t.Errorf("task #%d genesis invented a from-status %q after retry",
+				id, g.From)
+		}
+		if g.Actor != ActorMigration {
+			t.Errorf("task #%d genesis actor is %q, want migration", id, g.Actor)
+		}
+	}
+
+	// The marker is now set, and the consistency check — the invariant the
+	// whole migration exists to make pass on a real database — is clean.
+	marker, _ = database.GetSetting(statusEventBackfillKey)
+	if marker != "1" {
+		t.Fatalf("done-marker is %q after a fully-successful retry, want %q",
+			marker, "1")
+	}
+	mismatches, err = database.CheckStatusConsistency()
+	if err != nil {
+		t.Fatalf("CheckStatusConsistency after retry: %v", err)
+	}
+	if len(mismatches) != 0 {
+		t.Fatalf("after retry, consistency check still reports mismatches: %v",
+			mismatches)
+	}
+
+	// Idempotent: a third run, with the marker set, rewrites nothing.
+	eventsBefore, _ := database.GetStatusEvents(ids[0])
+	if err := database.backfillStatusEvents(); err != nil {
+		t.Fatalf("backfillStatusEvents third call: %v", err)
+	}
+	eventsAfter, _ := database.GetStatusEvents(ids[0])
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("a marker-guarded backfill appended %d event(s) on a no-op run",
+			len(eventsAfter)-len(eventsBefore))
+	}
+}
+
 // TestSetTaskStatusIsSerializedUnderConcurrency: the gates read the task and
 // then write it. If two callers interleave between the read and the write, a
 // task can move twice from one starting point and the log stops explaining the

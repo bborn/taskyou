@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // runRemoteSession starts a task's agent inside a tmux session on the host a
@@ -170,7 +171,11 @@ func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, run
 
 	env := fmt.Sprintf("WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%s",
 		task.ID, sessionID, task.Port, shellQuote(workDir))
-	flags := claudePermissionFlag(task) + effortFlag(task.EffortLevel) + modelFlag(task.Model)
+	// Remote Control is Claude-only; for codex the flags are reset below, so
+	// rcFlag is a no-op there. Threaded into flags before the prompt == "" early
+	// return so both the prompt-bearing and empty-prompt branches emit it,
+	// mirroring the local fresh-launch and resume paths (executor.go).
+	flags := claudePermissionFlag(task) + rcFlag(task) + effortFlag(task.EffortLevel) + modelFlag(task.Model)
 	if executorName == "codex" {
 		flags = ""
 		if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
@@ -185,7 +190,14 @@ func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, run
 		return fmt.Sprintf("%s %s %s", env, executorName, flags), nil
 	}
 	promptFile := shellQuote(remotePromptPath(task.ID, runs...))
-	return fmt.Sprintf(`%s %s %s"$(cat %s)"; rm -f %s`, env, executorName, flags, promptFile, promptFile), nil
+	// Suppress the staged prompt arg for Remote Control so claude starts with a
+	// blank, drivable session instead of running the staged prompt — matching the
+	// local launch/resume sites. The flag itself is added above via rcFlag.
+	promptArg := fmt.Sprintf(`"$(cat %s)"; rm -f %s`, promptFile, promptFile)
+	if task.RemoteControl {
+		promptArg = ""
+	}
+	return fmt.Sprintf(`%s %s %s%s`, env, executorName, flags, promptArg), nil
 }
 
 // SupportsRemoteExecutor reports whether a remote launch adapter is available.
@@ -195,13 +207,23 @@ func SupportsRemoteExecutor(name string) bool { return name == "claude" || name 
 func findOrCreateRemoteDaemonSession(ctx context.Context, coordinator string) (string, error) {
 	session := "task-daemon-remote-" + coordinator
 	if err := tmuxCmd(ctx, "has-session", "-t", "="+session).Run(); err != nil {
-		if err := tmuxCmd(ctx, "new-session", "-d", "-s", session, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
+		// Same size as a local agent session, for the same reason (see
+		// tmuxctl.DefaultWidth): a detached session otherwise starts at tmux's
+		// 80x24, the agent lays its whole session out for 80 columns, and the
+		// first thing the user sees when they open the task is a screen written
+		// for a terminal a third the width of theirs, reflowing as it attaches.
+		args := append([]string{"new-session", "-d", "-s", session}, tmuxctl.DefaultSizeArgs()...)
+		if err := tmuxCmd(ctx, append(args, "-n", "_placeholder", "tail", "-f", "/dev/null")...).Run(); err != nil {
 			// Another task from this coordinator may have created it concurrently.
 			if check := tmuxCmd(ctx, "has-session", "-t", "="+session).Run(); check != nil {
 				return "", fmt.Errorf("create remote session: %w", err)
 			}
 		}
 	}
+	// Set on every launch, not only at creation: the windows of tasks placed
+	// later must start at this size too, including in a session an older ty left
+	// behind at 80x24.
+	_ = tmuxCmd(ctx, "set-option", "-t", session, "default-size", tmuxctl.DefaultSize()).Run()
 	tagSessionOwner(ctx, session)
 	return session, nil
 }

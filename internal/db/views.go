@@ -109,23 +109,23 @@ func (db *DB) SaveView(name, query string) (*SavedView, error) {
 	}
 	query = strings.TrimSpace(query)
 
-	// New views land at the end of the list.
-	var next int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(sort_order), 0) + 1 FROM saved_views`).Scan(&next); err != nil {
-		return nil, fmt.Errorf("next saved view order: %w", err)
-	}
-	// Atomic upsert by name. The prior form did GetSavedView then INSERT/UPDATE
-	// as separate statements, so two concurrent saves of the same fresh name
-	// both saw "no existing row" and both INSERTed; the second hit the
-	// UNIQUE COLLATE NOCASE constraint and bubbled up to the client as a 500.
-	// ON CONFLICT folds the check-then-write into one statement, so the second
-	// save updates the row the first just created instead of failing.
+	// New views land at the end of the list. A single upsert makes the
+	// existence check, the sort_order computation and the write atomic at the
+	// statement level: splitting the SELECT COALESCE(MAX(...)) from the INSERT
+	// leaves a window in which two concurrent callers both read the same MAX
+	// and both insert with the same sort_order, which has no UNIQUE constraint
+	// and so is silently stored, making ListSavedViews render the collided
+	// subset alphabetically rather than in creation order. SQLite holds the
+	// write lock for the whole statement, so the subquery reads within that
+	// lock and cannot interleave with another writer, in-process or not.
 	if _, err := db.Exec(`
 		INSERT INTO saved_views (name, query, sort_order)
-		VALUES (?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET query = excluded.query, updated_at = CURRENT_TIMESTAMP
-	`, name, query, next); err != nil {
-		return nil, fmt.Errorf("upsert saved view: %w", err)
+		VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM saved_views))
+		ON CONFLICT(name) DO UPDATE SET
+			query = excluded.query,
+			updated_at = CURRENT_TIMESTAMP
+	`, name, query); err != nil {
+		return nil, fmt.Errorf("save saved view: %w", err)
 	}
 	return db.GetSavedView(name)
 }

@@ -83,14 +83,19 @@ func probeWindow(ctx context.Context, target string, remote bool) windowProbe {
 // handshake timed out, auth declined. Any other status is the remote command's
 // own, relayed verbatim, so a 1 here is tmux on the far side saying the window
 // is not there. A probe that never produced a status at all (context deadline,
-// or the ssh binary failing to start) is likewise a failure to look.
+// the ssh binary failing to start, or ssh itself killed by a signal — an OOM,
+// an operator's pkill, cgroup pressure) is likewise a failure to look. Go's
+// (*exec.ExitError).ExitCode returns -1 for a signal-terminated process, the
+// documented sentinel for "no exit status was produced"; a signalled ssh never
+// relayed tmux's answer, so its -1 is grouped with 255 rather than trusted as a
+// window-gone verdict.
 func classifyRemoteProbeFailure(ctxErr, err error) windowProbe {
 	if ctxErr != nil {
 		return windowUnreachable
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		if exitErr.ExitCode() == 255 {
+		if exitErr.ExitCode() == 255 || exitErr.ExitCode() < 0 {
 			return windowUnreachable
 		}
 		return windowGone

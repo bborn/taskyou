@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -202,5 +203,80 @@ func TestPoll_LowBudgetPausesUntilReset(t *testing.T) {
 	p.Poll(context.Background(), targets)
 	if len(f.calls) != 1 {
 		t.Fatal("polled while budget was low")
+	}
+}
+
+// A host:port is permanently unserviceable (gh rejects --hostname at flag
+// parse). The poller must attempt it once (so the user gets terminal treatment
+// from real input), and then never again — even well past the backoff cap.
+func TestPoll_UnsupportedHostPortIsTerminal(t *testing.T) {
+	f := &recordingFetcher{err: fmt.Errorf("%w: %s", ErrUnsupportedHostPort, "gh.acme.test:8443")}
+	p, clock := newTestPoller(f)
+	targets := []PRTarget{{TaskID: 1, RepoDir: "/r", Branch: "a", Known: &PRInfo{State: PRStateOpen, CheckState: CheckStatePending}}}
+
+	if got := p.Poll(context.Background(), targets); len(got) != 0 {
+		t.Fatalf("a terminal failure must produce no results, got %+v", got)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("expected exactly one fetch attempt to record terminal state, got %d", len(f.calls))
+	}
+
+	// Advance well past every backoff tier — terminal must not time out.
+	for i := 0; i < 5; i++ {
+		clock.advance(prBackoffMax + time.Second)
+		if got := p.Poll(context.Background(), targets); len(got) != 0 {
+			t.Fatalf("terminal repo must not produce results after retry %d: %+v", i, got)
+		}
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("terminal repo must never be retried, got %d fetch calls", len(f.calls))
+	}
+}
+
+// A terminal repo must not poison the poller's handling of other repos: a
+// healthy repo in the same Poll call must still be queried and produce
+// results.
+func TestPoll_TerminalRepoDoesNotBlockOtherRepos(t *testing.T) {
+	terminalErr := fmt.Errorf("%w: %s", ErrUnsupportedHostPort, "gh.acme.test:8443")
+	var calls []string
+	fetch := func(ctx context.Context, repoDir string, branches []string) (*BranchPRs, error) {
+		calls = append(calls, repoDir)
+		if repoDir == "/terminal" {
+			return nil, terminalErr
+		}
+		return &BranchPRs{PRs: map[string]*PRInfo{}, RateRemaining: -1}, nil
+	}
+	clock := &fakeClock{t: time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)}
+	p := NewPRPollerWithFetcher(fetch)
+	p.now = clock.now
+
+	targets := []PRTarget{
+		{TaskID: 1, RepoDir: "/terminal", Branch: "a", Known: &PRInfo{State: PRStateOpen, CheckState: CheckStatePending}},
+		{TaskID: 2, RepoDir: "/healthy", Branch: "b", Known: &PRInfo{State: PRStateOpen, CheckState: CheckStatePassing, Mergeable: "MERGEABLE"}},
+	}
+	if got := p.Poll(context.Background(), targets); len(got) != 1 {
+		t.Fatalf("expected one result from the healthy repo, got %d", len(got))
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected both repos to be fetched exactly once, got %d (%v)", len(calls), calls)
+	}
+
+	// Advance past every cadence and backoff — terminal stays skipped, healthy
+	// is asked again at its cadence.
+	for i := 0; i < 4; i++ {
+		clock.advance(prBackoffMax)
+		p.Poll(context.Background(), targets)
+	}
+	terminalCalls := 0
+	for _, c := range calls {
+		if c == "/terminal" {
+			terminalCalls++
+		}
+	}
+	if terminalCalls != 1 {
+		t.Fatalf("terminal repo was fetched %d times, want 1 (no retries ever)", terminalCalls)
+	}
+	if len(calls) <= 1 {
+		t.Fatalf("healthy repo must keep being polled on cadence, total calls = %d", len(calls))
 	}
 }

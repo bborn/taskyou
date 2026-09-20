@@ -277,6 +277,94 @@ func TestAuditWorktreePathsFindsMainCheckouts(t *testing.T) {
 	}
 }
 
+// TestAuditWorktreePathsSkipsRunningTasks: a task the daemon is actively
+// executing is reported by the audit but never modified — the contract
+// AuditWorktreePaths' doc comment makes. "Running" has to be readable from
+// both invokers:
+//
+//   - the CLI audit (cmd/task worktrees audit --fix), whose Executor is
+//     freshly built and has an empty runningTasks map — only the DB-backed
+//     `status` ListWorktreeRefs already returns carries the signal that a
+//     daemon has picked the task up;
+//   - the started daemon itself, where runningTasks knows about a task the
+//     worker loop just admitted but has not yet flipped to "processing" at
+//     snapshot time.
+//
+// Both paths must skip the clear, while a not-running main-checkout row in
+// the same run is still cleared (so the guard does not over-suppress).
+func TestAuditWorktreePathsSkipsRunningTasks(t *testing.T) {
+	exec, database, repo := newWorktreeSweepFixture(t)
+
+	// A main-checkout row whose status is "processing" — the daemon is
+	// actively executing it. The audit's snapshot ListWorktreeRefs returns
+	// it, and the guard must read the status.
+	processingTask := staleTask(t, database, repo)
+	if _, err := database.Exec(
+		`UPDATE tasks SET status = ?, completed_at = NULL WHERE id = ?`,
+		db.StatusProcessing, processingTask.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second main-checkout row left as "done" but marked running through
+	// this Executor's in-process map — the started-daemon path.
+	inProcessTask := staleTask(t, database, repo)
+	exec.mu.Lock()
+	exec.runningTasks[inProcessTask.ID] = true
+	exec.mu.Unlock()
+
+	// A third main-checkout row, done and not running — the control that
+	// proves the running guard does not suppress non-running rows.
+	plainTask := staleTask(t, database, repo)
+
+	issues, err := exec.AuditWorktreePaths(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// All three rows are flagged so the operator sees them; the running
+	// guard changes whether they are cleared, not whether they are reported.
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues (each row flagged), got %d: %+v", len(issues), issues)
+	}
+	byID := make(map[int64]WorktreePathIssue, len(issues))
+	for _, iss := range issues {
+		byID[iss.TaskID] = iss
+	}
+	if byID[processingTask.ID].Fixed {
+		t.Error("a task in 'processing' status must not be cleared (skipped because it is running)")
+	}
+	if byID[inProcessTask.ID].Fixed {
+		t.Error("a task flagged running via the in-process map must not be cleared (skipped because it is running)")
+	}
+	if !byID[plainTask.ID].Fixed {
+		t.Error("a non-running main-checkout row must still be cleared")
+	}
+
+	// The two running rows must be left untouched in the DB; the plain row
+	// must be cleared.
+	if got := taskWorktreePath(t, database, processingTask.ID); got != repo {
+		t.Errorf("processing task's worktree_path must be left alone, got %q", got)
+	}
+	if got := taskWorktreePath(t, database, inProcessTask.ID); got != repo {
+		t.Errorf("in-process running task's worktree_path must be left alone, got %q", got)
+	}
+	if got := taskWorktreePath(t, database, plainTask.ID); got != "" {
+		t.Errorf("the non-running row should be cleared, got %q", got)
+	}
+
+	// archive_worktree_path must also survive on the running rows: a clear
+	// would drop saved archive state. Load full task rows and check.
+	for _, id := range []int64{processingTask.ID, inProcessTask.ID} {
+		got, err := database.GetTask(id)
+		if err != nil {
+			t.Fatalf("get task %d: %v", id, err)
+		}
+		if got.WorktreePath != repo {
+			t.Errorf("task %d: worktree_path must be untouched, got %q", id, got.WorktreePath)
+		}
+	}
+}
+
 func taskWorktreePath(t *testing.T, database *db.DB, id int64) string {
 	t.Helper()
 	task, err := database.GetTask(id)
@@ -321,5 +409,56 @@ func TestClassifyWorktreePath(t *testing.T) {
 	}
 	if isMainWorkingTree(wt) {
 		t.Error("isMainWorkingTree must be false for a linked worktree")
+	}
+}
+
+// TestAuditWorktreePathsFlagsArchivePath exercises the archive_worktree_path
+// arm of the audit: a done task whose live worktree_path is a real linked
+// worktree (not flagged) but whose archive_worktree_path names the project's
+// main checkout (flagged). The audit must report exactly the
+// archive_worktree_path field. With --fix it clears both columns in a single
+// UPDATE (the existing audit semantic — ClearTaskWorktreeRefs/IfMatch always
+// drop both columns), but the audit never touches the on-disk linked
+// worktree, only the recorded references.
+func TestAuditWorktreePathsFlagsArchivePath(t *testing.T) {
+	exec, database, repo := newWorktreeSweepFixture(t)
+	wt := addWorktree(t, repo, filepath.Join(repo, ".task-worktrees", "9-live"), "task/live")
+	archived := staleTask(t, database, wt) // live worktree_path is a real linked worktree (good)
+	if _, err := database.Exec(
+		`UPDATE tasks SET archive_worktree_path = ? WHERE id = ?`,
+		repo, archived.ID); err != nil { // archive_worktree_path points at the main checkout (bad)
+		t.Fatal(err)
+	}
+
+	issues, err := exec.AuditWorktreePaths(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 || issues[0].TaskID != archived.ID || issues[0].Field != "archive_worktree_path" {
+		t.Fatalf("audit should flag the archive_worktree_path only, got %+v", issues)
+	}
+	if issues[0].Fixed {
+		t.Error("audit without --fix must not modify anything")
+	}
+
+	fixedIssues, err := exec.AuditWorktreePaths(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fixedIssues) != 1 || !fixedIssues[0].Fixed {
+		t.Fatalf("audit --fix should report the archive path issue as Fixed, got %+v", fixedIssues)
+	}
+	got, err := database.GetTask(archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The audit's clear is atomic on both columns (existing semantic); both
+	// references are cleared even though only the archive one was bad. The
+	// live on-disk linked worktree is the sweeper's concern, not the audit's.
+	if got.ArchiveWorktreePath != "" {
+		t.Errorf("the bad archive_worktree_path must be cleared, got %q", got.ArchiveWorktreePath)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("the on-disk linked worktree must survive the audit (the audit only rewrites DB refs): %v", err)
 	}
 }

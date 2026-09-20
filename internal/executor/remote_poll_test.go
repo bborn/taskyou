@@ -3,9 +3,11 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,6 +20,20 @@ import (
 func exitingSSH(t *testing.T, exitCode int) string {
 	t.Helper()
 	return stubSSH(t, "#!/bin/sh\nexit "+strconv.Itoa(exitCode)+"\n")
+}
+
+// sigKilledSSH writes a stub that stands in for an ssh process the kernel or an
+// operator has SIGKILLed mid-probe (OOM, `pkill -9`, cgroup pressure). It kills
+// itself with SIGKILL before doing anything else, so cmd.Run() reports an
+// *exec.ExitError whose ExitCode() is -1 while the probe's own context is still
+// live — the exact shape an externally-signalled probe arrives at the classifier
+// in, distinct from a tripped context deadline.
+//
+// exitingSSH cannot represent this: `sh -c 'exit N'` always exits with a status
+// and never yields ExitCode()==-1.
+func sigKilledSSH(t *testing.T) string {
+	t.Helper()
+	return stubSSH(t, "#!/bin/sh\nkill -9 $$\n")
 }
 
 // The whole point of the third probe state: ssh failing to connect must not look
@@ -55,6 +71,53 @@ func TestClassifyRemoteProbeFailureTreatsAStartFailureAsUnreachable(t *testing.T
 	}
 }
 
+// A probe whose ssh process was killed by a signal — an OOM, an operator's
+// `pkill -9`, cgroup pressure — never produced an exit status at all. Go's
+// (*exec.ExitError).ExitCode returns -1, the documented sentinel for a
+// signal-terminated process, and a signalled ssh never relayed tmux's answer, so
+// the classifier must read that as a failure to look rather than a gone window.
+//
+// exitingSSH stubs ssh as `sh -c 'exit N'`, which can only ever produce an
+// exit-CODE error; a signal-terminated error has a different shape, so this case
+// runs a real process and signals it (the way the bug is produced in the wild).
+func TestClassifyRemoteProbeFailureTreatsASignalledProbeAsUnreachable(t *testing.T) {
+	signals := []struct {
+		name string
+		sig  os.Signal
+	}{
+		{"SIGKILL (OOM, pkill -9)", syscall.SIGKILL},
+		{"SIGTERM (cgroup graceful shutdown)", syscall.SIGTERM},
+	}
+	for _, s := range signals {
+		t.Run(s.name, func(t *testing.T) {
+			// Mirror the production wire shape: RemoteRunner wraps every remote
+			// command in `sh -lc '...'`, so the process ty waits on is the sh
+			// below, not a bare executable.
+			cmd := exec.Command("sh", "-c", "sleep 30")
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Process.Signal(s.sig); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Wait()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("signal produced err=%T, want *exec.ExitError", err)
+			}
+			if got := exitErr.ExitCode(); got != -1 {
+				t.Fatalf("ExitCode()=%d, want -1 (Go's sentinel for signal termination)", got)
+			}
+			// ctxErr is nil here: the probe's own context did not time out, the
+			// ssh process was killed from outside it. This is the exact shape that
+			// separates this bug from the (already correct) context-deadline branch.
+			if got := classifyRemoteProbeFailure(nil, err); got != windowUnreachable {
+				t.Errorf("signalled probe classified as %v, want unreachable (a failed look, not a gone window)", got)
+			}
+		})
+	}
+}
+
 // The local path keeps exactly two outcomes. A local tmux that fails for any
 // reason means "gone", as it always has — an unplaced task must poll
 // byte-for-byte the way it did before remote polling existed.
@@ -76,6 +139,17 @@ func TestProbeWindowRemoteReportsGoneWhenTmuxSaysSo(t *testing.T) {
 	ctx := WithRunner(context.Background(), RemoteRunner{Host: "h", SSHBin: exitingSSH(t, 1)})
 	if got := probeWindow(ctx, "task-daemon-1:task-5247", true); got != windowGone {
 		t.Errorf("probe with tmux exit 1 = %v, want gone", got)
+	}
+}
+
+// A probe whose ssh is externally SIGKILLed (OOM, pkill -9, cgroup pressure) must
+// read as unreachable, not gone: a signalled ssh never relayed tmux's status, so
+// it tells us nothing about the window. This mirrors the ssh-exits-255 case but
+// exercises the -1 exit-code shape that an external kill produces.
+func TestProbeWindowRemoteReportsUnreachableWhenSSHIsSignalled(t *testing.T) {
+	ctx := WithRunner(context.Background(), RemoteRunner{Host: "h", SSHBin: sigKilledSSH(t)})
+	if got := probeWindow(ctx, "task-daemon-1:task-5247", true); got != windowUnreachable {
+		t.Errorf("probe with a signalled ssh = %v, want unreachable", got)
 	}
 }
 

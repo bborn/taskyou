@@ -687,15 +687,6 @@ func genesisEventSQL(x execer, taskID int64, status string, actor Actor, reason 
 	return nil
 }
 
-// appendGenesisEvent writes a genesis event outside any transaction. Used by
-// the backfill, where each task is independent and a failure is reported by the
-// caller rather than aborting the rest.
-func (db *DB) appendGenesisEvent(taskID int64, status string, actor Actor, reason string, at *time.Time) {
-	if err := genesisEventSQL(db, taskID, status, actor, reason, at); err != nil {
-		log.Printf("%v", err)
-	}
-}
-
 // GetStatusEvents returns a task's full transition history in append order,
 // refusals included.
 func (db *DB) GetStatusEvents(taskID int64) ([]StatusEvent, error) {
@@ -858,16 +849,41 @@ func (db *DB) backfillStatusEvents() error {
 		return err
 	}
 
+	// Each genesis insert is its own statement (no surrounding transaction:
+	// these are independent tasks, and a single transaction over thousands of
+	// legacy rows would only widen the SQLITE_BUSY window). But a per-task
+	// failure must NOT be swallowed the way the old appendGenesisEvent wrapper
+	// swallowed it: the done-marker below is the one thing that stops this
+	// function from re-running, so writing it after a dropped insert would
+	// orphan the failed task with zero status events forever. The seed
+	// query's WHERE NOT EXISTS predicate is exactly what makes the failed
+	// tasks re-selectable on the next migrate — but only if the marker is
+	// left unset until every seed has succeeded.
+	failed := 0
 	for _, s := range seeds {
 		var at *time.Time
 		if !s.at.IsZero() {
 			t := s.at.Time
 			at = &t
 		}
-		db.appendGenesisEvent(s.id, s.status, ActorMigration,
-			"backfilled: this task predates the status log", at)
+		if err := genesisEventSQL(db, s.id, s.status, ActorMigration,
+			"backfilled: this task predates the status log", at); err != nil {
+			// Leave the marker unset so the next migrate retries the missing
+			// tasks. Surfaced through CheckStatusConsistency / `ty debug
+			// status-consistency` rather than a startup abort, so a transient
+			// SQLITE_BUSY under a second writer does not block every `ty`
+			// command until the contention clears.
+			log.Printf("status log: backfill genesis event for task %d: %v", s.id, err)
+			failed++
+			continue
+		}
 	}
-
+	if failed > 0 {
+		log.Printf("status log: backfill: %d/%d genesis inserts failed; retrying on next migrate",
+			failed, len(seeds))
+		// Do NOT SetSetting(..., "1") until every seed has succeeded.
+		return nil
+	}
 	if len(seeds) > 0 {
 		log.Printf("status log: backfilled a genesis event for %d task(s)", len(seeds))
 	}

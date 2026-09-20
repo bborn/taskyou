@@ -562,6 +562,18 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		return m.reshowProjectFormWithError(fmt.Errorf("name is required"))
 	}
 
+	// The seeded "personal" project is the implicit default for every new task
+	// (CreateTask falls back to t.Project = "personal") and is re-seeded by
+	// ensurePersonalProject on every Open. Renaming it would break default
+	// task creation within the session, defeat the name-based DeleteProject
+	// guard, and on the next Open orphan the user's customized row behind a
+	// fresh default personal. Mirrors the deletion guard in
+	// showDeleteProjectConfirm; the DB-layer guard in UpdateProject catches
+	// retries and other surfaces.
+	if m.editProject.ID != 0 && m.editProject.Name == "personal" && name != "personal" {
+		return m.reshowProjectFormWithError(fmt.Errorf("cannot rename the personal project"))
+	}
+
 	useWorktrees := m.projectFormUseWorktrees
 
 	// For existing projects, the directory can be edited directly in the form.
@@ -655,8 +667,10 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	}
 
 	if err != nil {
-		m.err = err
-		return m, nil
+		// Reshow the form so the user can fix the error — e.g., a DB-layer
+		// rejection from UpdateProject's personal-rename guard on a retry —
+		// without losing input. Mirrors the in-form validation errors above.
+		return m.reshowProjectFormWithError(err)
 	}
 
 	// Update the project color cache

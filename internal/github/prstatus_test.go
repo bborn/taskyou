@@ -132,6 +132,69 @@ func TestFetchPRsForBranches_EnterpriseHostPassesHostname(t *testing.T) {
 	}
 }
 
+// gh's --hostname validator rejects any value containing ':'. ParseRepoRef
+// preserves a ":port" in RepoRef.Host (which is correct for git via CloneURL),
+// but feeding the same value to `gh api --hostname` can never succeed. The
+// guard must short-circuit and surface a distinguishable sentinel *before* gh
+// is spawned, for every URL form that carries a port.
+func TestFetchPRsForBranches_PortBearingHostFailsWithoutCallingGH(t *testing.T) {
+	cases := []struct {
+		name         string
+		origin       string
+		wantHostPort string
+	}{
+		{name: "https with port", origin: "https://gh.acme.test:8443/o/r", wantHostPort: "gh.acme.test:8443"},
+		{name: "https with port and .git", origin: "https://gh.acme.test:8443/o/r.git", wantHostPort: "gh.acme.test:8443"},
+		{name: "ssh url with port", origin: "ssh://git@gh.acme.test:2222/o/r.git", wantHostPort: "gh.acme.test:2222"},
+		{name: "github.com with port", origin: "https://github.com:8443/o/r", wantHostPort: "github.com:8443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			fakeGH(t, tc.origin, func(args []string) (string, string, error) {
+				calls++
+				return "", "", nil
+			})
+			_, err := FetchPRsForBranches(context.Background(), "/repo", []string{"main"})
+			if err == nil {
+				t.Fatal("expected an error for a port-bearing host, got nil")
+			}
+			if !errors.Is(err, ErrUnsupportedHostPort) {
+				t.Fatalf("error must wrap ErrUnsupportedHostPort, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantHostPort) {
+				t.Fatalf("error should name the offending host:port %q, got %q", tc.wantHostPort, err.Error())
+			}
+			if calls != 0 {
+				t.Fatalf("gh must not be spawned for a port-bearing host, gh calls = %d", calls)
+			}
+		})
+	}
+}
+
+// SCP-style git remotes use ':' as the user/repo separator, not a port. The
+// guard must not misfire on them.
+func TestFetchPRsForBranches_SCPRemoteWithoutPortStillCallsGH(t *testing.T) {
+	called := false
+	fakeGH(t, "git@github.acme.com:team/app.git", func(args []string) (string, string, error) {
+		called = true
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--hostname" {
+				if strings.ContainsRune(args[i+1], ':') {
+					t.Errorf("SCP host must not carry a port into --hostname: %q", args[i+1])
+				}
+			}
+		}
+		return `{"data":{"repository":{}}}`, "", nil
+	})
+	if _, err := FetchPRsForBranches(context.Background(), "/repo", []string{"a"}); err != nil {
+		t.Fatalf("SCP remote without port must still work: %v", err)
+	}
+	if !called {
+		t.Fatal("gh must be called for a port-less SCP enterprise host")
+	}
+}
+
 // Failures must come back as errors, never as "no PR" — that confusion is what
 // made badges vanish and triggered a fetch per task.
 func TestFetchPRsForBranches_FailuresAreErrors(t *testing.T) {
