@@ -421,7 +421,7 @@ func TestDeliverAcquiresTheTmuxPaneLockAroundItsPaste(t *testing.T) {
 			relIdx = i
 		}
 	}
-	if !(acqIdx < sbIdx && sbIdx < enterIdx && enterIdx < relIdx) {
+	if acqIdx >= sbIdx || sbIdx >= enterIdx || enterIdx >= relIdx {
 		t.Fatalf("lock doesn't bracket the paste: acq=%d set=%d enter=%d rel=%d\ncalls=%v",
 			acqIdx, sbIdx, enterIdx, relIdx, calls)
 	}
@@ -498,7 +498,7 @@ func TestSendKeysHoldsThePerPaneTmuxLock(t *testing.T) {
 			relIdx = i
 		}
 	}
-	if !(acqIdx < sendIdx && sendIdx < relIdx) {
+	if acqIdx >= sendIdx || sendIdx >= relIdx {
 		t.Fatalf("SendKeys not inside the lock: acq=%d send=%d rel=%d\ncalls=%v",
 			acqIdx, sendIdx, relIdx, calls)
 	}
