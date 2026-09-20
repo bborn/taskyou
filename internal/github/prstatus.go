@@ -32,6 +32,13 @@ const ghQueryTimeout = 20 * time.Second
 // like any other failed lookup: keep the last known state and back off.
 var ErrGHUnavailable = errors.New("gh CLI unavailable")
 
+// ErrUnsupportedHostPort means a non-default GitHub host carries a port suffix.
+// gh's --hostname flag rejects any value containing ':', so a PR lookup against
+// an Enterprise host on a non-default port can never succeed. We short-circuit
+// before spawning gh and surface a distinguishable sentinel so the poller can
+// treat the failure as terminal instead of retrying forever.
+var ErrUnsupportedHostPort = errors.New("gh does not accept a non-default port in --hostname")
+
 // RateLimitError reports that GitHub refused the query for rate limiting.
 // ResetAt is zero when GitHub didn't say when the budget returns.
 type RateLimitError struct {
@@ -173,6 +180,14 @@ func buildBranchQuery(n int) string {
 }
 
 func fetchBranchChunk(ctx context.Context, repoDir string, repo RepoRef, branches []string, into *BranchPRs) error {
+	// gh's --hostname validator rejects any value containing ':'. ParseRepoRef
+	// preserves a ":port" in RepoRef.Host (which is correct for git via
+	// CloneURL), but the same value is unserviceable here: gh exits at flag
+	// parse before any network call, so retrying can never succeed. Fail fast
+	// with a distinguishable sentinel so the poller can stop retrying.
+	if !strings.EqualFold(repo.Host, DefaultHost) && strings.ContainsRune(repo.Host, ':') {
+		return fmt.Errorf("%w: %s", ErrUnsupportedHostPort, repo.Host)
+	}
 	args := []string{"api", "graphql"}
 	if !strings.EqualFold(repo.Host, DefaultHost) {
 		args = append(args, "--hostname", repo.Host)
