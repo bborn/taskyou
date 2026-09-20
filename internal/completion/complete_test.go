@@ -357,3 +357,192 @@ func TestPlacedTaskWithPRParksForReview(t *testing.T) {
 		t.Errorf("status = %q, want blocked so it shows up for review", got)
 	}
 }
+
+// --- verify gate + remote placement -----------------------------------------
+//
+// `Complete`'s evidence gate used to resolve the directory a step's `verify:`
+// command ran in using only task.WorktreePath with an emptiness check, and fell
+// back to the daemon host's local project checkout. For a remotely placed step,
+// whose worktree lives on ANOTHER machine and whose local worktree_path is
+// empty by design, that ran `verify:` against the WRONG tree — either
+// false-rejecting correct pushed work as "Verification failed" or false-passing
+// it because the local checkout happened to satisfy the command. The fix mirrors
+// prLookupTarget's isDir guard and DEFERS the gate (skips the local run) when a
+// remote_worktree_path is on file, rather than evaluating the wrong tree.
+
+// logContains reports whether any task log line contains want.
+func logContains(logs []*db.TaskLog, want string) bool {
+	for _, l := range logs {
+		if strings.Contains(l.Content, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestVerifyDirLocalWorktreeUsed: a local task with a usable worktree runs the
+// gate in that worktree — the work was done there, so verifying there is the
+// backstop's original behaviour.
+func TestVerifyDirLocalWorktreeUsed(t *testing.T) {
+	database := testDB(t)
+	wtDir := t.TempDir()
+	task := mkTask(t, database, "local build", db.StatusProcessing, "", "")
+	task.WorktreePath = wtDir
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("set worktree: %v", err)
+	}
+	task, _ = database.GetTask(task.ID)
+
+	dir, deferRemote := verifyDir(database, task, task.ID)
+	if deferRemote {
+		t.Errorf("deferRemote = true, want false for a local task with a usable worktree")
+	}
+	if dir != wtDir {
+		t.Errorf("dir = %q, want the task's worktree %q", dir, wtDir)
+	}
+}
+
+// TestVerifyDirLocalStaleWorktreeFallsBackToProject: a worktree path on the
+// local task that is not a directory on THIS machine is unusable (it belongs to
+// another machine, or was cleaned up) — same isDir guard prLookupTarget uses.
+// For a LOCAL task (no remote_worktree_path) the verify gate then falls back to
+// the project checkout, exactly as prLookupTarget already did for git/gh.
+func TestVerifyDirLocalStaleWorktreeFallsBackToProject(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "build it", db.StatusProcessing, "", "")
+	task.WorktreePath = "/home/olgm/definitely/not/on/this/machine"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("set worktree path: %v", err)
+	}
+	task, _ = database.GetTask(task.ID)
+
+	dir, deferRemote := verifyDir(database, task, task.ID)
+	if deferRemote {
+		t.Errorf("deferRemote = true, want false — a local task with a stale " +
+			"worktree path is not a remotely placed step")
+	}
+	proj, _ := database.GetProjectByName("proj")
+	if dir != proj.Path {
+		t.Errorf("dir = %q, want the local project checkout %q (stale local worktree is unusable)", dir, proj.Path)
+	}
+}
+
+// TestVerifyDirRemoteStepDefers: a remotely placed step keeps its worktree on
+// another host (worktree_path column empty, remote_worktree_path set). The
+// daemon's local project checkout here is a DIFFERENT tree from where the work
+// was done — running `verify:` against it would test the wrong tree. The gate is
+// deferred (dir="", deferRemote=true) so the caller skips the local run rather
+// than evaluating the wrong tree.
+func TestVerifyDirRemoteStepDefers(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "placed build", db.StatusProcessing, "", "")
+	if err := database.SetTaskRemoteWorktree(task.ID,
+		"/home/olgm/wt/5316-not-on-this-machine", "task/5316-x"); err != nil {
+		t.Fatalf("set remote worktree: %v", err)
+	}
+	task, _ = database.GetTask(task.ID)
+	if task.WorktreePath != "" {
+		t.Fatalf("precondition: want empty local worktree for a remote step, got %q", task.WorktreePath)
+	}
+
+	dir, deferRemote := verifyDir(database, task, task.ID)
+	if !deferRemote {
+		t.Fatalf("deferRemote = false, want true for a remotely placed step")
+	}
+	if dir != "" {
+		t.Errorf("dir = %q, want \"\" (no local run for a remote step)", dir)
+	}
+	proj, _ := database.GetProjectByName("proj")
+	if dir == proj.Path {
+		t.Errorf("dir fell back to the daemon's local project checkout %q — that is the WRONG tree for a remote step", proj.Path)
+	}
+}
+
+// TestRemoteVerifyGateNotRejectingCorrectWork reproduces the false-reject bug
+// from the report: a remote step with `verify: "pwd; exit 1"` used to run pwd in
+// the daemon's local project checkout and then fail (exit 1),. parking correct,
+// pushed remote work as "Verification failed". The fix defers the gate so the
+// step is not rejected by a verify run against the wrong tree.
+func TestRemoteVerifyGateNotRejectingCorrectWork(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "placed build", db.StatusProcessing, "", "")
+	remoteWT := "/home/olgm/wt/5316-not-on-this-machine"
+	if err := database.SetTaskRemoteWorktree(task.ID, remoteWT, "task/5316-x"); err != nil {
+		t.Fatalf("set remote worktree: %v", err)
+	}
+	if err := database.SetStepVerify(task.ID, "pwd; exit 1"); err != nil {
+		t.Fatalf("set verify: %v", err)
+	}
+
+	outcome, err := Complete(database, task.ID, "claimed done", Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Kind == KindVerifyFailed {
+		t.Fatalf("kind = %q, want the gate DEFERRED (not rejected against the wrong tree). "+
+			"a remote step must not be rejected by a verify run in the local checkout.\noutput: %q",
+			outcome.Kind, outcome.VerifyOutput)
+	}
+	proj, _ := database.GetProjectByName("proj")
+	if outcome.VerifyOutput != "" && strings.Contains(outcome.VerifyOutput, proj.Path) {
+		t.Errorf("gate ran against proj.Path %q (the WRONG tree) — should have been deferred.\noutput: %q",
+			proj.Path, outcome.VerifyOutput)
+	}
+	if outcome.VerifyOutput != "" && strings.Contains(outcome.VerifyOutput, remoteWT) {
+		t.Errorf("gate ran in the remote worktree %q — verify: must run on the remote host, not locally.\noutput: %q",
+			remoteWT, outcome.VerifyOutput)
+	}
+	logs, _ := database.GetTaskLogs(task.ID, 50)
+	if !logContains(logs, "Verify gate deferred") {
+		t.Errorf("expected a 'Verify gate deferred' log line; got logs: %v", logs)
+	}
+	if logContains(logs, "Verification failed") {
+		t.Errorf("did not expect a 'Verification failed' log — the gate must be deferred, not run against the wrong tree")
+	}
+}
+
+// TestRemoteVerifyGateNotPassingOnLocalCheckout reproduces the false-pass bug
+// from the report: a remote step with `verify: "test -d ."` used to run the
+// command in the daemon's existing local checkout and pass, waving a remote
+// step through as verified even though the remote worktree (where the agent
+// committed) was never tested. The fix defers the gate so the step is never
+// waved through on evidence collected from the wrong tree.
+func TestRemoteVerifyGateNotPassingOnLocalCheckout(t *testing.T) {
+	database := testDB(t)
+	task := mkTask(t, database, "placed ship", db.StatusProcessing, "", "")
+	if err := database.SetTaskRemoteWorktree(task.ID,
+		"/home/olgm/wt/9000-not-on-this-machine", "task/9000-x"); err != nil {
+		t.Fatalf("set remote worktree: %v", err)
+	}
+	// `test -d .` passes in any existing directory (the local checkout) and the
+	// OLD bug waved the step through on that. It would have FAILED against the
+	// remote path, which does not exist on this host.
+	if err := database.SetStepVerify(task.ID, "test -d ."); err != nil {
+		t.Fatalf("set verify: %v", err)
+	}
+
+	outcome, err := Complete(database, task.ID, "claimed done", Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Kind == KindVerifyFailed {
+		t.Fatalf("kind = %q, want the gate DEFERRED (not rejected) — the bug is the false-pass, not the false-reject here", outcome.Kind)
+	}
+	logs, _ := database.GetTaskLogs(task.ID, 50)
+	if logContains(logs, "Verification passed") {
+		t.Errorf("did not expect a 'Verification passed' log — the gate must be DEFERRED, " +
+			"not run (and pass) against the wrong tree")
+	}
+	if !logContains(logs, "Verify gate deferred") {
+		t.Errorf("expected a 'Verify gate deferred' log line so the deferral is visible; " +
+			"the remote+verify backstop belongs on the remote done path, not in this checkout")
+	}
+}
+
+// The existing local-verify tests above (TestVerifyFailureRejectsCompletion
+// and TestVerifyPassAllowsCompletion) are the control: they pin the local-only
+// behaviour through Complete, so a regression in the local case (e.g. deferring
+// when worktree_path is empty AND no remote info is present) shows up. The
+// TestVerifyDirLocalWorktreeUsed helper test covers the local-task-with-a-real
+// worktree case for the resolver; together they confirm the fix does not
+// regress the local happy path.
