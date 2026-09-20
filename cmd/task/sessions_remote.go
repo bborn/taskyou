@@ -25,10 +25,11 @@ import (
 
 // remoteWindowListFormat asks tmux for one line per window on the host.
 //
-// window_activity comes FIRST so the two fields that can contain surprising
-// characters are the ones at the end: a foreign window whose name holds a colon
-// simply fails to match "task-<id>" and is skipped, rather than shifting the
-// fields of every other line.
+// The field order is chosen so a colon in a name cannot corrupt the parse: the
+// activity is an integer, and the session name — the one field that may legally
+// contain a colon — is last, where SplitN's remainder keeps it whole. A foreign
+// window whose NAME holds a colon shifts only its own line, and such a line
+// cannot match "task-<id>" anyway, so it is skipped rather than misread.
 const remoteWindowListFormat = "#{window_activity}:#{window_name}:#{session_name}"
 
 // remoteHostProblem is a placed host ty asked about and could not reach. An
