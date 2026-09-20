@@ -381,3 +381,40 @@ func TestParseDefinitionAcceptsRealModels(t *testing.T) {
 		t.Errorf("ParseDefinition rejected a valid grok model: %v", err)
 	}
 }
+
+// TestParseDefinitionProxyHatchIsClaudeOnly pins that the model-validation
+// escape hatch applies only to Claude steps. A Claude proxy — a config_dir or
+// an ANTHROPIC_BASE_URL env override, the ollama shape — routes Claude through
+// a proxy whose model names ty can't check, but grok and cursor never route
+// through those signals. A bad grok/cursor model must therefore be rejected
+// even when a Claude proxy is configured on the same step; a valid one must
+// still pass (the fix re-validates, it does not over-reach).
+func TestParseDefinitionProxyHatchIsClaudeOnly(t *testing.T) {
+	// A grok step with a bad model is rejected even with a Claude proxy env.
+	grokViaEnv := "name: k\nsteps:\n  - {name: Build, executor: grok, model: claude-opus-5, env: {ANTHROPIC_BASE_URL: \"http://127.0.0.1:11434\"}, prompt: Build it.}\n"
+	if _, err := ParseDefinition([]byte(grokViaEnv)); err == nil {
+		t.Error("a grok step with a bad model must be rejected even with a Claude proxy env override")
+	} else if !strings.Contains(err.Error(), "grok") {
+		t.Errorf("error %q should name the grok executor", err)
+	}
+
+	// A cursor step with an unknown-vendor model is rejected even with a config_dir.
+	cursorViaDir := "name: k\nsteps:\n  - {name: Build, executor: cursor, model: phi-3, config_dir: \"~/.claude-ollama\", prompt: Build it.}\n"
+	if _, err := ParseDefinition([]byte(cursorViaDir)); err == nil {
+		t.Error("a cursor step with a bad model must be rejected even with a Claude proxy config_dir")
+	} else if !strings.Contains(err.Error(), "cursor") {
+		t.Errorf("error %q should name the cursor executor", err)
+	}
+
+	// Positive guard: a valid grok model still passes under a Claude proxy.
+	grokValid := "name: k\nsteps:\n  - {name: Build, executor: grok, model: grok-4-fast, env: {ANTHROPIC_BASE_URL: \"http://127.0.0.1:11434\"}, prompt: Build it.}\n"
+	if _, err := ParseDefinition([]byte(grokValid)); err != nil {
+		t.Errorf("a valid grok model should still pass under a Claude proxy: %v", err)
+	}
+
+	// Continuity: a claude step routed at a proxy still skips validation.
+	claudeProxy := "name: k\nsteps:\n  - {name: Build, executor: claude, model: glm-5.2:cloud, env: {ANTHROPIC_BASE_URL: \"http://127.0.0.1:11434\"}, prompt: Build it.}\n"
+	if _, err := ParseDefinition([]byte(claudeProxy)); err != nil {
+		t.Errorf("a claude step routed at a proxy should still skip validation: %v", err)
+	}
+}

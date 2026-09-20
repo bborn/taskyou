@@ -158,3 +158,41 @@ func TestHandleUpdateTask_ProxyModelNeedsRouting(t *testing.T) {
 		t.Errorf("stored model = %q, want %q", stored.Model, "glm-5.2:cloud")
 	}
 }
+
+// TestHandleUpdateTask_NonClaudeExecutorValidatedUnderProxy is the end-to-end
+// half of the bypass fix on the PATCH /api/tasks/{id} write path. A Claude proxy
+// (an ambient ANTHROPIC_BASE_URL or a per-task claude_config_dir) routes Claude
+// through it, but grok and cursor never route through those signals — so a bad
+// grok model must be rejected at the API even when a Claude proxy is configured,
+// while a valid one is still accepted (the fix re-validates; it does not
+// over-reach into sound overrides).
+func TestHandleUpdateTask_NonClaudeExecutorValidatedUnderProxy(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:11434")
+	srv, database, _ := setupServer(t)
+
+	// Ambient Claude proxy: a bad grok model is rejected (pre-fix this was stored).
+	bad := createTestTask(t, database, &db.Task{Title: "bad", Status: db.StatusBacklog, Type: db.TypeCode})
+	if w := patchTask(t, srv, bad.ID, `{"executor":"grok","model":"claude-opus-5"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a bad grok model under an ambient Claude proxy, got %d (%s)", w.Code, w.Body.String())
+	}
+	if stored, err := database.GetTask(bad.ID); err != nil {
+		t.Fatalf("get task: %v", err)
+	} else if stored.Model != "" {
+		t.Errorf("rejected grok model was stored anyway: %q", stored.Model)
+	}
+
+	// Per-task claude_config_dir: the same rejection. This per-task signal is
+	// reachable only via PATCH, not `ty create`, so it gets its own assertion.
+	dirTask := createTestTask(t, database, &db.Task{Title: "dir", Status: db.StatusBacklog, Type: db.TypeCode})
+	if _, err := database.Exec(`UPDATE tasks SET claude_config_dir = '~/.claude-ollama' WHERE id = ?`, dirTask.ID); err != nil {
+		t.Fatalf("route task at proxy: %v", err)
+	}
+	if w := patchTask(t, srv, dirTask.ID, `{"executor":"grok","model":"claude-opus-5"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a bad grok model under a per-task config_dir, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	// Positive guard: a valid grok model is still accepted under the same proxy.
+	if w := patchTask(t, srv, bad.ID, `{"executor":"grok","model":"grok-4-fast"}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a valid grok model under a Claude proxy, got %d (%s)", w.Code, w.Body.String())
+	}
+}
