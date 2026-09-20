@@ -90,8 +90,10 @@ export async function openExternal(target: string): Promise<void> {
   return invoke("open_external", { target });
 }
 
-export async function openInEditor(path: string): Promise<void> {
-  return invoke("open_in_editor", { path });
+// host is the ssh destination a placed task runs on: with it, the editor is
+// asked to open the directory over ssh instead of the same path on this machine.
+export async function openInEditor(path: string, host?: string): Promise<void> {
+  return invoke("open_in_editor", { path, host });
 }
 
 /**

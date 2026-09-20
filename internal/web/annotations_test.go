@@ -490,3 +490,70 @@ func argAfterFlag(call []string, flag string) string {
 	}
 	return ""
 }
+
+// A bundle written here for a task running on another host is a bundle nobody
+// reads: the coordinator has a checkout of the same project at a very similar
+// path (and a moved task's old worktree at exactly the same one), so the write
+// succeeds, reports a path, and the agent on the host never sees it.
+func TestHandleAnnotations_RefusesToStageForATaskOnAnotherHost(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, true)
+	if err := database.SetTaskPlacement(task.ID, "ol-agents", "placement plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postAnnotations(t, srv, task.ID, annotationBody(true))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ol-agents") {
+		t.Errorf("the refusal does not say where the task runs: %s", w.Body.String())
+	}
+	if entries, err := os.ReadDir(filepath.Join(wt, ".taskyou")); err == nil && len(entries) > 0 {
+		t.Errorf("wrote into this machine's worktree anyway: %v", entries)
+	}
+}
+
+// The same rule for the browser bridge's screenshots and DOM snapshots: nothing
+// is written to this machine for a task whose worktree is on another one.
+func TestBrowserArtefactsAreNotWrittenForATaskOnAnotherHost(t *testing.T) {
+	srv, database, _ := setupServer(t)
+	wt := t.TempDir()
+	task := &db.Task{Title: "placed", Status: db.StatusBlocked, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	task.WorktreePath = wt
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	task.PlacementTarget = "ol-agents"
+	if root := srv.resolveTaskRoot(task); root != "" {
+		t.Errorf("browser artefacts would be written to %q, on the wrong machine", root)
+	}
+
+	// And the payload is dropped rather than handed back: a screenshot is up to
+	// 20 MB of base64 and this result is the agent's tool output.
+	shot := json.RawMessage(`{"ok":true,"data":"data:image/png;base64,` + tinyPNG + `"}`)
+	result, ok := srv.materializeBrowserResult(task, "screenshot", shot).(map[string]interface{})
+	if !ok {
+		t.Fatalf("screenshot result is not an object: %#v", result)
+	}
+	if _, inlined := result["data"]; inlined {
+		t.Error("a placed task's screenshot was inlined into the agent's output")
+	}
+	if problem, _ := result["error"].(string); !strings.Contains(problem, "ol-agents") {
+		t.Errorf("the result does not say why the screenshot is missing: %#v", result)
+	}
+	// An action that carries nothing bulky still works: the relay does not care
+	// which machine the agent is on.
+	clicked, _ := srv.materializeBrowserResult(task, "click", json.RawMessage(`{"ok":true,"clicked":"#save"}`)).(map[string]interface{})
+	if clicked["clicked"] != "#save" {
+		t.Errorf("a plain browser action was altered for a placed task: %#v", clicked)
+	}
+
+	task.PlacementTarget = ""
+	if root := srv.resolveTaskRoot(task); root != wt {
+		t.Errorf("a local task lost its worktree root: %q", root)
+	}
+}

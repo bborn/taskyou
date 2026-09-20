@@ -5353,33 +5353,50 @@ type worktreeOpenedMsg struct {
 
 // openWorktreeInEditor opens the task's worktree directory in the default editor.
 // It checks VISUAL, then EDITOR environment variables, falling back to "open" on macOS.
+//
+// The worktree of a placed task is a directory on its host, and "o" means the
+// same thing there: open this task's code. Editors that speak ssh are asked to;
+// the rest are told where the code is rather than pointed at the same path on
+// this machine, which is usually a different checkout of the same project.
 func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 	return func() tea.Msg {
-		if task.WorktreePath == "" {
+		loc := m.executor.CodeLocation(task)
+		if loc.Path == "" {
 			return worktreeOpenedMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
+		}
+		editor := resolveEditor()
+
+		if loc.Remote() {
+			argv, ok := executor.EditorCommand(editor, loc)
+			if !ok {
+				return worktreeOpenedMsg{err: fmt.Errorf(
+					"task #%d's worktree is on %s: %s — open it with: %s",
+					task.ID, loc.Host, loc.Path, executor.ShellLine(loc))}
+			}
+			if err := osExec.Command(argv[0], argv[1:]...).Start(); err != nil {
+				return worktreeOpenedMsg{err: fmt.Errorf("failed to open editor: %w", err)}
+			}
+			return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s on %s", filepath.Base(loc.Path), loc.Host)}
 		}
 
 		// Check if worktree directory exists
-		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
-			return worktreeOpenedMsg{err: fmt.Errorf("worktree not found: %s", task.WorktreePath)}
+		if _, err := os.Stat(loc.Path); os.IsNotExist(err) {
+			return worktreeOpenedMsg{err: fmt.Errorf("worktree not found: %s", loc.Path)}
 		}
-
-		// Try VISUAL, then EDITOR, then fall back to "open" command
-		editor := resolveEditor()
 
 		var cmd *osExec.Cmd
 		if editor != "" {
-			cmd = osExec.Command(editor, task.WorktreePath)
+			cmd = osExec.Command(editor, loc.Path)
 		} else {
 			// Fall back to "open" command on macOS (opens in Finder or default app)
-			cmd = osExec.Command("open", task.WorktreePath)
+			cmd = osExec.Command("open", loc.Path)
 		}
 
 		if err := cmd.Start(); err != nil {
 			return worktreeOpenedMsg{err: fmt.Errorf("failed to open editor: %w", err)}
 		}
 
-		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
+		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(loc.Path))}
 	}
 }
 
@@ -5426,6 +5443,9 @@ type browserOpenedMsg struct {
 
 // openBrowser opens the task's server URL in the default browser.
 // The URL is {server_url}:{port} where server_url is configurable (default: http://localhost).
+//
+// A placed task's server listens on its port on the HOST, so localhost is the
+// one address it is certainly not on (see executor.TaskServerURL).
 func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 	return func() tea.Msg {
 		if task.Port == 0 {
@@ -5438,7 +5458,10 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 			serverURL = url
 		}
 
-		url := fmt.Sprintf("%s:%d", serverURL, task.Port)
+		url := executor.TaskServerURL(context.Background(), task, serverURL)
+		if url == "" {
+			return browserOpenedMsg{err: fmt.Errorf("cannot work out where task #%d's server is", task.ID)}
+		}
 		cmd := osExec.Command("open", url)
 
 		if err := cmd.Start(); err != nil {
@@ -5455,33 +5478,47 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 // back to opening the directory in the default file manager (Finder on macOS).
 func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
 	return func() tea.Msg {
-		if task.WorktreePath == "" {
+		loc := m.executor.CodeLocation(task)
+		if loc.Path == "" {
 			return browserOpenedMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
 		}
 
+		// A directory on the host: an editor that speaks ssh can show it, a file
+		// manager cannot, and this machine's copy of the path is not it.
+		if loc.Remote() {
+			if argv, ok := executor.EditorCommand(resolveEditor(), loc); ok {
+				if err := osExec.Command(argv[0], argv[1:]...).Start(); err == nil {
+					return browserOpenedMsg{message: fmt.Sprintf("Opened %s on %s", filepath.Base(loc.Path), loc.Host)}
+				}
+			}
+			return browserOpenedMsg{err: fmt.Errorf(
+				"task #%d's directory is on %s: %s — open it with: %s",
+				task.ID, loc.Host, loc.Path, executor.ShellLine(loc))}
+		}
+
 		// Check if worktree directory exists
-		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
-			return browserOpenedMsg{err: fmt.Errorf("worktree not found: %s", task.WorktreePath)}
+		if _, err := os.Stat(loc.Path); os.IsNotExist(err) {
+			return browserOpenedMsg{err: fmt.Errorf("worktree not found: %s", loc.Path)}
 		}
 
 		// Check if directory contains source files by looking for common project markers
-		if containsSourceFiles(task.WorktreePath) {
+		if containsSourceFiles(loc.Path) {
 			if editor := resolveEditor(); editor != "" {
-				cmd := osExec.Command(editor, task.WorktreePath)
+				cmd := osExec.Command(editor, loc.Path)
 				if err := cmd.Start(); err == nil {
-					return browserOpenedMsg{message: fmt.Sprintf("Opened %s in %s", filepath.Base(task.WorktreePath), filepath.Base(editor))}
+					return browserOpenedMsg{message: fmt.Sprintf("Opened %s in %s", filepath.Base(loc.Path), filepath.Base(editor))}
 				}
 				// Editor failed to start, fall through to file manager
 			}
 		}
 
 		// Fall back to opening in the default file manager
-		cmd := osExec.Command("open", task.WorktreePath)
+		cmd := osExec.Command("open", loc.Path)
 		if err := cmd.Start(); err != nil {
 			return browserOpenedMsg{err: fmt.Errorf("failed to open directory: %w", err)}
 		}
 
-		return browserOpenedMsg{message: fmt.Sprintf("Opened %s in Finder", filepath.Base(task.WorktreePath))}
+		return browserOpenedMsg{message: fmt.Sprintf("Opened %s in Finder", filepath.Base(loc.Path))}
 	}
 }
 

@@ -448,6 +448,9 @@ func (m *DetailModel) styleDetailLayout(ctx context.Context, tuiPaneID string) {
 	}
 	s := m.uiSessionName
 	runTmuxBatchOn(ctx, uiTmux, [][]string{
+		// Copying out of a task's pane is copying out of a nested client, local
+		// task or placed one; without this the selection never leaves it.
+		tmuxctl.ClipboardRelayArgs(),
 		{"select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()},
 		{"select-pane", "-t", tuiPaneID},
 		{"set-option", "-t", s, "status", "on"},
