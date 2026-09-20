@@ -210,6 +210,26 @@ func (a *GmailAdapter) Start(ctx context.Context) error {
 	return nil
 }
 
+// PollOnce runs a single Gmail poll synchronously, authenticating on demand.
+// Gmail's poll lists at most MaxResults(20) unread messages and never marks
+// them seen except via MarkProcessed (which only fires for successfully
+// processed messages), so the loss scenarios fixed on the IMAP side by PEEK
+// do not apply here; PollOnce still exists so one-shot callers (processCmd)
+// share a single Adapter contract.
+func (a *GmailAdapter) PollOnce(ctx context.Context) error {
+	a.mu.Lock()
+	service := a.service
+	a.mu.Unlock()
+
+	if service == nil {
+		if err := a.Authenticate(ctx); err != nil {
+			return err
+		}
+	}
+	a.poll(ctx)
+	return nil
+}
+
 func (a *GmailAdapter) pollLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

@@ -20,8 +20,11 @@ type mockAdapter struct {
 
 func (m *mockAdapter) Name() string                    { return "mock" }
 func (m *mockAdapter) Start(ctx context.Context) error { return nil }
-func (m *mockAdapter) Stop() error                     { return nil }
-func (m *mockAdapter) Emails() <-chan *adapter.Email   { return nil }
+func (m *mockAdapter) PollOnce(ctx context.Context) error {
+	return nil
+}
+func (m *mockAdapter) Stop() error                   { return nil }
+func (m *mockAdapter) Emails() <-chan *adapter.Email { return nil }
 func (m *mockAdapter) MarkProcessed(ctx context.Context, id string) error {
 	m.lastMarkProcessedID = id
 	return nil
