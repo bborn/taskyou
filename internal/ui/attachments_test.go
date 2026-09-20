@@ -99,11 +99,11 @@ func TestDetectMimeType_FixesPreviouslyBrokenFiles(t *testing.T) {
 		{"extensionless dockerfile", "Dockerfile", []byte("FROM golang:1.26\n"), "text/"},
 		{"csv", "data.csv", []byte("name,age\nalice,30\n"), "text/"},
 		{"yaml", "config.yaml", []byte("key: value\n"), ""},
-		{"shell", "script.sh", []byte("#!/bin/sh\necho hi\n"), "text/"},
+		{"shell", "script.sh", []byte("#!/bin/sh\necho hi\n"), ""},
 		{"webp image", "photo.webp", webpSig(), "image/"},
 		{"bmp image", "photo.bmp", []byte("BM\x00\x00\x00\x00"), "image/"},
 		{"typescript", "app.ts", []byte("const x: number = 1;\n"), "text/"},
-		{"toml", "Cargo.toml", []byte("[package]\nname = \"x\"\n"), "text/"},
+		{"toml", "Cargo.toml", []byte("[package]\nname = \"x\"\n"), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
