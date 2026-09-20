@@ -18,6 +18,12 @@ import (
 
 // mockRunner records commands instead of executing them. Guarded by a mutex
 // because deferred work (the annotation nudge) runs on a timer goroutine.
+//
+// It also simulates tmux's per-pane wait-for lock, the one agentsend now holds
+// around its paste / Enter sequence. wait-for -L <channel> blocks on a
+// per-channel mutex; -U <channel> releases it. The annotation nudge tests, which
+// race several senders at one pane, rely on this so the recorded calls don't
+// interleave once the package's old in-process lock is gone.
 type mockRunner struct {
 	mu        sync.Mutex
 	calls     [][]string
@@ -30,6 +36,11 @@ type mockRunner struct {
 	// delay simulates the real cost of shelling out, so tests can expose races
 	// that a zero-cost mock would hide.
 	delay time.Duration
+
+	// locks holds the per-channel mutex standing in for tmux's wait-for
+	// channel state.
+	lockMu sync.Mutex
+	locks  map[string]*sync.Mutex
 }
 
 // snapshot returns a copy of the calls recorded so far.
@@ -40,6 +51,38 @@ func (m *mockRunner) snapshot() [][]string {
 }
 
 func (m *mockRunner) Run(name string, args ...string) error {
+	// wait-for is the per-pane lock agentsend holds around its paste + Enter. A
+	// real -L blocks until the channel is free, then claims it; -U releases. A
+	// -L is recorded AFTER the lock is held, and a -U AFTER it has been let go,
+	// so the recorded order is what an outside observer of the tmux server
+	// actually saw — same rule the agentsend fakeTmux uses.
+	if len(args) > 0 && args[0] == "wait-for" {
+		ch := args[len(args)-1]
+		if len(args) >= 2 && args[1] == "-L" {
+			if err := m.lockAcquire(ch); err != nil {
+				return err
+			}
+			m.mu.Lock()
+			m.calls = append(m.calls, append([]string{name}, args...))
+			delay := m.delay
+			m.mu.Unlock()
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			return m.err
+		}
+		if len(args) >= 2 && args[1] == "-U" {
+			m.mu.Lock()
+			m.calls = append(m.calls, append([]string{name}, args...))
+			delay := m.delay
+			m.mu.Unlock()
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			m.lockRelease(ch)
+			return m.err
+		}
+	}
 	m.mu.Lock()
 	m.calls = append(m.calls, append([]string{name}, args...))
 	delay, err := m.delay, m.err
@@ -48,6 +91,38 @@ func (m *mockRunner) Run(name string, args ...string) error {
 		time.Sleep(delay)
 	}
 	return err
+}
+
+// lockAcquire simulates `tmux wait-for -L <channel>` by blocking on a real
+// per-channel mutex until it is held. A non-nil m.err makes the acquire fail,
+// the way the real tmux server would refuse a wait-for when it cannot serve.
+func (m *mockRunner) lockAcquire(ch string) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.lockMu.Lock()
+	mu, ok := m.locks[ch]
+	if !ok {
+		mu = &sync.Mutex{}
+		if m.locks == nil {
+			m.locks = map[string]*sync.Mutex{}
+		}
+		m.locks[ch] = mu
+	}
+	m.lockMu.Unlock()
+	mu.Lock()
+	return nil
+}
+
+// lockRelease simulates `tmux wait-for -U <channel>` and lets the next waiter
+// through.
+func (m *mockRunner) lockRelease(ch string) {
+	m.lockMu.Lock()
+	mu, ok := m.locks[ch]
+	m.lockMu.Unlock()
+	if ok {
+		mu.Unlock()
+	}
 }
 
 func (m *mockRunner) Output(name string, args ...string) ([]byte, error) {

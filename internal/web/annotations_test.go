@@ -74,12 +74,13 @@ func tagPaneInFakeTmux(runner *mockRunner, taskID int64, pane string) {
 	runner.outputByCmd["list-panes"] = append(runner.outputByCmd["list-panes"], line...)
 }
 
-// prompts returns the recorded calls with the pane lookups dropped, so a test
-// can talk about deliveries rather than about tmux bookkeeping.
+// prompts returns the recorded calls with the pane lookups and the per-pane
+// tmux wait-for lock dropped, so a test can talk about deliveries (one paste and
+// its Enter each) rather than about tmux bookkeeping.
 func prompts(calls [][]string) [][]string {
 	var out [][]string
 	for _, c := range calls {
-		if len(c) > 1 && c[1] == "list-panes" {
+		if len(c) > 1 && (c[1] == "list-panes" || c[1] == "wait-for") {
 			continue
 		}
 		out = append(out, c)
