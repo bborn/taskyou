@@ -25,9 +25,12 @@ const (
 	repoCloneFailed                        // git said no; the user can correct and retry
 )
 
-// repoCloneDoneMsg reports the outcome of a clone attempt.
+// repoCloneDoneMsg reports the outcome of a clone attempt. seq identifies
+// which clone produced it, so a stale done from a clone the user already
+// canceled can be ignored if a retry is now in flight.
 type repoCloneDoneMsg struct {
 	path string
+	seq  uint64
 	err  error
 }
 
@@ -63,6 +66,9 @@ type RepoCloneModel struct {
 	frame        int
 	// cancel stops an in-flight clone (esc). Nil unless one is running.
 	cancel context.CancelFunc
+	// seq identifies the currently in-flight clone attempt; a repoCloneDoneMsg
+	// whose seq doesn't match is from a clone the user already canceled.
+	seq uint64
 
 	width  int
 	height int
@@ -121,6 +127,9 @@ func (m *RepoCloneModel) Update(msg tea.Msg) (*RepoCloneModel, tea.Cmd) {
 		return m, m.tick()
 
 	case repoCloneDoneMsg:
+		if msg.seq != m.seq {
+			return m, nil // stale done from a clone the user already canceled
+		}
 		if m.cancel != nil {
 			m.cancel() // release the context now that the clone is over
 			m.cancel = nil
@@ -178,15 +187,17 @@ func (m *RepoCloneModel) start() tea.Cmd {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	m.seq++
 	m.cancel = cancel
 	m.state = repoCloneRunning
 	m.errText = ""
 	m.frame = 0
 
 	ref, cloner := m.ref, m.cloner
+	seq := m.seq // capture by value before the closure so a later retry's done can't be mistaken for this one's
 	clone := func() tea.Msg {
 		err := cloner.Clone(ctx, ref, path)
-		return repoCloneDoneMsg{path: path, err: err}
+		return repoCloneDoneMsg{path: path, seq: seq, err: err}
 	}
 	return tea.Batch(clone, m.tick())
 }
