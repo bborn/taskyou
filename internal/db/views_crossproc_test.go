@@ -35,6 +35,21 @@ func TestSaveViewCrossProcessSortOrderRace(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "shared.db")
 
+	// Migrate once, here, before any worker exists. Two processes opening the
+	// same fresh file both run migrate() and the journal_mode(WAL) switch, and
+	// that switch is not covered by busy_timeout: the loser fails immediately
+	// with SQLITE_BUSY and the test fails for a reason that has nothing to do
+	// with the sort_order race it exists to prove. The workers below open a
+	// database whose schema is already in place, so the only thing they race
+	// on is SaveView.
+	seed, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
 	const procCount = 2
 	const perProc = 20
 	var wg sync.WaitGroup
