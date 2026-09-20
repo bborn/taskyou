@@ -2646,6 +2646,36 @@ func (db *DB) ClearTaskWorktreeRefs(taskID int64) error {
 	return nil
 }
 
+// ClearTaskWorktreeRefsIfMatch drops worktree_path and archive_worktree_path
+// only when the row still holds exactly the values the caller observed before
+// deciding to clear. It returns true when the clear happened and false when
+// the row has since changed — for the worktree audit, a no-op clear means a
+// daemon has replaced the snapshot's bogus path with a fresh, valid one
+// between the audit's ListWorktreeRefs snapshot and this UPDATE, so the clear
+// must not clobber it. Clearing the new path anyway would leave the on-disk
+// worktree orphaned: the sweeper queries by worktree_path, the row would now
+// have ”, and a future re-run would create a duplicate.
+//
+// Like ClearTaskWorktreeRefs it leaves updated_at alone, and like it does not
+// touch archive_ref, archive_commit, or archive_branch_name, so any saved
+// archive state survives.
+func (db *DB) ClearTaskWorktreeRefsIfMatch(taskID int64, wantWorktreePath, wantArchivePath string) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE tasks SET worktree_path = '', archive_worktree_path = ''
+		WHERE id = ?
+		  AND COALESCE(worktree_path, '') = ?
+		  AND COALESCE(archive_worktree_path, '') = ?
+	`, taskID, wantWorktreePath, wantArchivePath)
+	if err != nil {
+		return false, fmt.Errorf("clear task worktree refs if match: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("clear task worktree refs if match: rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
 // MarkWorktreeSweepFailed records that the stale-worktree sweeper could not
 // archive this task's worktree, excluding the row from future automatic sweeps.
 // Like ClearTaskWorktreeRefs it leaves updated_at alone.
