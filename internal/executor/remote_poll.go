@@ -103,6 +103,22 @@ func classifyRemoteProbeFailure(ctxErr, err error) windowProbe {
 	return windowUnreachable
 }
 
+// RemoteCommandUnreachable reports whether a failed remote command failed
+// because ty could not reach the host, rather than because the command on the
+// far side answered no.
+//
+// It exists so callers outside this package (the CLI's remote listings) make the
+// same distinction the poller does without re-deriving ssh's exit-code lore,
+// which is the whole difference between "nothing is running there" and "ty could
+// not look". Pass the context's error alongside the command's: a probe killed by
+// a deadline never produced a status to read.
+func RemoteCommandUnreachable(ctxErr, err error) bool {
+	if err == nil {
+		return false
+	}
+	return classifyRemoteProbeFailure(ctxErr, err) == windowUnreachable
+}
+
 // hostReachability tracks, and narrates, a placed host we cannot currently see.
 //
 // Silence is the failure mode this exists to prevent: a task whose host has gone

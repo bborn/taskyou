@@ -755,7 +755,7 @@ Each task tracks its executor state in the database:
 **From the command line:**
 
 ```bash
-# List all running executor processes
+# List all running executor processes, here and on the hosts tasks were placed on
 ./bin/ty sessions list
 
 # Kill orphaned executor processes (and the side processes that outlived them)
@@ -764,6 +764,14 @@ Each task tracks its executor state in the database:
 # See exactly what would be killed, and why, without killing anything
 ./bin/ty sessions cleanup --dry-run
 ```
+
+**Remotely placed tasks.** `sessions list` asks each host that currently holds
+placed tasks which of their agent windows are alive, so a task running elsewhere
+appears alongside the local ones with its host in the last column. Memory is only
+measured on this machine, and a host that cannot be reached is named in the
+listing rather than dropped — an empty list means "nothing is running", not
+"ty did not look". `sessions cleanup` and `sessions suspend` remain local-only:
+they kill processes, and they kill them here.
 
 **Orphaned side processes.** Killing a task's tmux window only SIGHUPs the pane's
 foreground process group. A dev server that was backgrounded, disowned, or

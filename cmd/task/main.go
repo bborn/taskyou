@@ -472,9 +472,20 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	// Logs subcommand - tail claude session logs
 	logsCmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Tail claude session logs for debugging",
-		Long:  "Streams all claude session logs across all projects in real-time.",
-		Args:  cobra.NoArgs, // takes no positional args; reject them instead of silently ignoring (e.g. `ty logs 4013`)
+		Short: "Tail this machine's Claude session files for debugging",
+		Long: `Streams every Claude Code session file under ~/.claude/projects on THIS
+machine, for all projects at once, in real time.
+
+It is a firehose for debugging Claude itself, not a per-task log viewer: it takes
+no task id, and it cannot show a task the daemon placed on another host, whose
+session files are written over there.
+
+For one task, use:
+  ty show <id> --logs   # that task's recorded activity (works for remote tasks)
+  ty output <id>        # what its agent pane is showing right now`,
+		// Reject a positional arg rather than silently ignoring it: `ty logs 4013`
+		// read as "the logs for task 4013" and quietly tailed everything instead.
+		Args: rejectTaskIDArg,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := tailClaudeLogs(); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -547,7 +558,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 		Use:   "sessions",
 		Short: "Manage running agent tmux sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			listSessions()
+			listSessions(cmd.Context())
 		},
 	}
 
@@ -555,7 +566,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 		Use:   "list",
 		Short: "List running agent sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			listSessions()
+			listSessions(cmd.Context())
 		},
 	}
 	sessionsCmd.AddCommand(sessionsListCmd)
@@ -644,7 +655,7 @@ Examples:
 		Short:  "Alias for 'sessions' (deprecated, use 'sessions' instead)",
 		Hidden: true, // Hide from help but still works
 		Run: func(cmd *cobra.Command, args []string) {
-			listSessions()
+			listSessions(cmd.Context())
 		},
 	}
 	rootCmd.AddCommand(claudesCmd)
@@ -6003,6 +6014,25 @@ func latestPendingToolDetail(database *db.DB, taskID int64) string {
 	return ""
 }
 
+// rejectTaskIDArg is cobra.NoArgs that recognises the mistake people actually
+// make.
+//
+// `ty logs 4013` reads as "show me task 4013's logs" and for a long time did the
+// opposite silently, tailing every session file on the machine. A bare "unknown
+// command" is honest but unhelpful, so a numeric argument is answered by naming
+// the two commands that do take a task id.
+func rejectTaskIDArg(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	if _, err := strconv.Atoi(strings.TrimPrefix(args[0], "#")); err == nil {
+		return fmt.Errorf("%s takes no task id (it streams every Claude session file on this machine); "+
+			"for task %s use 'ty show %s --logs', or 'ty output %s' for what its agent is showing now",
+			cmd.CommandPath(), args[0], args[0], args[0])
+	}
+	return fmt.Errorf("%s takes no arguments, got %q", cmd.CommandPath(), args[0])
+}
+
 // tailClaudeLogs tails all claude session logs for debugging.
 func tailClaudeLogs() error {
 	home, err := os.UserHomeDir()
@@ -6236,21 +6266,66 @@ func agentTmuxCmd(args ...string) *osexec.Cmd {
 	return osexec.Command("tmux", tmuxctl.AgentArgs(args...)...)
 }
 
-// listSessions lists all running agent task windows in task-daemon.
-func listSessions() {
-	sessions := getSessions()
-	if len(sessions) == 0 {
-		fmt.Println(dimStyle.Render("No agent sessions running"))
+// listSessions lists every running agent window ty can see: the ones in
+// task-daemon on this machine, and the ones on the hosts tasks were placed on.
+//
+// The second half is why this takes a context. Enumerating only this machine made
+// the command assert something it had not checked — "No agent sessions running"
+// while remote agents worked — which is the same untruth `ty output` used to tell
+// about a remotely placed pane.
+func listSessions(ctx context.Context) {
+	// A database failure must not cost the local listing, which tmux can answer
+	// on its own — but it must not pass unmentioned either, or the result is the
+	// same silent incompleteness this whole change is about.
+	var problems []remoteHostProblem
+	database, err := db.Open(db.DefaultPath())
+	if err != nil {
+		problems = append(problems, remoteHostProblem{err: fmt.Errorf("open database: %w", err)})
+	} else {
+		defer database.Close()
+	}
+
+	sessions := getSessions(database)
+	if database != nil {
+		remote, remoteProblems := remoteAgentSessions(ctx, database)
+		sessions = append(sessions, remote...)
+		problems = append(problems, remoteProblems...)
+	}
+	renderSessions(os.Stdout, sessions, problems)
+}
+
+// renderSessions prints the listing. Split from listSessions so the wording —
+// the part that was wrong — is testable without a tmux server or a fleet.
+func renderSessions(out io.Writer, sessions []agentSession, problems []remoteHostProblem) {
+	if len(sessions) == 0 && len(problems) == 0 {
+		fmt.Fprintln(out, dimStyle.Render("No agent sessions running"))
 		return
 	}
 
-	// Calculate total memory
+	// Memory is measured by inspecting processes on this machine, so the total
+	// covers the local sessions only and says so when any session is elsewhere.
 	totalMemoryMB := 0
+	remoteCount := 0
 	for _, s := range sessions {
 		totalMemoryMB += s.memoryMB
+		if s.host != "" {
+			remoteCount++
+		}
+	}
+	summary := fmt.Sprintf("%d total", len(sessions))
+	if remoteCount > 0 {
+		summary += fmt.Sprintf(", %d remote", remoteCount)
+		summary += fmt.Sprintf(", %dMB memory on this machine", totalMemoryMB)
+	} else {
+		summary += fmt.Sprintf(", %dMB memory", totalMemoryMB)
 	}
 
-	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Running Agent Sessions (%d total, %dMB memory):", len(sessions), totalMemoryMB)))
+	if len(sessions) == 0 {
+		fmt.Fprintf(out, "%s\n", boldStyle.Render("No agent sessions found on the hosts ty could reach:"))
+	} else {
+		fmt.Fprintf(out, "%s\n", boldStyle.Render(fmt.Sprintf("Running Agent Sessions (%s):", summary)))
+	}
+	fmt.Fprintln(out)
 	for _, s := range sessions {
 		memStr := ""
 		if s.memoryMB > 0 {
@@ -6266,12 +6341,26 @@ func listSessions() {
 			titleStr = title
 		}
 		executorStr := executorLabel(s.executor, s.model, s.effort)
-		fmt.Printf("  %s  %s  %s  %s  %s\n",
+		fmt.Fprintf(out, "  %s  %s  %s  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
 			dimStyle.Render(fmt.Sprintf("%-18s", executorStr)),
 			dimStyle.Render(fmt.Sprintf("%-6s", memStr)),
 			dimStyle.Render(fmt.Sprintf("%-36s", titleStr)),
 			dimStyle.Render(s.info))
+	}
+
+	// A host ty could not reach is named, not dropped: its tasks may well still
+	// be running, and pretending the list is complete is how a live agent gets
+	// reported as gone.
+	for _, p := range problems {
+		what := "could not check the hosts tasks were placed on"
+		if p.host != "" {
+			what = p.host + ": could not list sessions"
+			if p.tasks > 0 {
+				what += fmt.Sprintf(" (%d placed task(s) unaccounted for)", p.tasks)
+			}
+		}
+		fmt.Fprintf(out, "  %s %s\n", errorStyle.Render(what), dimStyle.Render(p.err.Error()))
 	}
 }
 
@@ -6281,8 +6370,11 @@ type agentSession struct {
 	executor  string // Executor name (claude, codex, gemini, etc.)
 	model     string // Per-task model override ("" = executor default)
 	effort    string // Per-task reasoning effort override ("" = executor default)
-	memoryMB  int    // Memory usage in MB
-	info      string
+	memoryMB  int    // Memory usage in MB; 0 for a remote session (not measured)
+	// host is the machine the window lives on; empty means this one. Set only by
+	// the remote scan, so the local path keeps exactly its previous shape.
+	host string
+	info string
 }
 
 // executorLabel renders the executor plus any per-task model/effort overrides,
@@ -6309,8 +6401,13 @@ func executorLabel(executor, model, effort string) string {
 	return executor + " " + m + "/" + effort
 }
 
-// getSessions returns all running task-* windows across all task-daemon-* sessions.
-func getSessions() []agentSession {
+// getSessions returns all running task-* windows across all task-daemon-* sessions
+// on THIS machine's agent tmux server. Remotely placed tasks are not here; see
+// remoteAgentSessions.
+//
+// database may be nil, in which case rows are listed without titles: what is
+// running is read from tmux, and tmux alone is enough to answer it.
+func getSessions(database *db.DB) []agentSession {
 	// First, get all task-daemon-* sessions
 	sessionsCmd := agentTmuxCmd("list-sessions", "-F", "#{session_name}")
 	sessionsOut, err := sessionsCmd.Output()
@@ -6327,13 +6424,6 @@ func getSessions() []agentSession {
 
 	if len(daemonSessions) == 0 {
 		return nil
-	}
-
-	// Open database to fetch task titles and executor info
-	dbPath := db.DefaultPath()
-	database, _ := db.Open(dbPath)
-	if database != nil {
-		defer database.Close()
 	}
 
 	// Build map of task ID -> memory usage (supports all executors)
@@ -6514,8 +6604,17 @@ func killSessionAcrossDaemons(taskID int) bool {
 // so they can be resumed later. If taskIDs is empty, suspends all blocked tasks with
 // running sessions. If all is true, suspends all tasks (not just blocked).
 func suspendSessions(taskIDs []int, all bool) {
-	// Get running sessions
-	sessions := getSessions()
+	// Open database for titles, status checks and tmux ID cleanup
+	dbPath := db.DefaultPath()
+	database, err := openTaskDB(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Local sessions only: suspend KILLS processes, and it kills them here.
+	sessions := getSessions(database)
 	if len(sessions) == 0 {
 		fmt.Println(dimStyle.Render("No agent sessions running"))
 		return
@@ -6526,15 +6625,6 @@ func suspendSessions(taskIDs []int, all bool) {
 	for _, s := range sessions {
 		runningSessions[s.taskID] = s
 	}
-
-	// Open database for status checks and tmux ID cleanup
-	dbPath := db.DefaultPath()
-	database, err := openTaskDB(dbPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
-		os.Exit(1)
-	}
-	defer database.Close()
 
 	// Determine which tasks to suspend
 	var toSuspend []agentSession
