@@ -224,16 +224,17 @@ func (s *Server) flushAnnotations(taskID int64) {
 		return
 	}
 
-	hasScreenshot := false
+	var shotNames []string
 	for _, name := range p.shots {
 		if name != "" {
-			hasScreenshot = true
-			break
+			shotNames = append(shotNames, name)
 		}
 	}
 	nudge := fmt.Sprintf("[ty-chrome] Browser annotations received for this task. Read %s", p.relPath)
-	if hasScreenshot {
-		nudge += " and view the screenshot.png next to it"
+	if n := len(shotNames); n == 1 {
+		nudge += fmt.Sprintf(" and view the %s next to it", shotNames[0])
+	} else if n > 1 {
+		nudge += fmt.Sprintf(" and view the %d screenshots next to it (%s)", n, strings.Join(shotNames, ", "))
 	}
 	if len(p.subs) > 1 {
 		nudge += fmt.Sprintf(" (%d submissions, all in that one file)", len(p.subs))

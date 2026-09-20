@@ -375,6 +375,97 @@ func TestHandleAnnotations_CoalescesRapidSubmissions(t *testing.T) {
 	}
 }
 
+// A coalesced bundle with a screenshot per submission must name every screenshot
+// that was written, not just the first one (regression for the hardcoded
+// "screenshot.png" nudge clause).
+func TestCoalesced_NudgeNamesEveryScreenshot(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, true)
+
+	first := postAnnotations(t, srv, task.ID, annotationBody(true))
+	postAnnotations(t, srv, task.ID, annotationBody(true))
+
+	var r struct {
+		Path string `json:"path"`
+	}
+	json.NewDecoder(first.Body).Decode(&r)
+
+	dir := filepath.Join(wt, filepath.Dir(r.Path))
+	for _, name := range []string{"screenshot.png", "screenshot-2.png"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s missing: %v", name, err)
+		}
+	}
+
+	calls := runner.waitForPrompts(t, 3)
+	nudge := calls[0][len(calls[0])-1]
+	if !strings.Contains(nudge, "screenshot.png") {
+		t.Errorf("nudge should name the first screenshot: %q", nudge)
+	}
+	if !strings.Contains(nudge, "screenshot-2.png") {
+		t.Errorf("nudge should also name the second screenshot: %q", nudge)
+	}
+	if !strings.Contains(nudge, "2 screenshots") {
+		t.Errorf("nudge should say how many screenshots: %q", nudge)
+	}
+}
+
+// A coalesced bundle where only some submissions carry a screenshot should name
+// only the screenshots that were actually written, in order.
+func TestCoalesced_NudgeNamesOnlyScreenshotsWritten(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, true)
+
+	first := postAnnotations(t, srv, task.ID, annotationBody(false))
+	postAnnotations(t, srv, task.ID, annotationBody(true))
+
+	var r struct {
+		Path string `json:"path"`
+	}
+	json.NewDecoder(first.Body).Decode(&r)
+
+	dir := filepath.Join(wt, filepath.Dir(r.Path))
+	if _, err := os.Stat(filepath.Join(dir, "screenshot-2.png")); err != nil {
+		t.Errorf("second submission's screenshot missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "screenshot.png")); err == nil {
+		t.Errorf("screenshot.png should not exist when the first submission had no screenshot")
+	}
+
+	calls := runner.waitForPrompts(t, 3)
+	nudge := calls[0][len(calls[0])-1]
+	if strings.Contains(nudge, "screenshot.png") {
+		t.Errorf("nudge should not name the absent first screenshot: %q", nudge)
+	}
+	if !strings.Contains(nudge, "screenshot-2.png") {
+		t.Errorf("nudge should name the written screenshot: %q", nudge)
+	}
+	if strings.Contains(nudge, "screenshots") {
+		t.Errorf("nudge should be singular for one screenshot: %q", nudge)
+	}
+}
+
+// A single submission's nudge keeps the historical wording: "view the
+// screenshot.png next to it" (regression guard on the pre-coalescing path).
+func TestHandleAnnotations_SingleScreenshotNudgeWording(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, _ := setupAnnotationTask(t, database, runner, true)
+
+	postAnnotations(t, srv, task.ID, annotationBody(true))
+
+	calls := runner.waitForPrompts(t, 3)
+	nudge := calls[0][len(calls[0])-1]
+	if !strings.Contains(nudge, "view the screenshot.png next to it") {
+		t.Errorf("single-screenshot nudge wording regressed: %q", nudge)
+	}
+	if strings.Contains(nudge, "screenshots") {
+		t.Errorf("single-screenshot nudge should stay singular: %q", nudge)
+	}
+	if strings.Contains(nudge, "submissions") {
+		t.Errorf("single-submission nudge should not mention submissions: %q", nudge)
+	}
+}
+
 // Submissions spaced beyond the window are separate thoughts: separate bundles,
 // separate nudges.
 func TestHandleAnnotations_SeparateBundlesWhenSpaced(t *testing.T) {
