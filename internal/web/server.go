@@ -31,6 +31,11 @@ type Config struct {
 	DB        *db.DB
 	CmdRunner CommandRunner
 	Sessions  SessionManager // optional; enables /api/executors and session bootstrap
+	// Mover performs the teardown-half of a cross-project task move. Optional:
+	// when nil, moves of tasks that have run (WorktreePath != "") respond 503,
+	// while moves of draft tasks (WorktreePath == "") still work as a delete +
+	// recreate. Implemented by *executor.Executor.
+	Mover TaskMover
 }
 
 // Server is the HTTP API server.
@@ -39,6 +44,7 @@ type Server struct {
 	srv      *http.Server
 	runner   CommandRunner
 	sessions SessionManager
+	mover    TaskMover
 	relay    *browserRelay
 	baseURL  string
 
@@ -85,6 +91,7 @@ func New(cfg Config) *Server {
 		db:       cfg.DB,
 		runner:   cfg.CmdRunner,
 		sessions: cfg.Sessions,
+		mover:    cfg.Mover,
 		relay:    newBrowserRelay(),
 		baseURL:  baseURLFromAddr(cfg.Addr),
 	}

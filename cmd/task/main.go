@@ -3996,6 +3996,7 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 				DB:        database,
 				CmdRunner: runner,
 				Sessions:  exec,
+				Mover:     exec,
 			})
 
 			// Handle signals for graceful shutdown
@@ -4924,6 +4925,7 @@ func startDaemonHTTPAPI(database *db.DB, exec *executor.Executor, logger *log.Lo
 		DB:        database,
 		CmdRunner: &execCommandRunner{},
 		Sessions:  exec,
+		Mover:     exec,
 	})
 
 	go func() {
