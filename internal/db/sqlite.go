@@ -69,6 +69,16 @@ type DB struct {
 	// SetTaskStatus in status.go for why a status change cannot be a bare
 	// UPDATE, and why the read-gate-write must not interleave.
 	statusMu sync.Mutex
+
+	// viewsMu serializes saved-view renames within this process. See
+	// RenameView in views.go: the conflict check and the write must not
+	// interleave, or two concurrent renames onto the same fresh target name
+	// both succeed — one silently overwrites the other and both sources are
+	// deleted. The single-connection pool serializes individual statements
+	// but releases the connection between them, so the check-then-write is
+	// still a TOCTOU window; this lock closes it in-process, and the
+	// transaction plus conditional INSERT close it across processes.
+	viewsMu sync.Mutex
 }
 
 // Path returns the path to the database file.
