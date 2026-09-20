@@ -171,7 +171,11 @@ func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, run
 
 	env := fmt.Sprintf("WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%s",
 		task.ID, sessionID, task.Port, shellQuote(workDir))
-	flags := claudePermissionFlag(task) + effortFlag(task.EffortLevel) + modelFlag(task.Model)
+	// Remote Control is Claude-only; for codex the flags are reset below, so
+	// rcFlag is a no-op there. Threaded into flags before the prompt == "" early
+	// return so both the prompt-bearing and empty-prompt branches emit it,
+	// mirroring the local fresh-launch and resume paths (executor.go).
+	flags := claudePermissionFlag(task) + rcFlag(task) + effortFlag(task.EffortLevel) + modelFlag(task.Model)
 	if executorName == "codex" {
 		flags = ""
 		if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
@@ -186,7 +190,14 @@ func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, run
 		return fmt.Sprintf("%s %s %s", env, executorName, flags), nil
 	}
 	promptFile := shellQuote(remotePromptPath(task.ID, runs...))
-	return fmt.Sprintf(`%s %s %s"$(cat %s)"; rm -f %s`, env, executorName, flags, promptFile, promptFile), nil
+	// Suppress the staged prompt arg for Remote Control so claude starts with a
+	// blank, drivable session instead of running the staged prompt — matching the
+	// local launch/resume sites. The flag itself is added above via rcFlag.
+	promptArg := fmt.Sprintf(`"$(cat %s)"; rm -f %s`, promptFile, promptFile)
+	if task.RemoteControl {
+		promptArg = ""
+	}
+	return fmt.Sprintf(`%s %s %s%s`, env, executorName, flags, promptArg), nil
 }
 
 // SupportsRemoteExecutor reports whether a remote launch adapter is available.
