@@ -263,6 +263,13 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		"-c", workDir,
 		shell).Run(); err != nil {
 		e.logger.Warn("split-window for shell pane failed", "window", windowTarget, "error", err)
+	} else {
+		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", task.ID, task.Port, workDir)
+		if configDir := e.claudePathsForTask(task).configDir; configDir != "" && !isDefaultClaudeConfigDir(configDir) {
+			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", configDir)
+		}
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 	}
 
 	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
