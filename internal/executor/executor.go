@@ -1782,9 +1782,17 @@ func (e *Executor) cleanupStaleWorktrees() {
 			continue
 		}
 
-		// Skip if worktree path doesn't exist on disk (already cleaned up)
+		// Skip if worktree path doesn't exist on disk (already cleaned up).
 		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
-			// Path gone, just clear the DB reference
+			// The directory is gone, but the git worktree registry may still
+			// list the worktree as prunable and keep pinning its branch. Prune
+			// the orphaned entry now so a later step reusing the branch is not
+			// handed an ErrBranchBusy for a phantom holder whose task we are
+			// about to forget — which would otherwise defer that step for up
+			// to 30 minutes behind a holder that no agent is driving. Prune
+			// only removes entries whose directories are already gone, so a
+			// live or hand-made worktree is never touched.
+			e.pruneProjectWorktrees(task.Project)
 			e.db.ClearTaskWorktreePath(task.ID)
 			continue
 		}
@@ -1870,6 +1878,14 @@ func (e *Executor) sweepTrashedTasks() {
 							"task", t.ID, "error", err)
 					}
 				}
+			} else {
+				// Directory already gone: prune the orphaned git worktree
+				// registry entry so it does not keep pinning the branch after
+				// the row is deleted. Otherwise a later step reusing the
+				// branch is handed an ErrBranchBusy for a phantom holder and
+				// defers for up to 30 minutes behind nothing. Prune only
+				// removes entries whose directories are already gone.
+				e.pruneProjectWorktrees(t.Project)
 			}
 		}
 
@@ -1967,6 +1983,33 @@ func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool
 	return cleaned, nil
 }
 
+// pruneProjectWorktrees runs `git worktree prune` on the given project's repo,
+// removing git registry entries whose worktree directories are already gone.
+//
+// A sweep that drops a worktree's DB link because its directory was already
+// removed out-of-band calls this so the orphaned registry entry does not keep
+// pinning the branch. Without it, a later step reusing the branch finds a
+// phantom holder in `git worktree list`, and releaseBranchFromFinishedHolder —
+// which deliberately declines to reclaim a worktree with no task behind it —
+// returns (false, nil); the caller wraps that as ErrBranchBusy and executeTask
+// defers the step for up to branchWaitGiveUp (30 minutes) waiting for a holder
+// that no agent is driving, then parks it as 'blocked'. A single prune frees
+// the branch immediately.
+//
+// `git worktree prune` only removes entries whose directories are gone (git
+// marks them "prunable"), so a live or hand-made worktree whose directory is
+// still present is never touched.
+func (e *Executor) pruneProjectWorktrees(project string) {
+	dir := e.config.GetProjectDir(project)
+	if dir == "" {
+		return
+	}
+	if out, err := gitCmd(context.Background(), dir, "worktree", "prune").CombinedOutput(); err != nil {
+		e.logger.Warn("git worktree prune failed",
+			"project", project, "error", err, "output", strings.TrimSpace(string(out)))
+	}
+}
+
 // pruneAllProjectWorktrees runs `git worktree prune` on all configured project directories
 // to clean up stale internal git worktree references.
 func (e *Executor) pruneAllProjectWorktrees() {
@@ -1979,12 +2022,7 @@ func (e *Executor) pruneAllProjectWorktrees() {
 		if !p.UsesWorktrees() {
 			continue
 		}
-		dir := e.config.GetProjectDir(p.Name)
-		if dir == "" {
-			continue
-		}
-		cmd := gitCmd(context.Background(), dir, "worktree", "prune")
-		cmd.Run() // Ignore errors
+		e.pruneProjectWorktrees(p.Name)
 	}
 }
 
