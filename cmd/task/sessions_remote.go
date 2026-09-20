@@ -124,9 +124,12 @@ func hostAgentSessions(ctx context.Context, host string, tasks []db.RemoteAgentT
 	// host two coordinators share does not necessarily mean our task 42, and
 	// pairing id with recorded session is the same identity check the rest of
 	// the remote code path (InspectRemoteTerminal) makes.
+	// NUL joins the pair, not ":": a session name may legally contain a colon, and
+	// with a colon separator "a:task-1" + "task-2" and "a" + "task-1:task-2" are
+	// the same key.
 	want := make(map[string]db.RemoteAgentTask, len(tasks))
 	for _, t := range tasks {
-		want[t.DaemonSession+":"+executor.TmuxWindowName(t.ID)] = t
+		want[t.DaemonSession+"\x00"+executor.TmuxWindowName(t.ID)] = t
 	}
 
 	var sessions []agentSession
@@ -135,7 +138,7 @@ func hostAgentSessions(ctx context.Context, host string, tasks []db.RemoteAgentT
 		if !ok {
 			continue
 		}
-		task, mine := want[session+":"+window]
+		task, mine := want[session+"\x00"+window]
 		if !mine {
 			continue
 		}
