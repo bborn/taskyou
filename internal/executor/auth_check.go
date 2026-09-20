@@ -16,28 +16,38 @@ type authPattern struct {
 	reason string // human-readable explanation surfaced to the user
 }
 
-// authRequiredPatterns are phrases Claude Code prints when its login/cloud
-// session has expired or is otherwise unauthenticated. Multi-word phrases are
-// used deliberately to avoid false positives from ordinary task output (e.g. a
-// diff that happens to mention "login").
+// authRequiredPatterns are phrases Claude Code, Grok, and Cursor print when
+// their login/cloud session has expired or is otherwise unauthenticated.
+//
+// Several phrases read like ordinary task output ("invalid api key", "session
+// has expired", "sign in to grok", "run `grok login`") — a test asserting
+// "expected invalid api key", a runner reporting "session has expired before
+// refresh", an OAuth client formatting "oauth token expired: %w", or docs that
+// say "to sign in to grok, run `grok login`". A bare strings.Contains over the
+// whole pane matched those and parked working tasks as auth-blocked, so each
+// false-positive-prone needle is anchored on the prefix/suffix the executor's
+// own prompt renders with (e.g. "api error: invalid api key", "sign in to grok
+// to continue", "run `grok login` to") to match the real prompt, not a line of
+// agent output that merely mentions the phrase. "authentication_error" stays
+// broad pending a real expired-session capture to anchor a narrower form.
 var authRequiredPatterns = []authPattern{
 	{"please run /login", "Claude session expired — run /login to re-authenticate"},
-	{"run `/login`", "Claude session expired — run /login to re-authenticate"},
+	{"run `/login` to", "Claude session expired — run /login to re-authenticate"},
 	{"oauth token has expired", "Claude OAuth token expired — run /login to re-authenticate"},
-	{"oauth token expired", "Claude OAuth token expired — run /login to re-authenticate"},
-	{"session has expired", "Claude session expired — run /login to re-authenticate"},
-	{"invalid api key", "Claude reported an invalid API key — re-authentication required"},
+	{"error: oauth token", "Claude OAuth token expired — run /login to re-authenticate"},
+	{"your session has expired", "Claude session expired — run /login to re-authenticate"},
+	{"api error: invalid api key", "Claude reported an invalid API key — re-authentication required"},
 	{"select login method", "Claude is showing the login screen — re-authentication required"},
 	{"log in with your claude account", "Claude is showing the login screen — re-authentication required"},
 	{"you are not logged in", "Claude is not logged in — run /login to re-authenticate"},
 	{"authentication_error", "Claude returned an authentication error — re-authentication required"},
 	{"please run grok login", "Grok session expired — run grok login to re-authenticate"},
-	{"run `grok login`", "Grok session expired — run grok login to re-authenticate"},
-	{"sign in to grok", "Grok is showing the login screen — re-authentication required"},
+	{"run `grok login` to", "Grok session expired — run grok login to re-authenticate"},
+	{"sign in to grok to continue", "Grok is showing the login screen — re-authentication required"},
 	{"please run agent login", "Cursor session expired — run agent login to re-authenticate"},
-	{"run `agent login`", "Cursor session expired — run agent login to re-authenticate"},
+	{"run `agent login` to", "Cursor session expired — run agent login to re-authenticate"},
 	{"run cursor-agent login", "Cursor session expired — run agent login to re-authenticate"},
-	{"sign in to cursor", "Cursor is showing the login screen — re-authentication required"},
+	{"sign in to cursor to continue", "Cursor is showing the login screen — re-authentication required"},
 }
 
 // DetectAuthPrompt scans captured pane content for signs that the executor's
