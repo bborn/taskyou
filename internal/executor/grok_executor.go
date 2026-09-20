@@ -196,24 +196,7 @@ func (g *GrokExecutor) GetProcessID(taskID int64) int {
 		return 0
 	}
 
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.Fields(line)
-		if len(parts) != 2 {
-			continue
-		}
-		target := parts[0]
-		pidStr := parts[1]
-		if !strings.Contains(target, windowName) {
-			continue
-		}
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
-		}
+	for _, pid := range findPanesForWindow(string(out), windowName) {
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 		if strings.Contains(string(cmdOut), "grok") {
 			return pid
