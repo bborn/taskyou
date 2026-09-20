@@ -7,6 +7,7 @@ import { setApiBase } from "./api/client";
 import { buildKanbanColumns } from "./lib/kanban";
 import { buildSections, flattenSections } from "./lib/list";
 import { store, useAppState } from "./store";
+import { decidePopState, syncTargetAfterSkip, urlForView } from "./lib/mobileNav";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
 import { MobileBoard } from "./components/MobileBoard";
@@ -50,6 +51,17 @@ export default function App() {
   // be readable from inside one.
   const drawerOpenRef = useRef(false);
   drawerOpenRef.current = drawerOpen;
+  // Close-via-drawer-item calls history.back() to pop the drawer's synthetic
+  // history entry. That popstate is housekeeping, not a user navigation — flag
+  // it so onPopState doesn't re-navigate from the stale pre-drawer URL and
+  // clobber the just-chosen view before the view<->URL effect can rewrite it.
+  const navPendingRef = useRef(false);
+  // Like the drawer ref, the latest committed view has to be readable from the
+  // popstate handler so the skip branch can re-sync the URL to the in-flight
+  // view (needed because the view<->URL effect's pushState can be stranded by
+  // history.back()'s async traversal — see syncTargetAfterSkip).
+  const viewRef = useRef(state.view);
+  viewRef.current = state.view;
   // Resizes the whole shell to the visual viewport while the keyboard is up,
   // so every input inside it clears the keys — not just the reply composer.
   const shellRef = useRef<HTMLDivElement>(null);
@@ -162,31 +174,47 @@ export default function App() {
     if (bootPhase !== "ready") return;
     const view = state.view;
     const path = window.location.pathname;
-    const target =
-      view.kind === "board"
-        ? path
-        : view.kind === "detail"
-          ? `${path}?task=${view.taskId}`
-          : `${path}?view=${view.kind}`;
+    const target = urlForView(view, path);
     if (path + window.location.search !== target) window.history.pushState({}, "", target);
   }, [state.view, bootPhase]);
 
   useEffect(() => {
     function onPopState() {
-      // An open drawer owns the Back gesture: dismiss it and stay put, rather
-      // than navigating out from underneath it.
-      if (drawerOpenRef.current) {
+      const decision = decidePopState({
+        drawerOpen: drawerOpenRef.current,
+        navPending: navPendingRef.current,
+        search: window.location.search,
+      });
+      // "skip": closeDrawer()'s own history.back() fired this popstate — keep
+      //   the in-flight view. The back-traversal lands on the pre-drawer entry,
+      //   which may leave the URL out of sync with the just-chosen view (the
+      //   view<->URL effect's pushState, if it ran first, is stranded by the
+      //   traversal; if it hasn't run yet, the URL was never rewritten). Re-sync
+      //   the URL here so it matches the view — safe because for a non-view-
+      //   changing drawer close the URL already matches and this is a no-op.
+      if (decision.action === "skip") {
+        navPendingRef.current = false;
+        setDrawerOpen(false);
+        const target = syncTargetAfterSkip({
+          view: viewRef.current,
+          pathname: window.location.pathname,
+          currentSearch: window.location.search,
+        });
+        if (target !== null) window.history.pushState({}, "", target);
+        return;
+      }
+      // "closeDrawer": an open drawer owns the Back gesture — dismiss and stay.
+      if (decision.action === "closeDrawer") {
         setDrawerOpen(false);
         return;
       }
-      const params = new URLSearchParams(window.location.search);
-      const task = Number(params.get("task"));
-      const view = params.get("view");
-      if (Number.isInteger(task) && task > 0) store.openDetail(task);
-      else if (view === "settings") store.openSettings();
-      else if (view === "routines") store.openRoutines();
-      else if (view === "plugins") store.openPlugins();
-      else store.openBoard();
+      // "navigate": a genuine Back / deep-link — sync the view to the URL.
+      const view = decision.view;
+      if (view.kind === "board") store.openBoard();
+      else if (view.kind === "detail") store.openDetail(view.taskId);
+      else if (view.kind === "settings") store.openSettings();
+      else if (view.kind === "routines") store.openRoutines();
+      else if (view.kind === "plugins") store.openPlugins();
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -245,7 +273,13 @@ export default function App() {
   }
   function closeDrawer() {
     setDrawerOpen(false);
-    if (window.history.state?.drawer) window.history.back();
+    if (window.history.state?.drawer) {
+      // This back() pops the drawer entry so system Back doesn't need two
+      // presses. The popstate it triggers reads the pre-drawer URL — flag it
+      // so onPopState skips re-navigation and keeps the just-chosen view.
+      navPendingRef.current = true;
+      window.history.back();
+    }
   }
 
   // Every filter — typed or from a saved view — is resolved by the server (the
