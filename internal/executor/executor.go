@@ -323,7 +323,7 @@ func (e *Executor) recoverStaleTmuxRefs() {
 	}
 
 	// Step 3: Clear stale references in database
-	staleDaemon, staleWindow, err := e.db.RecoverStaleTmuxRefs(activeSessions, validWindowIDs)
+	staleDaemon, staleWindow, err := e.db.RecoverStaleTmuxRefs(activeSessions, validWindowIDs, false)
 	if err != nil {
 		e.logger.Error("Failed to recover stale tmux refs", "error", err)
 		return
