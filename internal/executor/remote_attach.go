@@ -23,18 +23,17 @@ const (
 	RemoteSessionUnreachable
 )
 
-// RemoteInnerPrefix is the tmux prefix the attached remote session is given, and
-// the reason it needs one.
+// The view a remote pane shows takes NO tmux prefix, which is the same decision
+// the local detail view makes (see ui.ensureViewSession).
 //
-// Attaching a tmux session inside a tmux pane nests two servers that both listen
-// for C-b. The outer one wins every time, so with the default prefix the inner
-// session cannot be detached, scrolled or copied from — the pane renders but is
-// half-dead. Rather than leave that as folklore, ty sets the inner session's
-// prefix to C-a and says so next to the pane.
-const (
-	RemoteInnerPrefix      = "C-a"
-	RemoteInnerPrefixHuman = "Ctrl-a"
-)
+// Two tmux servers in a line both listening for a prefix is a real collision, and
+// the first answer to it was to give the inner session C-a. That bought a prefix
+// nobody needed and cost two keys the user does need: C-a is start-of-line in
+// every readline shell and in the agents' own input boxes, and the remote pane is
+// where those keys are typed. A view is not a workspace — the mouse scrolls,
+// selects and resizes it, the surrounding TUI owns the layout keys — so the
+// honest configuration is the local one: no prefix, every key goes through to
+// what is running on the host.
 
 // RemoteSessionState reports whether a remotely placed task still has a live
 // tmux window on its host.
@@ -128,7 +127,8 @@ func remoteAttachScript(task *db.Task, loc RemoteTaskLocation, shell bool) strin
 }
 
 // remoteAttachChain is the shell line the PLACED HOST runs: check the window is
-// there, build a disposable grouped view of it, fix the nested prefix, attach.
+// there, build a disposable grouped view of it, configure it exactly as the
+// local detail view configures its own, attach.
 func remoteAttachChain(task *db.Task, view string) string {
 	return remoteAttachWindowChain(task, view, TmuxWindowName(task.ID))
 }
@@ -145,13 +145,25 @@ func remoteAttachWindowChain(task *db.Task, view, window string) string {
 		// Grouped view session. Recreating one that already exists is not an error
 		// worth failing on — a previous pane may have left it behind.
 		fmt.Sprintf("tmux new-session -d -s %s -t %s 2>/dev/null || true", q(view), q(task.DaemonSession)),
+		// Point it at this task's window BEFORE the hook below is installed, or
+		// the hook fires on our own select-window and kills the session.
+		fmt.Sprintf("tmux select-window -t %s >/dev/null", q(view+":"+window)),
 		fmt.Sprintf("tmux set-option -t %s status off >/dev/null", q(view)),
 		fmt.Sprintf("tmux set-option -t %s mouse on >/dev/null", q(view)),
-		// The nested-prefix fix, applied to the VIEW session only so the agent's
-		// real session (and anyone attached to it over plain ssh) keeps C-b.
-		fmt.Sprintf("tmux set-option -t %s prefix %s >/dev/null", q(view), RemoteInnerPrefix),
+		// No prefix, applied to the VIEW session only so the agent's real session
+		// (and anyone attached to it over plain ssh) keeps C-b.
+		fmt.Sprintf("tmux set-option -t %s prefix None >/dev/null", q(view)),
 		fmt.Sprintf("tmux set-option -t %s prefix2 None >/dev/null", q(view)),
-		fmt.Sprintf("tmux select-window -t %s >/dev/null", q(view+":"+window)),
+		// The daemon session on a host holds a window per placed task. If this
+		// task's window closes, tmux moves this grouped session to some other
+		// window, and the pane under the TUI quietly starts showing ANOTHER
+		// task's agent. End the view instead and let the wrapper explain.
+		fmt.Sprintf("tmux set-hook -t %s session-window-changed %s >/dev/null",
+			q(view), q(`kill-session -t "=`+view+`"`)),
+		// The window is shared with the daemon session nobody is attached to, so
+		// its size has to follow whoever is looking at it — otherwise the agent
+		// renders for a size that is not the pane's and reflows on every glance.
+		fmt.Sprintf("tmux set-option -w -t %s window-size latest >/dev/null", q(view+":"+window)),
 		// Attach, and only then mark the view session disposable: chained with
 		// tmux's ";" so destroy-unattached cannot fire before this client connects
 		// and take the session with it.
@@ -180,10 +192,9 @@ func localSSHInvocation() string {
 //
 // It is a badge and not a sentence on purpose: it shares one right-aligned
 // header line with the status, project, type and PR badges, and prose there
-// wraps and strands its own tail on a line of its own. The inner tmux prefix —
-// the one thing about a nested session a user cannot guess — is documented
-// where the keys actually go instead: on the remote pane's border title and in
-// the tmux status bar (see attachRemotePane).
+// wraps and strands its own tail on a line of its own. There is nothing else to
+// document beside the pane: the view takes no prefix of its own, so it answers
+// to the same keys and the same mouse as a local task's pane.
 func RemoteAttachNotice(loc RemoteTaskLocation) string {
 	if loc.Branch != "" {
 		return loc.Host + " (" + loc.Branch + ")"

@@ -1,3 +1,4 @@
+// Package classifier provides LLM-based email classification.
 package classifier
 
 import (
@@ -14,10 +15,23 @@ import (
 	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
 )
 
+// defaultMaxTokens is the output token cap used when Config.MaxTokens is unset.
+//
+// The previous value (256) was undersized for "input" actions: the prompt asks
+// the model to populate "input_text" with the user's clarification, and a
+// substantial clarification (DB URL, API key, repro steps) can exceed the
+// ~256-token output budget. When that happens the SDK hard-cuts generation at
+// max_tokens, the JSON is truncated mid-string, parseResponse fails, and the
+// processor drops the email via the classify:giveup path — losing the user's
+// reply with no notification. 512 doubles the output headroom while preserving
+// most of the cost reduction from the 1024 -> 256 cut made in 54831a6.
+const defaultMaxTokens = 512
+
 // ClaudeClassifier uses Claude API for email classification.
 type ClaudeClassifier struct {
-	client *anthropic.Client
-	model  string
+	client    *anthropic.Client
+	model     string
+	maxTokens int
 }
 
 // NewClaudeClassifier creates a new Claude classifier.
@@ -44,9 +58,15 @@ func NewClaudeClassifier(cfg *Config) (*ClaudeClassifier, error) {
 		model = "claude-haiku-4-5-20251001"
 	}
 
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
+
 	return &ClaudeClassifier{
-		client: client,
-		model:  model,
+		client:    client,
+		model:     model,
+		maxTokens: maxTokens,
 	}, nil
 }
 
@@ -69,7 +89,7 @@ func (c *ClaudeClassifier) Classify(ctx context.Context, email *adapter.Email, t
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.F(c.model),
-		MaxTokens: anthropic.Int(256),
+		MaxTokens: anthropic.Int(int64(c.maxTokens)),
 		Messages: anthropic.F([]anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		}),
@@ -85,6 +105,18 @@ func (c *ClaudeClassifier) Classify(ctx context.Context, email *adapter.Email, t
 			"input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens,
 		)
+	}
+
+	// Detect generation cut off at max_tokens. The returned JSON is almost
+	// certainly truncated mid-string in this case, so delegating to
+	// parseResponse would surface an opaque "invalid JSON" error and the
+	// processor would drop the email via classify:giveup. Returning a
+	// distinct, diagnosable error here makes the cap mis-sizing observable
+	// (and actionable — the operator can raise classifier.max_tokens) instead
+	// of looking like an arbitrary malformed response.
+	if resp.StopReason == anthropic.MessageStopReasonMaxTokens {
+		return nil, fmt.Errorf("claude response truncated at max_tokens=%d (output_tokens=%d): output cap exceeded; raise classifier max_tokens",
+			c.maxTokens, resp.Usage.OutputTokens)
 	}
 
 	// Extract text response

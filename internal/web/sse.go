@@ -35,6 +35,14 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SSE streams outlive the server's 60s WriteTimeout — Go sets that
+	// deadline once per request and never resets it, so without this the
+	// connection is torn down every minute. The bounded extension still
+	// frees the goroutine if the client vanishes silently; a clear would
+	// rely on ctx.Done(), which can take minutes to observe a half-open
+	// TCP path.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute))
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -89,6 +97,14 @@ func (s *Server) handleBoardStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
+
+	// SSE streams outlive the server's 60s WriteTimeout — Go sets that
+	// deadline once per request and never resets it, so without this the
+	// connection is torn down every minute. The bounded extension still
+	// frees the goroutine if the client vanishes silently; a clear would
+	// rely on ctx.Done(), which can take minutes to observe a half-open
+	// TCP path.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute))
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

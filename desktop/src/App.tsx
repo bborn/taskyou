@@ -8,7 +8,8 @@ import { buildKanbanColumns } from "./lib/kanban";
 import { buildSections, flattenSections } from "./lib/list";
 import { store, useAppState } from "./store";
 import { decidePopState, syncTargetAfterSkip, urlForView } from "./lib/mobileNav";
-import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
+import { checkEnvironment, inTauri, openExternal, supervisorEnsure } from "./tauri";
+import { openTaskCodeReporting } from "./lib/code";
 import { Board } from "./components/Board";
 import { MobileBoard } from "./components/MobileBoard";
 import { MobileDrawer } from "./components/MobileDrawer";
@@ -427,7 +428,7 @@ export default function App() {
             e.preventDefault();
             return void store.setForm({ kind: "edit", taskId: task.id });
           case "o":
-            if (task.worktree_path) void openInEditor(task.worktree_path);
+            openTaskCodeReporting(task);
             return;
           case "b":
             if (task.branch_name) {

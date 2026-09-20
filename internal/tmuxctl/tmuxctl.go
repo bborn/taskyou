@@ -258,6 +258,29 @@ func ViewAttachScript(view string) string {
 		AgentShell(), shellQuote(view))
 }
 
+// ClipboardRelayArgs are the tmux options the server holding a view pane needs
+// so that copying inside the view reaches the user's system clipboard.
+//
+// Every view ty opens is a nested client: the session the agent runs in is on
+// another server, or on another machine, and the pane under the TUI is a client
+// of it. When the inner tmux copies a selection it asks its terminal for the
+// clipboard with OSC 52 — and its terminal is the outer tmux's pane. tmux's
+// default (`set-clipboard external`) sets the clipboard for its own copies but
+// DROPS such a request from an application, and a nested client is an
+// application. So a mouse selection in a task pane used to land in a paste
+// buffer on the far side and nowhere else: for a placed task, a buffer on a
+// machine the user is not sitting at. `on` relays it instead, one hop per
+// nesting level, out to the terminal.
+//
+// set-clipboard is a server option — tmux has no session or pane scope for it —
+// so this is set once on the server ty opens its panes in and is not restored
+// afterwards. When `ty` runs inside the user's own tmux that is their server,
+// the way the root key bindings the detail view installs are: the alternative is
+// a task pane whose selections cannot leave it.
+func ClipboardRelayArgs() []string {
+	return []string{"set-option", "-s", "set-clipboard", "on"}
+}
+
 // ExitWithProcess prefixes a pane's shell command with a watcher that closes
 // the pane once process pid is gone. ty's view and remote-attach panes run
 // clients of their own, so a TUI that crashes or is killed -9 would otherwise

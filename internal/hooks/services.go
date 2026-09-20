@@ -77,7 +77,13 @@ func (s *ServiceSet) Stop() {
 	if s == nil || len(s.procs) == 0 {
 		return
 	}
-	for _, rs := range s.procs {
+	// Snapshot the slice and hand it to the reaping goroutine; the field is never
+	// touched again from the foreground, which establishes a happens-before edge
+	// (via the go statement) between the goroutine's reads and the snapshot, and
+	// avoids a race with a foreground `s.procs = nil` write on the timeout branch.
+	procs := s.procs
+	s.procs = nil
+	for _, rs := range procs {
 		if rs.cmd.Process == nil {
 			continue
 		}
@@ -88,7 +94,7 @@ func (s *ServiceSet) Stop() {
 	}
 	done := make(chan struct{})
 	go func() {
-		for _, rs := range s.procs {
+		for _, rs := range procs {
 			_ = rs.cmd.Wait()
 		}
 		close(done)
@@ -96,11 +102,11 @@ func (s *ServiceSet) Stop() {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		for _, rs := range s.procs {
+		for _, rs := range procs {
 			if rs.cmd.Process != nil {
 				_ = syscall.Kill(-rs.cmd.Process.Pid, syscall.SIGKILL)
 			}
 		}
+		<-done
 	}
-	s.procs = nil
 }

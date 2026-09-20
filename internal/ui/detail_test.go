@@ -286,6 +286,7 @@ func TestDetailModel_GetServerURL(t *testing.T) {
 		name            string
 		task            *db.Task
 		serverListening bool
+		serverURL       string
 		wantURL         string
 	}{
 		{
@@ -293,6 +294,23 @@ func TestDetailModel_GetServerURL(t *testing.T) {
 			task:            &db.Task{ID: 1, Port: 3100},
 			serverListening: true,
 			wantURL:         "http://localhost:3100",
+		},
+		{
+			// A placed task's server listens on its host; the probe resolves the
+			// address it can be reached at and the view shows that.
+			name:            "server listening on the task's host",
+			task:            &db.Task{ID: 1, Port: 3100, PlacementTarget: "ol-agents"},
+			serverListening: true,
+			serverURL:       "http://10.0.0.4:3100",
+			wantURL:         "http://10.0.0.4:3100",
+		},
+		{
+			// With no address for the host, say nothing rather than send the user
+			// to their own machine.
+			name:            "no address for the task's host",
+			task:            &db.Task{ID: 1, Port: 3100, PlacementTarget: "ol-agents"},
+			serverListening: true,
+			wantURL:         "",
 		},
 		{
 			name:            "server not listening",
@@ -316,7 +334,7 @@ func TestDetailModel_GetServerURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := &DetailModel{task: tt.task, serverListening: tt.serverListening}
+			m := &DetailModel{task: tt.task, serverListening: tt.serverListening, serverURL: tt.serverURL}
 
 			got := m.GetServerURL()
 			if got != tt.wantURL {

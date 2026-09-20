@@ -66,6 +66,7 @@ case "$sub" in
       [ -n "$alive" ] || exit 1
       cat "$dir/pane" 2>/dev/null ;;
   delete-buffer) : ;;
+  wait-for) : ;;
   *) exit 1 ;;
 esac
 `

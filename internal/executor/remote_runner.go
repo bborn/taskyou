@@ -176,15 +176,60 @@ func sshMultiplexArgs() []string {
 // bytes — %C alone is 64 hex characters, so the socket would silently fail to
 // bind. The directory is per-uid and 0700 so another user cannot plant a socket
 // ty would then connect through.
+//
+// $XDG_RUNTIME_DIR (a per-uid 0700 tmpfs another user cannot reach) is the
+// preferred base when set to an absolute path: the symlink squat described
+// below is not even possible there. /tmp is the fallback, used since this
+// code first shipped.
+//
+// The final entry is validated with Lstat, NOT Stat. Stat (and MkdirAll)
+// follow a symlink, so a symlink another user planted at the entry resolves
+// to a victim-owned 0700 directory and passes the perm/owner check, while this
+// function would return the literal symlink path — which the attacker can
+// re-point between the check and ssh's connect(2), redirecting ControlPath to
+// a fake master that MITMs every remote command. Lstat inspects the literal
+// entry and rejects a symlink outright; MkdirAll does not clear such a symlink
+// (it follows it and no-ops when the target exists), so the Lstat check is load-
+// bearing rather than decorative.
 func sshControlDir() string {
-	dir := filepath.Join("/tmp", fmt.Sprintf("ty-ssh-%d", os.Getuid()))
+	for _, base := range sshControlDirCandidates() {
+		if dir := prepareSSHControlDir(base); dir != "" {
+			return dir
+		}
+	}
+	return ""
+}
+
+// sshControlDirCandidates lists the parent directories to try, in priority
+// order, for the per-uid control-socket directory. $XDG_RUNTIME_DIR is
+// preferred when set to an absolute path; /tmp is the always-available
+// fallback. A relative XDG_RUNTIME_DIR is ignored — the XDG spec requires an
+// absolute path, and a relative one would create the directory in an
+// unpredictable cwd.
+func sshControlDirCandidates() []string {
+	var cands []string
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(xdg) {
+		cands = append(cands, xdg)
+	}
+	return append(cands, "/tmp")
+}
+
+// prepareSSHControlDir creates and validates the per-uid control-socket
+// directory under base, returning the directory or "" if it cannot be made
+// private enough to hold a control socket.
+func prepareSSHControlDir(base string) string {
+	dir := filepath.Join(base, fmt.Sprintf("ty-ssh-%d", os.Getuid()))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return ""
 	}
-	// A pre-existing directory owned by someone else, or left group/world
-	// writable, is not somewhere to keep a control socket.
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	// A pre-existing directory owned by someone else, left group/world
+	// writable, or — critically — a symlink planted at the path by another
+	// user (possible in the sticky /tmp fallback, or any shared-writable
+	// parent) is not somewhere to keep a control socket. Lstat inspects the
+	// LITERAL entry: Stat follows a symlink and would validate the resolved
+	// target instead, which is the bug the security comment above describes.
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return ""
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {

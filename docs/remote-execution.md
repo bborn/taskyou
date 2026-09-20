@@ -63,6 +63,55 @@ list authoritative. Inventories without those declarations remain compatible;
 the remote launch still checks that the executable exists. The inventory name
 is used for probe results, while its `ssh` field is the actual SSH destination.
 
+## It behaves like a local task
+
+A placed task's session is shown in a pane under the TUI, and that pane is meant
+to be indistinguishable from a local task's: the same keys, the same mouse, the
+same chrome.
+
+- **Keys.** The view on the host takes no tmux prefix of its own, exactly as the
+  local detail view's does, so every key — including `Ctrl-a`, which is
+  start-of-line in the agent's input box and in the remote shell — goes through
+  to what is running over there. Layout keys (`Shift`+arrows to move between
+  panes, `\` for the shell) are the TUI's, here as there.
+- **Scrolling and selecting.** The mouse scrolls, selects and resizes. There is
+  no separate scrollback to learn.
+- **Copy and paste.** Copying in a task pane reaches the system clipboard. A view
+  is a nested tmux client, and a nested client's clipboard request is an
+  application request that tmux drops by default (`set-clipboard external`), so
+  ty sets `set-clipboard on` on the server it opens its panes in. Without it a
+  selection went into a paste buffer on the far side — for a placed task, a
+  buffer on a machine you are not sitting at.
+- **Size.** Remote agent sessions start at the same size as local ones (200x50),
+  and the window follows whoever is looking at it, so an agent does not lay its
+  screen out for tmux's 80x24 and reflow when you open the task.
+- **Shell.** `\` opens a shell in the task's worktree on the host, in a window of
+  its own, and closing the view leaves it running.
+- **The view never shows the wrong task.** One daemon session on a host holds a
+  window per placed task. If this task's window ends, the view ends with it and
+  says so, rather than following the session to a neighbouring task's agent.
+
+Actions that act on the task's code follow the task as well:
+
+- **`o` (open in editor)** opens the worktree on its host. Editors that can do
+  that over SSH — VS Code and its forks — are asked to; anything else is told
+  where the code is and given the `ssh` command that gets there. It never opens
+  the same path on the coordinator, which is usually a different checkout of the
+  same project (and, for a task that was moved, its stale worktree).
+- **`b` (open in browser)** and the `Server:` line in task detail name the host,
+  not `localhost`: a placed task's dev server listens on its port over there. The
+  address is the hostname `ssh -G` resolves for the destination, so a name that
+  only exists in `~/.ssh/config` still produces a URL a browser can open. The
+  port is probed on the host (`lsof`, falling back to `ss`).
+- **Browser annotations and screenshots** are the exception. Both are staged in
+  the task's worktree for the agent to read, and ty cannot yet put files in a
+  worktree on another host, so it says so instead of writing them into the
+  coordinator's checkout: an annotation bundle is refused, and a screenshot or
+  DOM snapshot comes back with that reason in place of the payload rather than
+  inlined into the agent's output. The browser actions that carry nothing bulky
+  (navigate, click, eval) work as they do locally — the relay does not care which
+  machine the agent is on.
+
 ## Observe and recover
 
 The task detail shows its host, placement reason, connection state and last
@@ -96,7 +145,9 @@ they are restarted.
   an optional `placement_workdir`. An unusable choice is reported and the task is
   still created.
 - `GET /api/tasks/{id}/placement` returns the destination, directory, reason,
-  decision state, remote worktree and health (`state`, `last_seen`, `problem`).
+  decision state, remote worktree, health (`state`, `last_seen`, `problem`) and
+  `code_uri` — the URL that opens the remote worktree in the viewer's editor over
+  SSH, empty for a task on this machine.
 - `POST /api/tasks/{id}/placement` accepts `target`, `workdir` and optional
   `force` (default false). It returns progress messages after the move completes.
 

@@ -111,10 +111,12 @@ func ParseDefinition(data []byte) (Definition, error) {
 		}
 		// A model the step's CLI won't accept fails silently at launch (the agent
 		// rejects the flag inside tmux and the step stalls), so catch it while the
-		// file is being read. Steps routed at a proxy — a config_dir or an
-		// ANTHROPIC_BASE_URL env override, the ollama shape — name the proxy's
-		// models, which ty can't check.
-		if !db.ModelBackendIsCustom(s.ConfigDir, s.Env) {
+		// file is being read. A *Claude* step routed at a proxy — a config_dir or
+		// an ANTHROPIC_BASE_URL env override, the ollama shape — names the proxy's
+		// models, which ty can't check. The hatch is Claude-only: grok and cursor
+		// steps never route through those signals, so their models are always
+		// validated even when a Claude proxy is configured.
+		if exec != db.ExecutorClaude || !db.ModelBackendIsCustom(s.ConfigDir, s.Env) {
 			if err := db.ValidateModel(exec, s.Model); err != nil {
 				return Definition{}, fmt.Errorf("step %q: %w", name, err)
 			}

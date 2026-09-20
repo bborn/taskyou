@@ -38,7 +38,7 @@ func TestRecoverStaleTmuxRefsLeavesPlacedTasksAlone(t *testing.T) {
 
 	// Neither reference is in the local tmux server's listing.
 	if _, _, err := database.RecoverStaleTmuxRefs(
-		map[string]bool{"task-daemon-999": true}, map[string]bool{"@1": true}); err != nil {
+		map[string]bool{"task-daemon-999": true}, map[string]bool{"@1": true}, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,12 +76,63 @@ func TestRecoverStaleTmuxRefsWithNoLocalSessionsSpareaPlacedTasks(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if _, _, err := database.RecoverStaleTmuxRefs(nil, nil); err != nil {
+	if _, _, err := database.RecoverStaleTmuxRefs(nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 
 	if session, window := tmuxRefs(t, database, placed.ID); session == "" || window == "" {
 		t.Errorf("a fresh daemon erased a placed task's refs (session=%q window=%q)", session, window)
+	}
+}
+
+// The dry-run path is what `ty recover --dry-run` drives. It must count the same
+// stale set the live sweep would clear (so the report matches what would
+// happen) while touching no rows — and, like the live sweep, it must not count a
+// remotely placed task, whose tmux refs live on the OTHER host's server.
+func TestRecoverStaleTmuxRefsDryRunCountsButDoesNotClear(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateProject(&Project{Name: "test", Path: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+
+	placed := &Task{Title: "runs on a host", Type: "task", Project: "test"}
+	local := &Task{Title: "runs here", Type: "task", Project: "test"}
+	for _, task := range []*Task{placed, local} {
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(
+			`UPDATE tasks SET daemon_session = 'task-daemon-23335', tmux_window_id = '@25' WHERE id = ?`,
+			task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.SetTaskPlacementDecision(placed.ID, "ik-agents", "only host", "/srv/repo"); err != nil {
+		t.Fatal(err)
+	}
+
+	staleDaemon, staleWindow, err := database.RecoverStaleTmuxRefs(
+		map[string]bool{"task-daemon-999": true}, map[string]bool{"@1": true}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the local task is stale; the placed task's refs are on ik-agents.
+	if staleDaemon != 1 || staleWindow != 1 {
+		t.Errorf("dry-run counted placed task as stale: daemon=%d window=%d, want 1/1",
+			staleDaemon, staleWindow)
+	}
+
+	// Dry run must not have cleared anything — both rows keep their refs.
+	if session, window := tmuxRefs(t, database, placed.ID); session == "" || window == "" {
+		t.Errorf("dry run wiped placed task refs (session=%q window=%q)", session, window)
+	}
+	if session, window := tmuxRefs(t, database, local.ID); session == "" || window == "" {
+		t.Errorf("dry run wiped local task refs (session=%q window=%q)", session, window)
 	}
 }
 

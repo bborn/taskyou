@@ -208,7 +208,7 @@ printf '%s\n' "$*" >> "$TY_TEST_REMOTE_COMMANDS"
 case "$*" in
   *list-panes*) echo %91 ;;
   *capture-pane*) echo "remote pane says hello" ;;
-  *set-buffer*|*paste-buffer*|*send-keys*) : ;;
+  *set-buffer*|*paste-buffer*|*send-keys*|*wait-for*) : ;;
   *) exit 1 ;;
 esac
 `

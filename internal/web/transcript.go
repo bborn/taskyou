@@ -212,7 +212,14 @@ func readRemoteTranscript(ctx context.Context, host, workDir string, limit int) 
 		if fetchErr != nil {
 			return nil, fetchErr
 		}
-		if len(messages) >= limit || !truncated {
+		// Stop only when every file in the archive is fully read. This loop is
+		// the remote mirror of readTranscriptDir's, and shares the same flaw a
+		// count-based short-circuit has across multiple session files: an
+		// older, fully-read file can clear `limit` while the newest file is
+		// still tailed at this budget, leaving stale older-session turns at
+		// the older edge of the visible window. The final math.MaxInt64 budget
+		// pulls every file in full, so the loop always terminates.
+		if !truncated {
 			break
 		}
 	}
@@ -356,8 +363,15 @@ func readTranscriptDir(dir string, limit int) []chatMessage {
 	for _, budget := range tailBudgets {
 		merged, truncated := readFilesWithBudget(paths, budget)
 		out = merged
-		// Enough turns, or we already read everything there is.
-		if len(out) >= limit || !truncated {
+		// Stop only when every file is fully read. A count-based short-circuit
+		// (`len(out) >= limit`) is unsafe for the resumed-task shape: an older
+		// session file that is already fully read can push the merged
+		// post-coalesce count past `limit` while the newest file is still
+		// truncated at this budget, so escalating is still required or the
+		// trailing-`limit` window the handler renders keeps stale older-session
+		// turns at its older edge. The final math.MaxInt64 budget reads every
+		// file in full, so the loop always terminates.
+		if !truncated {
 			break
 		}
 	}

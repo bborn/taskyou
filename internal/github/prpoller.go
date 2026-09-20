@@ -75,6 +75,11 @@ type PRResult struct {
 type repoBackoff struct {
 	failures int
 	until    time.Time
+	// terminal marks a permanently unserviceable input — one whose failure can
+	// never self-correct (e.g. a host:port that gh's --hostname validator
+	// rejects). A terminal repo is skipped forever rather than retried on the
+	// bounded exponential backoff that handles transient failures.
+	terminal bool
 }
 
 // PRPoller decides which branches are due and asks GitHub about them, one query
@@ -127,7 +132,7 @@ func (p *PRPoller) Poll(ctx context.Context, targets []PRTarget) []PRResult {
 		if t.RepoDir == "" || t.Branch == "" || !p.due(t, now) {
 			continue
 		}
-		if b := p.backoff[t.RepoDir]; b != nil && now.Before(b.until) {
+		if b := p.backoff[t.RepoDir]; b != nil && (b.terminal || now.Before(b.until)) {
 			continue
 		}
 		if _, seen := byRepo[t.RepoDir]; !seen {
@@ -196,6 +201,13 @@ func (p *PRPoller) recordFailure(repoDir string, err error, now time.Time) {
 	if b == nil {
 		b = &repoBackoff{}
 		p.backoff[repoDir] = b
+	}
+	// A permanently unserviceable input (gh rejects host:port at flag parse
+	// before any network call) is marked terminal so Poll stops retrying it.
+	// The sentinel is produced by fetchBranchChunk's pre-call guard.
+	if errors.Is(err, ErrUnsupportedHostPort) {
+		b.terminal = true
+		return
 	}
 	delay := prBackoffBase << b.failures
 	if delay <= 0 || delay > prBackoffMax {

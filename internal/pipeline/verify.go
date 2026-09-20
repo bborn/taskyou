@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -22,18 +23,38 @@ const stepVerifyOutputMax = 4000
 // complete. Shared by the MCP taskyou_complete handler and the daemon's git-based
 // completion sweep so both enforce the gate identically.
 func RunStepVerify(dir, command string) (output string, ok bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), StepVerifyTimeout)
+	return runStepVerify(dir, command, StepVerifyTimeout)
+}
+
+// runStepVerify is the runner body, parameterized on the timeout so the deadline
+// path can be exercised in a CI test budget (StepVerifyTimeout is 15 min). The
+// public RunStepVerify calls this with the production constant, so behaviour is
+// identical at runtime — the parameter exists for testability, not for callers.
+func runStepVerify(dir, command string, timeout time.Duration) (output string, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	if strings.TrimSpace(dir) != "" {
 		cmd.Dir = dir
 	}
+	// Run in its own process group so the deadline can kill sh AND any descendants
+	// (a test runner it spawned) with one signal. CombinedOutput blocks on its
+	// internal io.Copy until every pipe write-end closes; without a group kill a
+	// descendant that inherited the pipe keeps it open past the deadline, so the
+	// timeout would be advisory on RunStepVerify's wall-clock return, not a bound.
+	// WaitDelay is a belt-and-suspenders fallback that force-reaps the copy
+	// goroutine if a child escapes the group (e.g. re-sets its own pgid).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 
 	text := string(out)
 	if ctx.Err() == context.DeadlineExceeded {
-		text += "\n[verify timed out after " + StepVerifyTimeout.String() + "]"
+		text += "\n[verify timed out after " + timeout.String() + "]"
 	}
 	return tailString(text, stepVerifyOutputMax), err == nil
 }

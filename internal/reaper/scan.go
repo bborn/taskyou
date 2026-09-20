@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // psFormat is the process-table view the reaper needs: identity, parentage,
@@ -16,8 +18,19 @@ import (
 const psFormat = "pid=,ppid=,tty=,etime=,command="
 
 // ScanProcesses returns the current process table.
+//
+// `-ww` disables `ps`'s output-width limiting. procps-ng's `ps` inherits this
+// process's environment (`osexec.Cmd.Env` is nil here, so `COLUMNS` is inherited
+// verbatim), and when `COLUMNS` is exported it truncates the `command=` column
+// to that width even though stdout is a pipe. The worktree path and the
+// `node_modules/.bin/<name>` substring that the reaper matches on both sit past
+// a long prefix, so truncation silently defeats both `TaskIDFor` and
+// `IsDevServer` — leaving orphaned dev servers running. `-w` alone is
+// insufficient (procps-ng still caps output at 132 bytes under `-w`); `-ww` is
+// genuinely unlimited. `-ww` is documented on both Linux procps-ng and macOS
+// BSD `ps`.
 func ScanProcesses() ([]Process, error) {
-	out, err := osexec.Command("ps", "-Ao", psFormat).Output()
+	out, err := osexec.Command("ps", "-ww", "-Ao", psFormat).Output()
 	if err != nil {
 		return nil, fmt.Errorf("ps: %w", err)
 	}
@@ -116,9 +129,17 @@ func ParseElapsed(s string) (time.Duration, bool) {
 // LivePanePIDs returns the PID of every process tmux currently owns a pane for,
 // across all sessions. Anything descended from one of these is still in a pane
 // and therefore not an orphan.
+//
+// The query targets the same tmux server the agents live on: every other tmux
+// call in the cleanup/suspend flow is routed through tmuxctl.AgentArgs (which
+// prepends `-L <socket>` when tmuxctl.Socket() is non-empty, e.g. the private
+// "taskyou" server fresh installs use). Querying the default socket instead
+// would miss the agent-server pane PIDs and let RuleLivePane fall through to a
+// staleness rule, reaping side processes that are still running inside a live
+// task pane.
 func LivePanePIDs() map[int]bool {
 	pids := make(map[int]bool)
-	out, err := osexec.Command("tmux", "list-panes", "-a", "-F", "#{pane_pid}").Output()
+	out, err := osexec.Command("tmux", tmuxctl.AgentArgs("list-panes", "-a", "-F", "#{pane_pid}")...).Output()
 	if err != nil {
 		return pids
 	}
