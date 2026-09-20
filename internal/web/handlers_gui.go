@@ -29,6 +29,29 @@ type SessionManager interface {
 	AllExecutors() []string
 }
 
+// TaskMover is the subset of executor functionality the API needs to perform a
+// cross-project task move: killing the task's agent, removing its worktree, and
+// notifying subscribers of the delete/create. Implemented by
+// *executor.Executor; abstracted for testability.
+//
+// Why this is a separate interface and not folded into SessionManager: a move
+// is a different concern from session bootstrap, and mock sessions in tests
+// should not have to stub teardown methods they have no opinion about. The
+// web layer also calls executor.KillTaskWindows and executor.CleanupClaudeSessions
+// directly — those are package-level functions and need no instance, so they
+// don't appear here.
+type TaskMover interface {
+	// KillClaudeProcess terminates the agent for the task. Idempotent: a no-op
+	// when no agent is running.
+	KillClaudeProcess(taskID int64) bool
+	// CleanupWorktree removes the task's worktree from disk and clears its
+	// worktree/branch fields. Idempotent: a no-op when WorktreePath is empty.
+	CleanupWorktree(task *db.Task) error
+	// NotifyTaskChange broadcasts a "deleted"/"created" event so the desktop
+	// UI, TUI mirrors, and the executor's own processing loop refresh.
+	NotifyTaskChange(eventType string, task *db.Task)
+}
+
 // maxAttachmentSize bounds decoded attachment uploads (matches generous GUI use
 // without letting a single request balloon the SQLite file unboundedly).
 const maxAttachmentSize = 32 << 20 // 32 MiB

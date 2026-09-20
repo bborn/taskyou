@@ -299,6 +299,28 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A project change is a *move*, not a field edit: the documented contract
+	// (CLI help, TUI doc comment) is teardown + delete + recreate, the same
+	// path POST /api/tasks/{id}/move uses. Capture the source project up front
+	// so the teardown step in moveTask can look up the worktree's
+	// CLAUDE_CONFIG_DIR against the OLD project (it was registered there at
+	// execution time), and route through moveTask at the end. The non-move
+	// PATCH path persists via UpdateTask as before.
+	//
+	// A request that re-asserts the current project (`{"project":"<same>"}`)
+	// is not a move and goes through UpdateTask, matching the existing
+	// behavior. A request that sets the project to "" when the task's
+	// current project is non-empty IS a move — to a project that does not
+	// exist — and moveTask's existence check rejects it with 404 (rather
+	// than silently persisting an empty project).
+	sourceProject := task.Project
+	movingTo := ""
+	isMove := false
+	if req.Project != nil && *req.Project != task.Project {
+		movingTo = *req.Project
+		isMove = true
+	}
+
 	if req.Title != nil {
 		task.Title = *req.Title
 	}
@@ -313,6 +335,11 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		task.Type = *req.Type
 	}
 	if req.Project != nil {
+		// Set on the in-memory task so subsequent checks — notably model
+		// validation below — see the destination project. moveTask uses
+		// `movingTo`, not oldTask.Project, for the new row's project, so this
+		// is a transient set; it is restored to sourceProject right before
+		// the move so the teardown step reads the right CLAUDE_CONFIG_DIR.
 		task.Project = *req.Project
 	}
 	if req.Executor != nil {
@@ -344,6 +371,25 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+
+	if isMove {
+		// Restore the source project so moveTask's teardown step finds the
+		// worktree's old CLAUDE_CONFIG_DIR; the destination is in `movingTo`.
+		// All non-project field updates above ride along on the in-memory
+		// task and are copied into the new row.
+		task.Project = sourceProject
+		moved, err := s.moveTask(task, movingTo)
+		if err != nil {
+			if ae, ok := err.(apiError); ok {
+				jsonErr(w, ae.msg, ae.code)
+				return
+			}
+			jsonErr(w, "failed to move task", http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, toTaskJSON(moved))
+		return
 	}
 
 	if err := s.db.UpdateTask(task); err != nil {
@@ -383,6 +429,16 @@ type moveRequest struct {
 	Project string `json:"project"`
 }
 
+// apiError is the handler-shaped error moveTask returns: a status code and a
+// prose message the handler writes back via jsonErr. It keeps the move logic
+// testable without an http.ResponseWriter.
+type apiError struct {
+	code int
+	msg  string
+}
+
+func (e apiError) Error() string { return e.msg }
+
 func (s *Server) handleMoveTask(w http.ResponseWriter, r *http.Request) {
 	task, ok := s.requireTask(w, r)
 	if !ok {
@@ -395,19 +451,152 @@ func (s *Server) handleMoveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := s.db.GetProjectByName(req.Project)
-	if err != nil || project == nil {
-		jsonErr(w, "project not found", http.StatusNotFound)
-		return
-	}
-
-	task.Project = req.Project
-	if err := s.db.UpdateTask(task); err != nil {
+	moved, err := s.moveTask(task, req.Project)
+	if err != nil {
+		if ae, ok := err.(apiError); ok {
+			jsonErr(w, ae.msg, ae.code)
+			return
+		}
 		jsonErr(w, "failed to move task", http.StatusInternalServerError)
 		return
 	}
 
-	jsonOK(w, toTaskJSON(task))
+	jsonOK(w, toTaskJSON(moved))
+}
+
+// moveTask implements the cross-project move the CLI and TUI define: tear down
+// the old task's execution state in the source project, delete the row, then
+// create a fresh task in the target project with execution fields reset. The
+// old task ID does not survive — a move is a delete + create, not a relabel.
+//
+// Why teardown + recreate and not "clear the columns": a column wipe on
+// UpdateTask leaves placement_target/placement_reason/started_at/completed_at
+// untouched (UpdateTask's SET clause doesn't include them), and more
+// importantly it leaves the on-disk worktree and the running agent in the old
+// project — the very leak that caused this bug. The auto-sweeper then fails
+// the cross-repo `git worktree remove` and marks the row un-sweepable, or
+// silently leaks when the destination project doesn't use worktrees. The
+// teardown + recreate path is the only one that actually removes the worktree
+// from disk and kills the agent.
+//
+// The teardown is gated on WorktreePath != "", matching the CLI
+// (cmd/task/main.go:7020) and the TUI (internal/ui/app.go:5601): a draft or
+// backlog task has no worktree, no agent, and no port to clean up, so its move
+// is a cheap delete + create.
+func (s *Server) moveTask(oldTask *db.Task, targetProject string) (*db.Task, error) {
+	// Validate the destination project. CreateTask would refuse an unknown
+	// project too, but doing it early lets the handler return a 404 (the
+	// documented contract for /move on a missing project) instead of a 500.
+	project, err := s.db.GetProjectByName(targetProject)
+	if err != nil {
+		return nil, apiError{code: http.StatusInternalServerError, msg: "database error"}
+	}
+	if project == nil {
+		return nil, apiError{code: http.StatusNotFound, msg: "project not found"}
+	}
+
+	// Step 1: Tear down the old task's execution state, but only if it has any.
+	// Draft/backlog tasks have no worktree, no agent, and no port.
+	if oldTask.WorktreePath != "" {
+		if s.mover == nil {
+			return nil, apiError{
+				code: http.StatusServiceUnavailable,
+				msg:  "task has execution state in its current project; moving it requires an attached executor to tear down its worktree and agent",
+			}
+		}
+		// Kill the agent process and the tmux window that hosts it. Both are
+		// idempotent: a no-op when no agent is running and no window exists.
+		// KillTaskWindows covers every task-daemon-* session, the same
+		// across-daemons variant the CLI uses — a move over HTTP rarely shares
+		// the daemon session that originally spawned the window.
+		s.mover.KillClaudeProcess(oldTask.ID)
+		executor.KillTaskWindows(context.Background(), oldTask.ID)
+
+		// Clean up the Claude session .jsonl transcripts using the OLD
+		// project's CLAUDE_CONFIG_DIR — the transcripts were written under
+		// the dir registered against the task's repo at execution time, which
+		// is the source project, not the destination.
+		oldConfigDir := ""
+		if oldTask.Project != "" {
+			if oldProject, gerr := s.db.GetProjectByName(oldTask.Project); gerr == nil && oldProject != nil {
+				oldConfigDir = oldProject.ClaudeConfigDir
+			}
+		}
+		// Best-effort, matching the CLI/TUI: a cleanup failure is logged there
+		// as a warning and the move continues — the leak the bug report
+		// describes is the worse outcome than a leftover transcript file.
+		_ = executor.CleanupClaudeSessions(oldTask.WorktreePath, oldConfigDir)
+		_ = s.mover.CleanupWorktree(oldTask)
+	}
+
+	// Step 2: Delete the old row. A new row replaces it.
+	if err := s.db.DeleteTask(oldTask.ID); err != nil {
+		return nil, apiError{code: http.StatusInternalServerError, msg: "delete old task: " + err.Error()}
+	}
+
+	// Step 3: Build the new task by copying the old one and resetting execution
+	// state. The struct copy preserves every content/per-task field the old
+	// task had (Title, Body, Type, Tags, Executor, Pinned, PermissionMode,
+	// EffortLevel, Model, ClaudeConfigDir, EnvJSON, SourceBranch, Summary,
+	// etc.) and matches the TUI contract at internal/ui/app.go:5623-5635; the
+	// CLI at cmd/task/main.go:7045-7063 hand-picks a smaller list, but
+	// preserving more here is strictly safer and lets PATCH /api/tasks/{id}
+	// route a project change through move without surprising callers that
+	// edited other fields in the same request.
+	newTask := &db.Task{}
+	*newTask = *oldTask
+	// A new row gets a fresh ID and the destination project.
+	newTask.ID = 0
+	newTask.Project = targetProject
+	// Reset everything that points at resources in the old project — these
+	// are the columns the bug report identifies as the leak when they
+	// survive a move.
+	newTask.WorktreePath = ""
+	newTask.BranchName = ""
+	newTask.Port = 0
+	newTask.ClaudeSessionID = ""
+	newTask.DaemonSession = ""
+	newTask.TmuxWindowID = ""
+	newTask.ClaudePaneID = ""
+	newTask.ShellPaneID = ""
+	// The PR is for the old worktree's branch; the worktree is gone.
+	newTask.PRURL = ""
+	newTask.PRNumber = 0
+	newTask.PRInfoJSON = ""
+	// Archive state points at refs in the old project's repo, unreachable
+	// from the destination project.
+	newTask.ArchiveRef = ""
+	newTask.ArchiveCommit = ""
+	newTask.ArchiveWorktreePath = ""
+	newTask.ArchiveBranchName = ""
+	// The task ran on a host the placement hook chose for the old project;
+	// that choice is stale after a teardown+recreate.
+	newTask.PlacementTarget = ""
+	newTask.PlacementReason = ""
+	// These timestamps describe the old run.
+	newTask.StartedAt = nil
+	newTask.CompletedAt = nil
+	// Processing/blocked carry live work the teardown just discarded; reset
+	// to backlog so the moved task isn't a zombie in "running" state. This
+	// matches the CLI (cmd/task/main.go:7066-7068) and TUI
+	// (internal/ui/app.go:5633-5635).
+	if newTask.Status == db.StatusProcessing || newTask.Status == db.StatusBlocked {
+		newTask.Status = db.StatusBacklog
+	}
+
+	if err := s.db.CreateTask(newTask); err != nil {
+		return nil, apiError{code: http.StatusInternalServerError, msg: "create new task: " + err.Error()}
+	}
+
+	// Notify the desktop UI, TUI mirrors, and the executor's processing loop
+	// that a task was deleted and a new one created. Best-effort: a notify
+	// failure shouldn't undo a successful move.
+	if s.mover != nil {
+		s.mover.NotifyTaskChange("deleted", oldTask)
+		s.mover.NotifyTaskChange("created", newTask)
+	}
+
+	return newTask, nil
 }
 
 type statusRequest struct {
