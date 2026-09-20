@@ -23,8 +23,8 @@ func requireTmux(t *testing.T) {
 
 // makeDaemonSession creates a tmux daemon session with a window for the given
 // task and returns a cleanup func. The session name is intentionally chosen so
-// it does NOT match what getDaemonSessionName() would return for the current
-// test process — that's the scenario we need to exercise.
+// it does NOT match this test process's own daemon session name — that's the
+// scenario we need to exercise.
 func makeDaemonSession(t *testing.T, sessionID string, taskID int) func() {
 	t.Helper()
 	tmuxtest.Isolate(t)
@@ -84,39 +84,6 @@ func suppressStdout(t *testing.T) {
 	})
 }
 
-// TestKillSession_OnlySearchesCurrentDaemonSession documents the limitation of
-// killSession: it only looks in the daemon session computed from the current
-// process's session ID. A window living in a daemon session with a different
-// ID is invisible to it. This is the bug surface for deleteTask/moveTask.
-func TestKillSession_OnlySearchesCurrentDaemonSession(t *testing.T) {
-	requireTmux(t)
-
-	const taskID = 991001
-	otherSessionID := "test-orphan-991001"
-	cleanup := makeDaemonSession(t, otherSessionID, taskID)
-	defer cleanup()
-
-	// Make sure the current process's WORKTREE_SESSION_ID won't accidentally
-	// point at the test daemon session.
-	t.Setenv("WORKTREE_SESSION_ID", "")
-
-	// Sanity: getDaemonSessionName() should NOT equal our test daemon session.
-	if got := getDaemonSessionName(); got == "task-daemon-"+otherSessionID {
-		t.Fatalf("test setup broken: getDaemonSessionName=%q matches the test session", got)
-	}
-
-	// killSession is scoped to the current daemon session only and should fail.
-	if err := killSession(taskID); err == nil {
-		t.Error("killSession returned nil even though target window lives in a different daemon session")
-	}
-
-	// Window should still exist — proving why the bug masquerades as silent
-	// success when callers ignore the error (as deleteTask used to do).
-	if !windowExists("task-daemon-"+otherSessionID, fmt.Sprintf("task-%d", taskID)) {
-		t.Error("window should still exist; killSession is daemon-scoped and shouldn't have reached it")
-	}
-}
-
 // TestKillSessionAcrossDaemons_FindsWindowInDifferentDaemon proves that the
 // across-daemons variant correctly locates and kills a task window regardless
 // of which daemon session originally spawned it. This is what deleteTask and
@@ -143,8 +110,8 @@ func TestKillSessionAcrossDaemons_FindsWindowInDifferentDaemon(t *testing.T) {
 // TestDeleteTask_KillsAgentInForeignDaemonSession is the user-facing scenario:
 // a task's tmux window lives in a daemon session whose ID does not match the
 // current ty CLI invocation's session ID. ty delete should still kill the
-// agent. This was broken because deleteTask called killSession (scoped to
-// current daemon) instead of killSessionAcrossDaemons.
+// agent. This was broken because deleteTask called a kill scoped to the
+// current daemon instead of killSessionAcrossDaemons.
 func TestDeleteTask_KillsAgentInForeignDaemonSession(t *testing.T) {
 	requireTmux(t)
 

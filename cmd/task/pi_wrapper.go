@@ -37,16 +37,9 @@ type PiContent struct {
 }
 
 type PiAssistantMessageEvent struct {
-	Type         string          `json:"type"` // text_start, text_delta, text_end, toolcall_start, etc.
-	Delta        string          `json:"delta"`
-	ContentIndex int             `json:"contentIndex"`
-	ToolCall     *PiToolCallData `json:"toolCall"`
-}
-
-type PiToolCallData struct {
-	ID   string                 `json:"id"`
-	Name string                 `json:"name"`
-	Args map[string]interface{} `json:"arguments"`
+	Type         string `json:"type"` // text_start, text_delta, text_end, toolcall_start, etc.
+	Delta        string `json:"delta"`
+	ContentIndex int    `json:"contentIndex"`
 }
 
 type PiToolResultContent struct {

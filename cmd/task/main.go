@@ -76,11 +76,6 @@ func getUISessionName() string {
 	return fmt.Sprintf("task-ui-%s", getSessionID())
 }
 
-// getDaemonSessionName returns the task-daemon session name for this instance.
-func getDaemonSessionName() string {
-	return fmt.Sprintf("task-daemon-%s", getSessionID())
-}
-
 // taskEmitter holds the process-wide events emitter so short-lived CLI
 // commands can flush pending hooks via waitForEventHooks before exit.
 var taskEmitter *events.Emitter
@@ -4001,6 +3996,7 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 				DB:        database,
 				CmdRunner: runner,
 				Sessions:  exec,
+				Mover:     exec,
 			})
 
 			// Handle signals for graceful shutdown
@@ -4929,6 +4925,7 @@ func startDaemonHTTPAPI(database *db.DB, exec *executor.Executor, logger *log.Lo
 		DB:        database,
 		CmdRunner: &execCommandRunner{},
 		Sessions:  exec,
+		Mover:     exec,
 	})
 
 	go func() {
@@ -6496,25 +6493,6 @@ func getProcessMemoryMB(pid int) int {
 	return rssKB / 1024 // Convert to MB
 }
 
-// killSession kills a specific task's tmux window in task-daemon.
-func killSession(taskID int) error {
-	daemonSession := getDaemonSessionName()
-	windowName := fmt.Sprintf("task-%d", taskID)
-	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
-
-	// Check if window exists
-	if err := agentTmuxCmd("list-panes", "-t", windowTarget).Run(); err != nil {
-		return fmt.Errorf("no window for task %d", taskID)
-	}
-
-	// Kill the window
-	if err := agentTmuxCmd("kill-window", "-t", windowTarget).Run(); err != nil {
-		return fmt.Errorf("failed to kill window: %w", err)
-	}
-
-	return nil
-}
-
 // killSessionAcrossDaemons kills a task's tmux window across all task-daemon-* sessions.
 // Returns true if a window was found and killed.
 //
@@ -6653,6 +6631,14 @@ func suspendSessions(taskIDs []int, all bool) {
 // recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
 // from tasks after a crash or daemon restart. This allows tasks to automatically
 // reconnect to their agent sessions when viewed.
+//
+// The sweep delegates to db.RecoverStaleTmuxRefs — the SAME guarded helper the
+// daemon runs on startup — so the CLI path cannot drift from the daemon path.
+// That helper's placedElsewhere clause exempts tasks placed on another host
+// (those with a non-empty placement_target), whose tmux refs live on the REMOTE
+// tmux server and therefore never appear in the local listing this command
+// enumerates. Without that guard the sweep erases the only pointer ty has to a
+// running remote agent.
 func recoverStaleTmuxRefs(dryRun bool) {
 	dbPath := db.DefaultPath()
 	database, err := openTaskDB(dbPath)
@@ -6698,32 +6684,12 @@ func recoverStaleTmuxRefs(dryRun bool) {
 
 	fmt.Println(dimStyle.Render(fmt.Sprintf("Valid window IDs: %d", len(validWindowIDs))))
 
-	// Step 3: Count tasks with stale daemon_session references
-	var staleDaemonCount int
-	rows, err := database.Query(`
-		SELECT COUNT(*) FROM tasks
-		WHERE daemon_session IS NOT NULL
-		AND daemon_session NOT IN (` + quotedSessionList(activeSessions) + `)
-	`)
-	if err == nil {
-		if rows.Next() {
-			rows.Scan(&staleDaemonCount)
-		}
-		rows.Close()
-	}
-
-	// Step 4: Count tasks with stale window IDs
-	var staleWindowCount int
-	rows, err = database.Query(`
-		SELECT COUNT(*) FROM tasks
-		WHERE tmux_window_id IS NOT NULL
-		AND tmux_window_id NOT IN (` + quotedWindowList(validWindowIDs) + `)
-	`)
-	if err == nil {
-		if rows.Next() {
-			rows.Scan(&staleWindowCount)
-		}
-		rows.Close()
+	// Step 3: Sweep stale references through the guarded helper shared with the
+	// daemon. dry-run reports the counts without clearing; the live run clears.
+	staleDaemonCount, staleWindowCount, err := database.RecoverStaleTmuxRefs(activeSessions, validWindowIDs, dryRun)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error recovering stale references: "+err.Error()))
+		return
 	}
 
 	if staleDaemonCount == 0 && staleWindowCount == 0 {
@@ -6744,60 +6710,16 @@ func recoverStaleTmuxRefs(dryRun bool) {
 		return
 	}
 
-	// Step 5: Clear stale references
 	fmt.Println()
 	if staleDaemonCount > 0 {
-		_, err := database.Exec(`
-			UPDATE tasks SET daemon_session = NULL
-			WHERE daemon_session IS NOT NULL
-			AND daemon_session NOT IN (` + quotedSessionList(activeSessions) + `)
-		`)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, errorStyle.Render("Error clearing daemon sessions: "+err.Error()))
-		} else {
-			fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale daemon_session references", staleDaemonCount)))
-		}
+		fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale daemon_session references", staleDaemonCount)))
 	}
-
 	if staleWindowCount > 0 {
-		_, err := database.Exec(`
-			UPDATE tasks SET tmux_window_id = NULL
-			WHERE tmux_window_id IS NOT NULL
-			AND tmux_window_id NOT IN (` + quotedWindowList(validWindowIDs) + `)
-		`)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, errorStyle.Render("Error clearing window IDs: "+err.Error()))
-		} else {
-			fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale tmux_window_id references", staleWindowCount)))
-		}
+		fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale tmux_window_id references", staleWindowCount)))
 	}
 
 	fmt.Println()
 	fmt.Println(dimStyle.Render("Tasks will automatically reconnect to their agent sessions when viewed."))
-}
-
-// quotedSessionList returns a SQL-safe comma-separated list of quoted session names
-func quotedSessionList(sessions map[string]bool) string {
-	if len(sessions) == 0 {
-		return "''"
-	}
-	var parts []string
-	for s := range sessions {
-		parts = append(parts, "'"+s+"'")
-	}
-	return strings.Join(parts, ",")
-}
-
-// quotedWindowList returns a SQL-safe comma-separated list of quoted window IDs
-func quotedWindowList(windows map[string]bool) string {
-	if len(windows) == 0 {
-		return "''"
-	}
-	var parts []string
-	for w := range windows {
-		parts = append(parts, "'"+w+"'")
-	}
-	return strings.Join(parts, ",")
 }
 
 // cleanupOrphanedSessions runs two passes.
@@ -7012,8 +6934,8 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 
 	// Kill agent session if running. Use the across-daemons variant because the
 	// CLI invocation's session ID rarely matches the daemon that originally
-	// spawned the window — the scoped killSession would silently miss it and
-	// leak the agent process. See sessions_test.go for repro.
+	// spawned the window — a kill scoped to the current daemon session
+	// would silently miss it and leak the agent process. See sessions_test.go for repro.
 	killSessionAcrossDaemons(int(oldTask.ID))
 
 	// Clean up worktree and agent sessions if they exist
@@ -7134,8 +7056,8 @@ func hardDeleteTask(taskID int64) error {
 	// Kill agent session if running. Use the across-daemons variant: the CLI's
 	// session ID rarely matches the daemon that originally spawned the window
 	// (UI launches with WORKTREE_SESSION_ID set to its own PID; the daemon
-	// process has its own PID), so a scoped killSession would silently miss
-	// the window and leak the agent. See sessions_test.go for repro.
+	// process has its own PID), so a kill scoped to the current daemon
+	// session would silently miss the window and leak the agent. See sessions_test.go for repro.
 	killSessionAcrossDaemons(int(taskID))
 
 	// Clean up the worktree if it exists. Note: unlike the pre-soft-delete

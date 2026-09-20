@@ -204,3 +204,153 @@ func TestShowProjectFormIncludesPathForExisting(t *testing.T) {
 		t.Fatal("expected project form to be created")
 	}
 }
+
+// TestSaveProjectRejectsRenamingPersonal verifies that the settings Edit form
+// refuses to rename the seeded "personal" project away from "personal",
+// mirroring the existing deletion guard in showDeleteProjectConfirm.
+//
+// The personal project is the implicit default for every new task (CreateTask
+// falls back to t.Project = "personal") and is re-seeded by
+// ensurePersonalProject on every Open, so a rename would break default task
+// creation, defeat the name-based DeleteProject guard, and — across a reopen —
+// orphan the user's customized row behind a fresh default. The UI guard
+// surfaces the error inline (via reshowProjectFormWithError), preserving the
+// user's input; the DB-layer guard in UpdateProject catches retries and other
+// surfaces (CLI, HTTP).
+func TestSaveProjectRejectsRenamingPersonal(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	personal, err := database.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get personal project: %v", err)
+	}
+	if personal == nil {
+		t.Fatal("personal project not seeded by migrations")
+	}
+	personalID := personal.ID
+
+	m := &SettingsModel{db: database, width: 100, height: 40}
+	m.loadSettings()
+
+	// Simulate opening the Edit form for the personal project and typing a
+	// new name. UseWorktrees is disabled to keep the test hermetic — the
+	// seeded personal dir does have a git repo (initGitRepo), but skipping
+	// the git logic here means the test only depends on the rename guard.
+	m.showProjectForm(personal)
+	m.projectFormName = "mywork"
+	m.projectFormUseWorktrees = false
+
+	m.saveProject()
+
+	if m.err == nil {
+		t.Fatal("expected error when renaming personal project via saveProject, got nil")
+	}
+	if m.err.Error() != "cannot rename the personal project" {
+		t.Errorf("expected 'cannot rename the personal project', got %q", m.err.Error())
+	}
+
+	// The form must stay open with the input preserved so the user can fix
+	// the name (reshowProjectFormWithError rather than dropping back to the
+	// settings list).
+	if !m.editingProject {
+		t.Error("expected the project form to stay open after the rename was rejected")
+	}
+	if m.projectForm == nil {
+		t.Error("expected m.projectForm to be re-created after the rename was rejected")
+	}
+	if m.projectFormName != "mywork" {
+		t.Errorf("expected the rejected name %q to be preserved in the form, got %q", "mywork", m.projectFormName)
+	}
+
+	// The DB row must be intact: same ID, still named "personal", no "mywork".
+	stillThere, err := database.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get personal after rejected rename: %v", err)
+	}
+	if stillThere == nil {
+		t.Fatal("personal project disappeared after rejected rename")
+	}
+	if stillThere.ID != personalID {
+		t.Errorf("personal ID = %d, want %d", stillThere.ID, personalID)
+	}
+	if stillThere.Name != "personal" {
+		t.Errorf("personal Name = %q, want %q", stillThere.Name, "personal")
+	}
+	if other, _ := database.GetProjectByName("mywork"); other != nil {
+		t.Errorf("a 'mywork' project exists after rejected rename: %+v", other)
+	}
+
+	// Default task creation must still route to "personal" — i.e. the bug
+	// (CreateTask falls back to "personal" → GetProjectByName returns nil →
+	// ErrProjectNotFound) does not reproduce after the rejected rename.
+	task := &db.Task{Title: "default-path task", Status: db.StatusBacklog}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("expected default task creation to still work, got %v", err)
+	}
+	if task.Project != "personal" {
+		t.Errorf("task.Project = %q, want %q", task.Project, "personal")
+	}
+
+	// The name-based delete guard must still protect the row (no regression in
+	// the existing deletion guard).
+	if err := database.DeleteProject(personalID); err == nil {
+		t.Error("expected deleting the personal project to still be blocked")
+	}
+
+	// Retry: simulate the user pressing Enter again without fixing the name.
+	// reshowProjectFormWithError overwrote m.editProject.Name with the
+	// rejected "mywork", so the UI guard (which checks m.editProject.Name)
+	// no longer fires — but the DB-layer guard in UpdateProject reads the
+	// row's current name from the DB and rejects the retry there.
+	m.saveProject()
+	if m.err == nil {
+		t.Fatal("expected retry of personal rename to be rejected, got nil")
+	}
+	if m.err.Error() != "cannot rename the personal project" {
+		t.Errorf("expected retry to surface 'cannot rename the personal project', got %q", m.err.Error())
+	}
+	// The form should still be open after a DB-guard rejection (we now route
+	// DB save errors through reshowProjectFormWithError too, so the retry UX
+	// matches the first attempt).
+	if !m.editingProject {
+		t.Error("expected the project form to stay open after a rejected retry")
+	}
+	stillThere2, err := database.GetProjectByName("personal")
+	if err != nil || stillThere2 == nil || stillThere2.Name != "personal" || stillThere2.ID != personalID {
+		t.Errorf("personal row not intact after rejected retry: err=%v row=%+v", err, stillThere2)
+	}
+
+	// Non-rename edits of the personal project through the UI must still
+	// succeed: keeping the name "personal" and changing only instructions is
+	// an ordinary "save my edits" flow that the guard must not block.
+	m2 := &SettingsModel{db: database, width: 100, height: 40}
+	m2.loadSettings()
+	fresh, err := database.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get fresh personal: %v", err)
+	}
+	if fresh == nil {
+		t.Fatal("personal project disappeared before non-rename edit")
+	}
+	m2.showProjectForm(fresh)
+	m2.projectFormName = "personal" // unchanged
+	m2.projectFormInstructions = "edited instructions via UI"
+	m2.projectFormUseWorktrees = false
+
+	m2.saveProject()
+
+	if m2.err != nil {
+		t.Fatalf("non-rename update of personal should succeed, got %v", m2.err)
+	}
+	edited, err := database.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get edited personal: %v", err)
+	}
+	if edited.Instructions != "edited instructions via UI" {
+		t.Errorf("instructions = %q, want %q", edited.Instructions, "edited instructions via UI")
+	}
+}

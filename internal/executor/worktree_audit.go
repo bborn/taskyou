@@ -1,6 +1,10 @@
 package executor
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/bborn/workflow/internal/db"
+)
 
 // WorktreePathIssue is one task row whose recorded directory is not a linked
 // worktree of its project, so nothing that removes worktrees can ever act on it.
@@ -40,9 +44,16 @@ func (e *Executor) AuditWorktreePaths(fix bool) ([]WorktreePathIssue, error) {
 		}
 		projectDir := e.getProjectDir(ref.Project)
 
+		// Skip tasks that are currently running. The audit is invoked from a
+		// short-lived CLI Executor (cmd/task) whose runningTasks map is empty,
+		// so the in-process check alone is dead code in that path; combine it
+		// with the DB-backed status ListWorktreeRefs already returned. A
+		// "processing" row means a daemon has picked the task up and may
+		// write a fresh, valid worktree_path at any moment.
 		e.mu.RLock()
-		running := e.runningTasks[ref.TaskID]
+		runningInProcess := e.runningTasks[ref.TaskID]
 		e.mu.RUnlock()
+		running := runningInProcess || ref.Status == db.StatusProcessing
 
 		var found []WorktreePathIssue
 		for _, candidate := range []struct{ field, path string }{
@@ -75,11 +86,18 @@ func (e *Executor) AuditWorktreePaths(fix bool) ([]WorktreePathIssue, error) {
 		}
 
 		if fix && !running {
-			if err := e.db.ClearTaskWorktreeRefs(ref.TaskID); err != nil {
+			// Conditional on the snapshot values: a no-op if the daemon has
+			// already replaced this row's path with a valid one between our
+			// snapshot (ListWorktreeRefs) and this clear, so we never orphan
+			// a freshly-created worktree the sweeper cannot later find.
+			cleared, err := e.db.ClearTaskWorktreeRefsIfMatch(ref.TaskID, ref.WorktreePath, ref.ArchivePath)
+			if err != nil {
 				return nil, fmt.Errorf("clear worktree refs for task %d: %w", ref.TaskID, err)
 			}
-			for i := range found {
-				found[i].Fixed = true
+			if cleared {
+				for i := range found {
+					found[i].Fixed = true
+				}
 			}
 		}
 		issues = append(issues, found...)

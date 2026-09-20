@@ -271,7 +271,7 @@ func (a *GmailAdapter) poll(ctx context.Context) {
 	}
 
 	for _, msg := range resp.Messages {
-		email, err := a.fetchMessage(ctx, msg.Id)
+		email, err := a.fetchMessage(ctx, service, msg.Id)
 		if err != nil {
 			a.logger.Warn("failed to fetch message", "id", msg.Id, "error", err)
 			continue
@@ -286,8 +286,8 @@ func (a *GmailAdapter) poll(ctx context.Context) {
 	}
 }
 
-func (a *GmailAdapter) fetchMessage(ctx context.Context, id string) (*Email, error) {
-	msg, err := a.service.Users.Messages.Get("me", id).Format("full").Do()
+func (a *GmailAdapter) fetchMessage(ctx context.Context, service *gmail.Service, id string) (*Email, error) {
+	msg, err := service.Users.Messages.Get("me", id).Format("full").Do()
 	if err != nil {
 		return nil, err
 	}

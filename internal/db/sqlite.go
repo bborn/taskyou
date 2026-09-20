@@ -668,7 +668,13 @@ func (db *DB) migrate() error {
 	// Only when it actually changes: migrate() runs on every Open, and every ty
 	// command opens the database. An unconditional write here would be one more
 	// row for every `ty list` to contend with on the single writer.
-	if current, ok := db.ReadSchemaVersion(); !ok || current != SchemaVersion {
+	//
+	// `<` (not `!=`): an older build opening a file last migrated by a *newer*
+	// build must leave the higher stamp in place, so `ty doctor` can still see
+	// "a newer ty has migrated this database" and tell the user to upgrade.
+	// `!=` would write this build's lower SchemaVersion over the higher one and
+	// silently downgrade the stamp.
+	if current, ok := db.ReadSchemaVersion(); !ok || current < SchemaVersion {
 		db.SetSetting(SchemaVersionKey, strconv.Itoa(SchemaVersion))
 	}
 
@@ -1005,11 +1011,14 @@ func DefaultPath() string {
 const placedElsewhere = ` AND COALESCE(placement_target, '') = '' `
 
 // RecoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
-// from tasks. Called automatically on daemon startup to recover from crashes.
-// Returns (staleDaemonCount, staleWindowCount) of cleaned references.
+// from tasks. Called automatically on daemon startup to recover from crashes,
+// and by `ty recover` from the CLI. Returns (staleDaemonCount, staleWindowCount)
+// of the stale references found. When dryRun is set the rows are counted but
+// not modified — this is what `ty recover --dry-run` reports on, so the CLI can
+// pre-run the same guarded helper it clears with.
 //
 // Only LOCAL references are swept: see placedElsewhere.
-func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowIDs map[string]bool) (int, int, error) {
+func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowIDs map[string]bool, dryRun bool) (int, int, error) {
 	var staleDaemonCount, staleWindowCount int
 
 	// Count and clear stale daemon_session references
@@ -1023,7 +1032,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 			` + placedElsewhere)
 		row.Scan(&staleDaemonCount)
 
-		if staleDaemonCount > 0 {
+		if !dryRun && staleDaemonCount > 0 {
 			_, err := db.Exec(`
 				UPDATE tasks SET daemon_session = NULL
 				WHERE daemon_session IS NOT NULL
@@ -1038,7 +1047,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 		// No active sessions - clear all daemon_session refs
 		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE daemon_session IS NOT NULL AND daemon_session != ''` + placedElsewhere)
 		row.Scan(&staleDaemonCount)
-		if staleDaemonCount > 0 {
+		if !dryRun && staleDaemonCount > 0 {
 			_, err := db.Exec(`UPDATE tasks SET daemon_session = NULL WHERE daemon_session IS NOT NULL AND daemon_session != ''` + placedElsewhere)
 			if err != nil {
 				return 0, 0, fmt.Errorf("clear all daemon sessions: %w", err)
@@ -1057,7 +1066,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 			` + placedElsewhere)
 		row.Scan(&staleWindowCount)
 
-		if staleWindowCount > 0 {
+		if !dryRun && staleWindowCount > 0 {
 			_, err := db.Exec(`
 				UPDATE tasks SET tmux_window_id = NULL
 				WHERE tmux_window_id IS NOT NULL
@@ -1072,7 +1081,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 		// No valid windows - clear all tmux_window_id refs
 		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''` + placedElsewhere)
 		row.Scan(&staleWindowCount)
-		if staleWindowCount > 0 {
+		if !dryRun && staleWindowCount > 0 {
 			_, err := db.Exec(`UPDATE tasks SET tmux_window_id = NULL WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''` + placedElsewhere)
 			if err != nil {
 				return staleDaemonCount, 0, fmt.Errorf("clear all window IDs: %w", err)

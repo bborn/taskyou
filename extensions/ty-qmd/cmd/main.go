@@ -71,7 +71,6 @@ func main() {
 }
 
 func syncCmd() *cobra.Command {
-	var all bool
 	var project string
 
 	cmd := &cobra.Command{
@@ -167,7 +166,6 @@ func syncCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&all, "all", "a", false, "re-sync all tasks, not just new ones")
 	cmd.Flags().StringVarP(&project, "project", "p", "", "sync only tasks from specific project")
 
 	return cmd

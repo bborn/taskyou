@@ -128,7 +128,7 @@ collections:
 
 ```bash
 # Sync completed tasks to QMD
-ty-qmd sync [--all] [--project <name>]
+ty-qmd sync [--project <name>]
 
 # Search across all indexed content
 ty-qmd search <query> [-n <count>]

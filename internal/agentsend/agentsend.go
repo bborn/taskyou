@@ -23,7 +23,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -205,7 +204,10 @@ func (s *Sender) SendKeysToPane(pane string, keys ...string) error {
 	if pane == "" {
 		return &NoPaneError{}
 	}
-	unlock := lockPane(s.host, pane)
+	unlock, lockErr := s.lockPane(pane)
+	if lockErr != nil {
+		return lockErr
+	}
 	defer unlock()
 	return s.runner.Run("tmux", append([]string{"send-keys", "-t", pane}, keys...)...)
 }
@@ -275,7 +277,10 @@ var bufferSeq atomic.Int64
 // seam every surface shares has no stdin, and both commands feed the same
 // paste.
 func (s *Sender) deliver(pane, text string, submit bool) error {
-	unlock := lockPane(s.host, pane)
+	unlock, lockErr := s.lockPane(pane)
+	if lockErr != nil {
+		return lockErr
+	}
 	defer unlock()
 
 	if text != "" {
@@ -304,43 +309,78 @@ func (s *Sender) deliver(pane, text string, submit bool) error {
 	return nil
 }
 
-// Per-pane serialization. A prompt is several tmux calls that must not have
-// another prompt's calls threaded through them; two prompts to DIFFERENT panes
-// have no reason to wait for each other, so the lock is per pane rather than one
-// global mutex.
-var (
-	paneLocksMu sync.Mutex
-	paneLocks   = map[string]*paneLock{}
-)
-
-type paneLock struct {
-	mu   sync.Mutex
-	refs int
-}
-
-// lockPane takes the pane's lock and returns the release. host namespaces the
-// key, because pane ids are only unique within one tmux server. The entry is
-// dropped once the last waiter is gone, so a long-lived process does not
-// accumulate one mutex per pane id tmux has ever issued.
-func lockPane(host, pane string) func() {
-	key := host + "\x00" + pane
-	paneLocksMu.Lock()
-	l := paneLocks[key]
-	if l == nil {
-		l = &paneLock{}
-		paneLocks[key] = l
+// Per-pane serialization, visible to every ty process on the same tmux server.
+//
+// A prompt is several tmux calls (set-buffer, paste-buffer, send-keys Enter)
+// that must not have another prompt's calls threaded through them — two nudges
+// arriving together used to interleave into one garbled line. The busy check
+// does not close this race: it refuses a prompt only when the agent is already
+// working (StatusProcessing). An agent waiting for input is StatusBlocked and
+// passes the busy check, so two senders aiming at one IDLE pane can both reach
+// the multi-call sequence.
+//
+// Several of the surfaces this package serves run in separate OS processes —
+// `ty input` from two shells, the TUI, the web API — so a Go mutex held in one
+// process is invisible to the rest. The lock therefore lives on the tmux
+// server, not in process memory: `tmux wait-for -L <channel>` acquires (it
+// blocks while another client holds the channel, then claims it) and
+// `tmux wait-for -U <channel>` releases. Every ty process reaches that one
+// tmux server through the Runner it already uses for its prompt calls, so they
+// all contend on the same channel — including a remote task's pane, whose lock
+// is held on that host's tmux server (RemoteRunner takes the same wait-for
+// invocation over ssh). The channel name is per pane because the calls that
+// must not interleave are per pane; pane ids are unique within one tmux
+// server, which is also the channel namespace, so two different panes need not
+// queue behind each other.
+//
+// The worst case is a ty process killed hard between the acquire and the
+// release: the tmux-side channel stays claimed until a release reaches it, so
+// further prompts to that pane block. That window is short (the paste, the
+// settle delay and one Enter), so it is rare, and it is shared with the
+// project's other tmux-wait-for lock (ty-shell-<id> in internal/executor).
+func (s *Sender) lockPane(pane string) (func(), error) {
+	ch := paneLockChannel(pane)
+	if err := s.runner.Run("tmux", "wait-for", "-L", ch); err != nil {
+		return nil, fmt.Errorf("acquire per-pane lock for %s%s: %w", pane, s.hostQualifier(), err)
 	}
-	l.refs++
-	paneLocksMu.Unlock()
-
-	l.mu.Lock()
 	return func() {
-		l.mu.Unlock()
-		paneLocksMu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(paneLocks, key)
-		}
-		paneLocksMu.Unlock()
-	}
+		// Release is unconditional and its error is swallowed: a stale lock
+		// left on the server is the worst case, and surfacing a release error
+		// here would mask whatever error the caller is already returning.
+		_ = s.runner.Run("tmux", "wait-for", "-U", ch)
+	}, nil
 }
+
+// hostQualifier names the tmux server in an error message, so "the agent is on
+// another machine" reads differently from "this machine's tmux refused". It is
+// also the only reader of Sender.host now that the per-pane lock lives on the
+// tmux server rather than in a process-local map.
+func (s *Sender) hostQualifier() string {
+	if s.host == "" {
+		return ""
+	}
+	return " on " + s.host
+}
+
+// paneLockChannel is the per-pane tmux wait-for channel. Pane ids are only
+// unique within one tmux server, but wait-for channels live in the namespace of
+// the server the command is issued on — and lockPane issues through a Runner
+// that already targets one server — so the pane id alone identifies a lock.
+// Channel names are kept to tmux's safe set; a pane id like "%8" loses its
+// sigil so the channel is never read as a tmux format specifier.
+func paneLockChannel(pane string) string {
+	var b strings.Builder
+	b.WriteString(paneLockChannelPrefix)
+	for _, r := range pane {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_' || r == '-':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// paneLockChannelPrefix names the pane lock channels on the tmux server, so a
+// pane's lock never shares a wait-for channel with anything else in this
+// project (ty-shell-<id> for remote shell creation, etc.).
+const paneLockChannelPrefix = "ty-prompt-lock-"

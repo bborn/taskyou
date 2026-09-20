@@ -56,8 +56,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Println(infoStyle.Render("Existing config found. Current values shown as defaults.\n"))
 	}
 
-	home, _ := os.UserHomeDir()
-
 	// === Email Provider ===
 	fmt.Println(titleStyle.Render("📧 Email Provider"))
 
@@ -82,11 +80,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 	cfg.Adapter.Type = "imap"
 
 	if emailProvider == "gmail" {
-		if err := configureGmailIMAP(cfg, home); err != nil {
+		if err := configureGmailIMAP(cfg); err != nil {
 			return err
 		}
 	} else {
-		if err := configureIMAP(cfg, home); err != nil {
+		if err := configureIMAP(cfg); err != nil {
 			return err
 		}
 		if err := configureSMTP(cfg); err != nil {
@@ -144,7 +142,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func configureIMAP(cfg *Config, home string) error {
+func configureIMAP(cfg *Config) error {
 	if cfg.Adapter.IMAP == nil {
 		cfg.Adapter.IMAP = &adapter.IMAPConfig{}
 	}
@@ -229,7 +227,7 @@ func configureIMAP(cfg *Config, home string) error {
 	return nil
 }
 
-func configureGmailIMAP(cfg *Config, home string) error {
+func configureGmailIMAP(cfg *Config) error {
 	if cfg.Adapter.IMAP == nil {
 		cfg.Adapter.IMAP = &adapter.IMAPConfig{}
 	}

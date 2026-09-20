@@ -74,12 +74,13 @@ func tagPaneInFakeTmux(runner *mockRunner, taskID int64, pane string) {
 	runner.outputByCmd["list-panes"] = append(runner.outputByCmd["list-panes"], line...)
 }
 
-// prompts returns the recorded calls with the pane lookups dropped, so a test
-// can talk about deliveries rather than about tmux bookkeeping.
+// prompts returns the recorded calls with the pane lookups and the per-pane
+// tmux wait-for lock dropped, so a test can talk about deliveries (one paste and
+// its Enter each) rather than about tmux bookkeeping.
 func prompts(calls [][]string) [][]string {
 	var out [][]string
 	for _, c := range calls {
-		if len(c) > 1 && c[1] == "list-panes" {
+		if len(c) > 1 && (c[1] == "list-panes" || c[1] == "wait-for") {
 			continue
 		}
 		out = append(out, c)
@@ -374,6 +375,97 @@ func TestHandleAnnotations_CoalescesRapidSubmissions(t *testing.T) {
 	}
 }
 
+// A coalesced bundle with a screenshot per submission must name every screenshot
+// that was written, not just the first one (regression for the hardcoded
+// "screenshot.png" nudge clause).
+func TestCoalesced_NudgeNamesEveryScreenshot(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, true)
+
+	first := postAnnotations(t, srv, task.ID, annotationBody(true))
+	postAnnotations(t, srv, task.ID, annotationBody(true))
+
+	var r struct {
+		Path string `json:"path"`
+	}
+	json.NewDecoder(first.Body).Decode(&r)
+
+	dir := filepath.Join(wt, filepath.Dir(r.Path))
+	for _, name := range []string{"screenshot.png", "screenshot-2.png"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s missing: %v", name, err)
+		}
+	}
+
+	calls := runner.waitForPrompts(t, 3)
+	nudge := calls[0][len(calls[0])-1]
+	if !strings.Contains(nudge, "screenshot.png") {
+		t.Errorf("nudge should name the first screenshot: %q", nudge)
+	}
+	if !strings.Contains(nudge, "screenshot-2.png") {
+		t.Errorf("nudge should also name the second screenshot: %q", nudge)
+	}
+	if !strings.Contains(nudge, "2 screenshots") {
+		t.Errorf("nudge should say how many screenshots: %q", nudge)
+	}
+}
+
+// A coalesced bundle where only some submissions carry a screenshot should name
+// only the screenshots that were actually written, in order.
+func TestCoalesced_NudgeNamesOnlyScreenshotsWritten(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, true)
+
+	first := postAnnotations(t, srv, task.ID, annotationBody(false))
+	postAnnotations(t, srv, task.ID, annotationBody(true))
+
+	var r struct {
+		Path string `json:"path"`
+	}
+	json.NewDecoder(first.Body).Decode(&r)
+
+	dir := filepath.Join(wt, filepath.Dir(r.Path))
+	if _, err := os.Stat(filepath.Join(dir, "screenshot-2.png")); err != nil {
+		t.Errorf("second submission's screenshot missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "screenshot.png")); err == nil {
+		t.Errorf("screenshot.png should not exist when the first submission had no screenshot")
+	}
+
+	calls := runner.waitForPrompts(t, 3)
+	nudge := calls[0][len(calls[0])-1]
+	if strings.Contains(nudge, "screenshot.png") {
+		t.Errorf("nudge should not name the absent first screenshot: %q", nudge)
+	}
+	if !strings.Contains(nudge, "screenshot-2.png") {
+		t.Errorf("nudge should name the written screenshot: %q", nudge)
+	}
+	if strings.Contains(nudge, "screenshots") {
+		t.Errorf("nudge should be singular for one screenshot: %q", nudge)
+	}
+}
+
+// A single submission's nudge keeps the historical wording: "view the
+// screenshot.png next to it" (regression guard on the pre-coalescing path).
+func TestHandleAnnotations_SingleScreenshotNudgeWording(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, _ := setupAnnotationTask(t, database, runner, true)
+
+	postAnnotations(t, srv, task.ID, annotationBody(true))
+
+	calls := runner.waitForPrompts(t, 3)
+	nudge := calls[0][len(calls[0])-1]
+	if !strings.Contains(nudge, "view the screenshot.png next to it") {
+		t.Errorf("single-screenshot nudge wording regressed: %q", nudge)
+	}
+	if strings.Contains(nudge, "screenshots") {
+		t.Errorf("single-screenshot nudge should stay singular: %q", nudge)
+	}
+	if strings.Contains(nudge, "submissions") {
+		t.Errorf("single-submission nudge should not mention submissions: %q", nudge)
+	}
+}
+
 // Submissions spaced beyond the window are separate thoughts: separate bundles,
 // separate nudges.
 func TestHandleAnnotations_SeparateBundlesWhenSpaced(t *testing.T) {
@@ -489,4 +581,71 @@ func argAfterFlag(call []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+// A bundle written here for a task running on another host is a bundle nobody
+// reads: the coordinator has a checkout of the same project at a very similar
+// path (and a moved task's old worktree at exactly the same one), so the write
+// succeeds, reports a path, and the agent on the host never sees it.
+func TestHandleAnnotations_RefusesToStageForATaskOnAnotherHost(t *testing.T) {
+	srv, database, runner := setupAnnotationServer(t)
+	task, wt := setupAnnotationTask(t, database, runner, true)
+	if err := database.SetTaskPlacement(task.ID, "ol-agents", "placement plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postAnnotations(t, srv, task.ID, annotationBody(true))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ol-agents") {
+		t.Errorf("the refusal does not say where the task runs: %s", w.Body.String())
+	}
+	if entries, err := os.ReadDir(filepath.Join(wt, ".taskyou")); err == nil && len(entries) > 0 {
+		t.Errorf("wrote into this machine's worktree anyway: %v", entries)
+	}
+}
+
+// The same rule for the browser bridge's screenshots and DOM snapshots: nothing
+// is written to this machine for a task whose worktree is on another one.
+func TestBrowserArtefactsAreNotWrittenForATaskOnAnotherHost(t *testing.T) {
+	srv, database, _ := setupServer(t)
+	wt := t.TempDir()
+	task := &db.Task{Title: "placed", Status: db.StatusBlocked, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	task.WorktreePath = wt
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	task.PlacementTarget = "ol-agents"
+	if root := srv.resolveTaskRoot(task); root != "" {
+		t.Errorf("browser artefacts would be written to %q, on the wrong machine", root)
+	}
+
+	// And the payload is dropped rather than handed back: a screenshot is up to
+	// 20 MB of base64 and this result is the agent's tool output.
+	shot := json.RawMessage(`{"ok":true,"data":"data:image/png;base64,` + tinyPNG + `"}`)
+	result, ok := srv.materializeBrowserResult(task, "screenshot", shot).(map[string]interface{})
+	if !ok {
+		t.Fatalf("screenshot result is not an object: %#v", result)
+	}
+	if _, inlined := result["data"]; inlined {
+		t.Error("a placed task's screenshot was inlined into the agent's output")
+	}
+	if problem, _ := result["error"].(string); !strings.Contains(problem, "ol-agents") {
+		t.Errorf("the result does not say why the screenshot is missing: %#v", result)
+	}
+	// An action that carries nothing bulky still works: the relay does not care
+	// which machine the agent is on.
+	clicked, _ := srv.materializeBrowserResult(task, "click", json.RawMessage(`{"ok":true,"clicked":"#save"}`)).(map[string]interface{})
+	if clicked["clicked"] != "#save" {
+		t.Errorf("a plain browser action was altered for a placed task: %#v", clicked)
+	}
+
+	task.PlacementTarget = ""
+	if root := srv.resolveTaskRoot(task); root != wt {
+		t.Errorf("a local task lost its worktree root: %q", root)
+	}
 }

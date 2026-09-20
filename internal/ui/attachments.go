@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"mime"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,8 +176,8 @@ func (m *AttachmentsModel) AddFile(path string) tea.Cmd {
 			return attachmentErrorMsg{err: err}
 		}
 
-		// Detect mime type (basic)
-		mimeType := detectMimeType(path)
+		// Detect mime type
+		mimeType := detectMimeType(path, data)
 
 		// Add to database
 		_, err = m.db.AddAttachment(m.task.ID, filepath.Base(path), mimeType, data)
@@ -207,30 +209,13 @@ func formatSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func detectMimeType(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	mimeTypes := map[string]string{
-		".txt":  "text/plain",
-		".md":   "text/markdown",
-		".json": "application/json",
-		".xml":  "application/xml",
-		".html": "text/html",
-		".css":  "text/css",
-		".js":   "application/javascript",
-		".png":  "image/png",
-		".jpg":  "image/jpeg",
-		".jpeg": "image/jpeg",
-		".gif":  "image/gif",
-		".svg":  "image/svg+xml",
-		".pdf":  "application/pdf",
-		".zip":  "application/zip",
-		".go":   "text/x-go",
-		".py":   "text/x-python",
-		".rb":   "text/x-ruby",
-		".rs":   "text/x-rust",
+func detectMimeType(path string, data []byte) string {
+	mt := mime.TypeByExtension(filepath.Ext(path))
+	if mt == "" {
+		mt = http.DetectContentType(data)
 	}
-	if mime, ok := mimeTypes[ext]; ok {
-		return mime
+	if mt == "" {
+		mt = "application/octet-stream"
 	}
-	return "application/octet-stream"
+	return mt
 }

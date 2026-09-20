@@ -1978,11 +1978,31 @@ func (db *DB) CreateProject(p *Project) error {
 	return nil
 }
 
-// UpdateProject updates a project.
+// UpdateProject updates a project. It rejects renames of the seeded "personal"
+// project: the personal project is the implicit default for every new task
+// (CreateTask falls back to t.Project = "personal"), and ensurePersonalProject
+// re-seeds a fresh "personal" on Open if none exists. Renaming it would break
+// default task creation within the session, defeat the name-based
+// DeleteProject guard, and on the next Open orphan the user's customized row
+// behind a re-seeded default. Mirrors the guard in DeleteProject so other
+// surfaces (CLI, HTTP) cannot re-introduce the hole the UI guard closes.
 func (db *DB) UpdateProject(p *Project) error {
+	// Get the project's current name to check if it's the personal project.
+	var oldName string
+	err := db.QueryRow("SELECT name FROM projects WHERE id = ?", p.ID).Scan(&oldName)
+	if err != nil {
+		return fmt.Errorf("get project: %w", err)
+	}
+
+	// Prevent renames of the personal project. Editing other fields (path,
+	// instructions, color, etc.) while keeping the name "personal" is allowed.
+	if oldName == "personal" && p.Name != "personal" {
+		return fmt.Errorf("cannot rename the personal project")
+	}
+
 	p.normalizePath()
 	actionsJSON, _ := json.Marshal(p.Actions)
-	_, err := db.Exec(`
+	_, err = db.Exec(`
 		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?, default_permission_mode = ?
 		WHERE id = ?
 	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees), NormalizePermissionMode(p.DefaultPermissionMode), p.ID)
@@ -2644,6 +2664,36 @@ func (db *DB) ClearTaskWorktreeRefs(taskID int64) error {
 		return fmt.Errorf("clear task worktree refs: %w", err)
 	}
 	return nil
+}
+
+// ClearTaskWorktreeRefsIfMatch drops worktree_path and archive_worktree_path
+// only when the row still holds exactly the values the caller observed before
+// deciding to clear. It returns true when the clear happened and false when
+// the row has since changed — for the worktree audit, a no-op clear means a
+// daemon has replaced the snapshot's bogus path with a fresh, valid one
+// between the audit's ListWorktreeRefs snapshot and this UPDATE, so the clear
+// must not clobber it. Clearing the new path anyway would leave the on-disk
+// worktree orphaned: the sweeper queries by worktree_path, the row would now
+// have ”, and a future re-run would create a duplicate.
+//
+// Like ClearTaskWorktreeRefs it leaves updated_at alone, and like it does not
+// touch archive_ref, archive_commit, or archive_branch_name, so any saved
+// archive state survives.
+func (db *DB) ClearTaskWorktreeRefsIfMatch(taskID int64, wantWorktreePath, wantArchivePath string) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE tasks SET worktree_path = '', archive_worktree_path = ''
+		WHERE id = ?
+		  AND COALESCE(worktree_path, '') = ?
+		  AND COALESCE(archive_worktree_path, '') = ?
+	`, taskID, wantWorktreePath, wantArchivePath)
+	if err != nil {
+		return false, fmt.Errorf("clear task worktree refs if match: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("clear task worktree refs if match: rows affected: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // MarkWorktreeSweepFailed records that the stale-worktree sweeper could not

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -18,14 +19,23 @@ type Dependency struct {
 
 // AddDependency creates a dependency where blockerID blocks blockedID.
 // Returns an error if the dependency already exists or would create a cycle.
+//
+// The cycle check and the insert are atomic: they run inside a single
+// BEGIN IMMEDIATE transaction that holds SQLite's write lock from before the
+// read until after the insert commits. A concurrent caller that would add the
+// inverse edge blocks on the write lock until this transaction commits, and
+// its cycle check then observes this edge and rejects the inverse. Without
+// this the check-then-insert is a TOCTOU race: two crossing inserts (A->B and
+// B->A) can both pass the check and both insert, persisting a 2-cycle that the
+// schema cannot reject (UNIQUE(blocker_id, blocked_id) and CHECK(blocker_id !=
+// blocked_id) allow it). The DB pool is capped at a single connection
+// (internal/db/sqlite.go) and this method pins it for the duration, so
+// in-process callers serialize here; BEGIN IMMEDIATE additionally serializes
+// against any other OS process that shares the database file (e.g. concurrent
+// `ty block` invocations).
 func (db *DB) AddDependency(blockerID, blockedID int64, autoQueue bool) error {
 	if blockerID == blockedID {
 		return fmt.Errorf("a task cannot block itself")
-	}
-
-	// Check for cycles - blockedID should not be able to reach blockerID
-	if db.wouldCreateCycle(blockerID, blockedID) {
-		return fmt.Errorf("adding this dependency would create a cycle")
 	}
 
 	autoQueueInt := 0
@@ -33,20 +43,61 @@ func (db *DB) AddDependency(blockerID, blockedID int64, autoQueue bool) error {
 		autoQueueInt = 1
 	}
 
-	_, err := db.Exec(`
+	ctx := context.Background()
+	// Pin one connection from the pool and open BEGIN IMMEDIATE on it.
+	// modernc.org/sqlite selects the BEGIN variant from the DSN _txlock, not
+	// from sql.TxOptions.Isolation, so a plain db.Begin()/BeginTx(...) would be
+	// a deferred transaction that does not take the write lock until the first
+	// write — too late to protect the read. Issuing BEGIN IMMEDIATE on a pinned
+	// *sql.Conn is the targeted way to serialize here without changing the
+	// global transaction mode for every other call site. No caller of
+	// AddDependency is itself inside a db.Begin() transaction, so pinning the
+	// single-connection pool cannot self-deadlock.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("add dependency: acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("add dependency: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	// Check for cycles — adding blockerID -> blockedID would create a cycle if
+	// blockedID can already reach blockerID through existing edges. This read
+	// runs inside the transaction so a concurrent inverse insert cannot slip
+	// in between the check and the insert.
+	if wouldCreateCycleOn(ctx, conn, blockerID, blockedID) {
+		return fmt.Errorf("adding this dependency would create a cycle")
+	}
+
+	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO task_dependencies (blocker_id, blocked_id, auto_queue)
 		VALUES (?, ?, ?)
-	`, blockerID, blockedID, autoQueueInt)
-	if err != nil {
+	`, blockerID, blockedID, autoQueueInt); err != nil {
 		return fmt.Errorf("add dependency: %w", err)
 	}
 
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("add dependency: commit: %w", err)
+	}
+	committed = true
 	return nil
 }
 
-// wouldCreateCycle checks if adding blockerID -> blockedID would create a cycle.
-// A cycle exists if blockedID can reach blockerID through existing dependencies.
-func (db *DB) wouldCreateCycle(blockerID, blockedID int64) bool {
+// wouldCreateCycleOn is the BFS that backs AddDependency's cycle check. It
+// returns true if blockedID can reach blockerID by following
+// task_dependencies edges (blocker_id -> blocked_id). The caller must hold a
+// write transaction (BEGIN IMMEDIATE) across the read and the subsequent
+// insert so a concurrent inverse insert cannot slip in between them;
+// AddDependency wraps this in such a transaction on a pinned connection.
+func wouldCreateCycleOn(ctx context.Context, conn *sql.Conn, blockerID, blockedID int64) bool {
 	// BFS to check if blockedID can reach blockerID
 	visited := make(map[int64]bool)
 	queue := []int64{blockedID}
@@ -65,7 +116,7 @@ func (db *DB) wouldCreateCycle(blockerID, blockedID int64) bool {
 		visited[current] = true
 
 		// Get all tasks that current blocks
-		rows, err := db.Query(`
+		rows, err := conn.QueryContext(ctx, `
 			SELECT blocked_id FROM task_dependencies WHERE blocker_id = ?
 		`, current)
 		if err != nil {

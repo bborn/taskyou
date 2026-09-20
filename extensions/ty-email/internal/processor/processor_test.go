@@ -527,3 +527,148 @@ func TestRoundTripFromAddress(t *testing.T) {
 		t.Errorf("reply InReplyTo should reference original, got '%s'", sent.InReplyTo)
 	}
 }
+
+func TestHandleQuery(t *testing.T) {
+	// ListTasks("") passes --all, so the bridge returns done/archived rows
+	// alongside active ones. handleQuery must render only the active
+	// statuses and never emit a "Current tasks:" header without a body.
+	tests := []struct {
+		name  string
+		tasks []bridge.Task
+		want  string
+	}{
+		{
+			name:  "no tasks returns empty-state message",
+			tasks: nil,
+			want:  "No active tasks.",
+		},
+		{
+			// Regression for the reported bug: a fully finished board
+			// previously returned "Current tasks:\n\n" (header, no body).
+			name: "all done tasks returns empty-state message",
+			tasks: []bridge.Task{
+				{ID: 1, Title: "Ship feature", Status: "done", Project: "personal"},
+				{ID: 2, Title: "Active work", Status: "done", Project: "personal"},
+			},
+			want: "No active tasks.",
+		},
+		{
+			name: "all archived tasks returns empty-state message",
+			tasks: []bridge.Task{
+				{ID: 1, Title: "Archive old", Status: "archived", Project: "personal"},
+			},
+			want: "No active tasks.",
+		},
+		{
+			name: "mixed done and archived returns empty-state message",
+			tasks: []bridge.Task{
+				{ID: 1, Title: "Ship feature", Status: "done", Project: "personal"},
+				{ID: 2, Title: "Archive old", Status: "archived", Project: "personal"},
+			},
+			want: "No active tasks.",
+		},
+		{
+			name: "single processing task renders with header",
+			tasks: []bridge.Task{
+				{ID: 1, Title: "Active work", Status: "processing", Project: "personal"},
+			},
+			want: "Current tasks:\n\n## Processing\n- #1: Active work (personal)\n\n",
+		},
+		{
+			// done rows mixed with an active row must be dropped from the
+			// report (existing behavior); the active row still renders.
+			name: "active tasks with done rows omits done",
+			tasks: []bridge.Task{
+				{ID: 1, Title: "Active work", Status: "processing", Project: "personal"},
+				{ID: 2, Title: "Ship feature", Status: "done", Project: "personal"},
+				{ID: 3, Title: "Archive old", Status: "archived", Project: "personal"},
+			},
+			want: "Current tasks:\n\n## Processing\n- #1: Active work (personal)\n\n",
+		},
+		{
+			// Sections appear in statusOrder (processing, blocked, queued,
+			// backlog) regardless of task insertion order, and each heading
+			// is capitalized.
+			name: "all four active statuses render in statusOrder",
+			tasks: []bridge.Task{
+				{ID: 4, Title: "Backlog item", Status: "backlog", Project: "personal"},
+				{ID: 3, Title: "Queued item", Status: "queued", Project: "personal"},
+				{ID: 2, Title: "Blocked item", Status: "blocked", Project: "personal"},
+				{ID: 1, Title: "Active work", Status: "processing", Project: "personal"},
+			},
+			want: "Current tasks:\n\n" +
+				"## Processing\n- #1: Active work (personal)\n\n" +
+				"## Blocked\n- #2: Blocked item (personal)\n\n" +
+				"## Queued\n- #3: Queued item (personal)\n\n" +
+				"## Backlog\n- #4: Backlog item (personal)\n\n",
+		},
+		{
+			// Multiple tasks in the same status render as separate bullets.
+			name: "multiple tasks per status render together",
+			tasks: []bridge.Task{
+				{ID: 1, Title: "First", Status: "queued", Project: "work"},
+				{ID: 2, Title: "Second", Status: "queued", Project: "work"},
+			},
+			want: "Current tasks:\n\n## Queued\n- #1: First (work)\n- #2: Second (work)\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := New(&mockAdapter{}, &mockClassifier{}, &mockBridge{tasks: tt.tasks}, nil, nil, nil)
+			got, err := proc.handleQuery(context.Background(), &classifier.Action{Type: classifier.ActionQuery})
+			if err != nil {
+				t.Fatalf("handleQuery returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("handleQuery() =\n%q\nwant\n%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleQueryAllInactiveNeverEmitsHeader(t *testing.T) {
+	// The reported bug: an all-inactive board must not produce the bare
+	// header "Current tasks:\n\n". Guards against re-introducing the
+	// unconditional header write before the filter loop.
+	allInactive := [][]bridge.Task{
+		{{ID: 1, Title: "Done one", Status: "done", Project: "personal"}},
+		{{ID: 1, Title: "Archived one", Status: "archived", Project: "personal"}},
+		{
+			{ID: 1, Title: "Done", Status: "done", Project: "personal"},
+			{ID: 2, Title: "Archived", Status: "archived", Project: "personal"},
+			{ID: 3, Title: "Also done", Status: "done", Project: "personal"},
+		},
+	}
+
+	for i, tasks := range allInactive {
+		proc := New(&mockAdapter{}, &mockClassifier{}, &mockBridge{tasks: tasks}, nil, nil, nil)
+		got, err := proc.handleQuery(context.Background(), &classifier.Action{Type: classifier.ActionQuery})
+		if err != nil {
+			t.Fatalf("case %d: handleQuery returned error: %v", i, err)
+		}
+		if strings.Contains(got, "Current tasks:") {
+			t.Errorf("case %d: all-inactive reply should not contain header, got %q", i, got)
+		}
+		if got != "No active tasks." {
+			t.Errorf("case %d: all-inactive reply = %q, want %q", i, got, "No active tasks.")
+		}
+	}
+}
+
+func TestHandleQueryListTasksError(t *testing.T) {
+	proc := New(&mockAdapter{}, &mockClassifier{}, &errBridge{}, nil, nil, nil)
+	_, err := proc.handleQuery(context.Background(), &classifier.Action{Type: classifier.ActionQuery})
+	if err == nil {
+		t.Fatal("handleQuery should return error when ListTasks fails")
+	}
+}
+
+// errBridge implements TaskBridge and always fails ListTasks.
+type errBridge struct {
+	mockBridge
+}
+
+func (b *errBridge) ListTasks(status string) ([]bridge.Task, error) {
+	return nil, errors.New("ty list failed")
+}
