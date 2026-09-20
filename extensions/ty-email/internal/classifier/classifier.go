@@ -77,4 +77,5 @@ type Config struct {
 	APIKeyCmd string `yaml:"api_key_cmd"` // Command to get API key
 	APIKey    string `yaml:"api_key"`     // Direct API key (less secure)
 	BaseURL   string `yaml:"base_url"`    // For Ollama or custom endpoints
+	MaxTokens int    `yaml:"max_tokens"`  // Max output tokens for the classifier (default: DefaultMaxTokens)
 }
