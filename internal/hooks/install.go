@@ -119,6 +119,11 @@ type InstallResult struct {
 	Plugins []string
 	// Updated is true when an existing install was refreshed rather than created.
 	Updated bool
+	// backup is the path of the prior version set aside during a subdir update.
+	// It is retained until Install validates the new copy as a usable plugin and
+	// is dropped on success or restored on failure. Empty for fresh installs and
+	// whole-repo installs.
+	backup string
 }
 
 // Verb returns "Installed" or "Updated", for one-line user feedback.
@@ -253,9 +258,21 @@ func Install(ctx context.Context, pluginsDir string, req InstallRequest) (Instal
 	if len(res.Plugins) == 0 {
 		if !res.Updated {
 			_ = os.RemoveAll(target)
+		} else if res.backup != "" {
+			// A filesystem-successful copy replaced a working plugin but loads no
+			// usable plugins — the upstream release was semantically broken. Roll
+			// the working version back from the backup rather than leaving the
+			// broken copy in place with no automatic recovery.
+			_ = os.RemoveAll(target)
+			_ = os.Rename(res.backup, target)
 		}
 		return InstallResult{}, fmt.Errorf("%s contains no usable plugins (need a %s with a hook, action, workflow, service, or routine)",
 			describeSource(req), ManifestName)
+	}
+	// The new copy is validated as usable; the backup of the previous version is
+	// now safe to drop.
+	if res.backup != "" {
+		_ = os.RemoveAll(res.backup)
 	}
 	_ = saveSource(pluginsDir, name, InstalledSource{
 		ID:          req.ID,
@@ -315,11 +332,14 @@ func installSubdir(ctx context.Context, pluginsDir, target string, req InstallRe
 	}
 
 	updated := dirExists(target)
+	var backup string
 	if updated {
-		// Replace atomically enough: move the old copy aside, put the new one in,
-		// then drop the old. A failed copy therefore can't leave a half-installed
-		// plugin where a working one used to be.
-		backup := target + ".old"
+		// Move the old copy aside and put the new one in. The old copy is kept as a
+		// backup until Install validates the new copy as a usable plugin, so a
+		// copy that succeeds on the filesystem but turns out to be a semantically
+		// broken upstream (no loadable plugin) is rolled back rather than
+		// destroying a working plugin where a working one used to be.
+		backup = target + ".old"
 		_ = os.RemoveAll(backup)
 		if rerr := os.Rename(target, backup); rerr != nil {
 			return InstallResult{}, fmt.Errorf("replace %s: %w", target, rerr)
@@ -329,12 +349,11 @@ func installSubdir(ctx context.Context, pluginsDir, target string, req InstallRe
 			_ = os.Rename(backup, target)
 			return InstallResult{}, fmt.Errorf("install %s: %w", req.Subdir, cerr)
 		}
-		_ = os.RemoveAll(backup)
 	} else if cerr := copyTree(src, target); cerr != nil {
 		_ = os.RemoveAll(target)
 		return InstallResult{}, fmt.Errorf("install %s: %w", req.Subdir, cerr)
 	}
-	return InstallResult{Dir: target, Updated: updated}, nil
+	return InstallResult{Dir: target, Updated: updated, backup: backup}, nil
 }
 
 // safeSubdir rejects a subdir that could escape the checkout.
