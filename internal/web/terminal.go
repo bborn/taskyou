@@ -52,6 +52,14 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		info := s.remoteTerminalInfo(ctx, task, false)
 		cancel()
+		// remoteTerminalInfo translates executor.ErrRemoteTerminalEnded into the
+		// sentinel "no window, no error" state (WindowExists==false, Error=="").
+		// Restore the canonical session-ended message so this attach endpoint
+		// returns 409 — matching handleEnsureSession/handleEnsureShellPane — instead
+		// of falling through to the generic 400 "task has no requested terminal pane".
+		if !info.WindowExists && info.Error == "" {
+			info.Error = executor.ErrRemoteTerminalEnded.Error()
+		}
 		if info.Error != "" {
 			http.Error(w, info.Error, http.StatusConflict)
 			return
