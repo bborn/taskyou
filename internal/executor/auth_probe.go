@@ -63,10 +63,18 @@ var authProbes = map[string]authProbe{
 	db.ExecutorCodex: {
 		args: []string{"codex", "login", "status"},
 		classify: func(out string, err error) authState {
-			if err != nil {
+			// The exit status is NOT the logout signal: codex returns non-zero
+			// for reasons that say nothing about authentication — a config or
+			// permission error, an auth server it cannot reach, a runtime
+			// failure. A definite "not logged in" in codex's own output is the
+			// only signal that blocks; anything else is "could not tell".
+			if strings.Contains(strings.ToLower(out), "not logged in") {
 				return authLoggedOut
 			}
-			return authOK
+			if err == nil {
+				return authOK
+			}
+			return authUnknown
 		},
 		hint: "codex login",
 	},

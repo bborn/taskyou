@@ -43,7 +43,7 @@ func TestCheckExecutorAuthClassifiesTheHostsAnswer(t *testing.T) {
 			want:     authUnknown,
 		},
 		{
-			name:     "codex reports a failure",
+			name:     "codex says it is not logged in",
 			executor: db.ExecutorCodex,
 			stub:     `echo 'not logged in' >&2; exit 1`,
 			want:     authLoggedOut,
@@ -53,6 +53,30 @@ func TestCheckExecutorAuthClassifiesTheHostsAnswer(t *testing.T) {
 			executor: db.ExecutorCodex,
 			stub:     `echo 'Logged in'`,
 			want:     authOK,
+		},
+		{
+			name:     "codex runtime/config error is not a logout",
+			executor: db.ExecutorCodex,
+			stub:     `echo 'codex: failed to read config: permission denied' >&2; exit 3`,
+			want:     authUnknown,
+		},
+		{
+			name:     "an older codex CLI with no login status subcommand",
+			executor: db.ExecutorCodex,
+			stub:     `echo "error: unknown command 'login'" >&2; exit 1`,
+			want:     authUnknown,
+		},
+		{
+			name:     "codex logged-out phrase on stdout also blocks",
+			executor: db.ExecutorCodex,
+			stub:     `echo 'You are not logged in. Run codex login to sign in.'; exit 1`,
+			want:     authLoggedOut,
+		},
+		{
+			name:     "codex logged-out phrasing is matched case-insensitively",
+			executor: db.ExecutorCodex,
+			stub:     `echo 'NOT LOGGED IN' >&2; exit 1`,
+			want:     authLoggedOut,
 		},
 		{
 			name:     "an executor with no probe is never blocked",
