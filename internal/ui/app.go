@@ -5111,7 +5111,7 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 			if attachmentPath != "" {
 				data, readErr := os.ReadFile(attachmentPath)
 				if readErr == nil {
-					mimeType := detectMimeType(attachmentPath)
+					mimeType := detectMimeType(attachmentPath, data)
 					database.AddAttachment(t.ID, filepath.Base(attachmentPath), mimeType, data)
 				}
 			}
@@ -5746,7 +5746,7 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 			if attachmentPath != "" {
 				data, readErr := os.ReadFile(attachmentPath)
 				if readErr == nil {
-					mimeType := detectMimeType(attachmentPath)
+					mimeType := detectMimeType(attachmentPath, data)
 					database.AddAttachment(id, filepath.Base(attachmentPath), mimeType, data)
 				}
 			}
