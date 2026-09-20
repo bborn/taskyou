@@ -668,7 +668,13 @@ func (db *DB) migrate() error {
 	// Only when it actually changes: migrate() runs on every Open, and every ty
 	// command opens the database. An unconditional write here would be one more
 	// row for every `ty list` to contend with on the single writer.
-	if current, ok := db.ReadSchemaVersion(); !ok || current != SchemaVersion {
+	//
+	// `<` (not `!=`): an older build opening a file last migrated by a *newer*
+	// build must leave the higher stamp in place, so `ty doctor` can still see
+	// "a newer ty has migrated this database" and tell the user to upgrade.
+	// `!=` would write this build's lower SchemaVersion over the higher one and
+	// silently downgrade the stamp.
+	if current, ok := db.ReadSchemaVersion(); !ok || current < SchemaVersion {
 		db.SetSetting(SchemaVersionKey, strconv.Itoa(SchemaVersion))
 	}
 
