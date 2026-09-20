@@ -408,24 +408,38 @@ func (p *Processor) handleQuery(ctx context.Context, action *classifier.Action) 
 		return "No active tasks.", nil
 	}
 
-	var sb strings.Builder
-	sb.WriteString("Current tasks:\n\n")
-
 	// Group by status
 	byStatus := make(map[string][]bridge.Task)
 	for _, t := range tasks {
 		byStatus[t.Status] = append(byStatus[t.Status], t)
 	}
 
+	// Only the active statuses are rendered. ListTasks("") passes --all, so the
+	// slice can contain done/archived rows (useful for the classifier-context
+	// call site that shares the fetch). Those rows must not produce a header
+	// without a body, so the header is emitted lazily on the first matching
+	// bucket and the existing empty-state message is reused when no bucket
+	// matches (e.g., a fully finished board).
 	statusOrder := []string{"processing", "blocked", "queued", "backlog"}
+
+	var sb strings.Builder
+	wrote := false
 	for _, status := range statusOrder {
 		if ts, ok := byStatus[status]; ok && len(ts) > 0 {
+			if !wrote {
+				sb.WriteString("Current tasks:\n\n")
+				wrote = true
+			}
 			sb.WriteString(fmt.Sprintf("## %s\n", strings.ToUpper(status[:1])+status[1:]))
 			for _, t := range ts {
 				sb.WriteString(fmt.Sprintf("- #%d: %s (%s)\n", t.ID, t.Title, t.Project))
 			}
 			sb.WriteString("\n")
 		}
+	}
+
+	if !wrote {
+		return "No active tasks.", nil
 	}
 
 	return sb.String(), nil
