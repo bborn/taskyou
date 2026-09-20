@@ -857,6 +857,73 @@ func TestHandleDeleteProject_Personal(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateProject_PersonalRenameRejected verifies the HTTP API can no
+// longer be used to rename the seeded "personal" project. The DB-layer guard
+// in db.UpdateProject is what blocks it for every other surface (CLI/HTTP),
+// mirroring the personal-deletion guard; the response is non-2xx and the
+// personal row is left intact for default task creation.
+func TestHandleUpdateProject_PersonalRenameRejected(t *testing.T) {
+	srv, database, _ := setupServer(t)
+
+	personal, err := database.GetProjectByName("personal")
+	if err != nil || personal == nil {
+		t.Fatalf("get personal project: err=%v project=%v", err, personal)
+	}
+	personalID := personal.ID
+
+	body := `{"name":"mywork"}`
+	req := httptest.NewRequest("PATCH", "/api/projects/personal", strings.NewReader(body))
+	req.SetPathValue("name", "personal")
+	w := httptest.NewRecorder()
+	srv.handleUpdateProject(w, req)
+
+	if w.Code < 400 || w.Code >= 600 {
+		t.Fatalf("expected non-2xx (4xx or 5xx) response for renaming personal, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The personal project must still exist with its original ID and name; no
+	// "mywork" row may have been created.
+	stillThere, err := database.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get personal after rejected HTTP rename: %v", err)
+	}
+	if stillThere == nil {
+		t.Fatal("personal project disappeared after rejected HTTP rename")
+	}
+	if stillThere.ID != personalID {
+		t.Errorf("personal ID = %d, want %d", stillThere.ID, personalID)
+	}
+	if stillThere.Name != "personal" {
+		t.Errorf("personal Name = %q, want %q", stillThere.Name, "personal")
+	}
+	if other, _ := database.GetProjectByName("mywork"); other != nil {
+		t.Errorf("a 'mywork' project exists after rejected HTTP rename: %+v", other)
+	}
+
+	// Non-rename edits of the personal project via PATCH (e.g., changing only
+	// the color while keeping the name) must still succeed — the guard blocks
+	// renames, not edits.
+	body2 := `{"color":"#112233"}`
+	req2 := httptest.NewRequest("PATCH", "/api/projects/personal", strings.NewReader(body2))
+	req2.SetPathValue("name", "personal")
+	w2 := httptest.NewRecorder()
+	srv.handleUpdateProject(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for non-rename edit of personal, got %d: %s", w2.Code, w2.Body.String())
+	}
+	edited, err := database.GetProjectByName("personal")
+	if err != nil || edited == nil {
+		t.Fatalf("get personal after non-rename HTTP edit: err=%v project=%v", err, edited)
+	}
+	if edited.Color != "#112233" {
+		t.Errorf("personal Color = %q, want %q", edited.Color, "#112233")
+	}
+	if edited.Name != "personal" {
+		t.Errorf("personal Name = %q, want %q (renamed by non-rename edit?)", edited.Name, "personal")
+	}
+}
+
 // --- Types ---
 
 func TestHandleListTypes(t *testing.T) {

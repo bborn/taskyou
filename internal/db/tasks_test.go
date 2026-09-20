@@ -305,6 +305,172 @@ func TestDeletePersonalProject(t *testing.T) {
 	}
 }
 
+// TestUpdateProjectRejectsRenamingPersonal verifies that UpdateProject refuses
+// to rename the seeded "personal" project. The personal project is the implicit
+// default for every new task (CreateTask falls back to t.Project = "personal"),
+// and ensurePersonalProject re-seeds a fresh "personal" on Open if none exists.
+// A rename would therefore break default task creation within the session,
+// defeat the name-based DeleteProject guard, and on the next Open orphan the
+// user's customized row behind a re-seeded default. The guard mirrors
+// DeleteProject so it also protects surfaces that bypass the UI (CLI, HTTP).
+func TestUpdateProjectRejectsRenamingPersonal(t *testing.T) {
+	// File-backed DB so we can verify the reopen behavior at the end.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// The personal project should be created automatically by ensurePersonalProject.
+	personal, err := db.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("failed to get personal project: %v", err)
+	}
+	if personal == nil {
+		t.Fatal("personal project not seeded by migrations")
+	}
+	personalID := personal.ID
+
+	// Attempt #1: rename "personal" → "mywork" must be rejected.
+	personal.Name = "mywork"
+	err = db.UpdateProject(personal)
+	if err == nil {
+		t.Fatal("expected error when renaming personal project, got nil")
+	}
+	if err.Error() != "cannot rename the personal project" {
+		t.Errorf("expected 'cannot rename the personal project' error, got %q", err.Error())
+	}
+
+	// The rename must not have touched the row: original ID and name preserved,
+	// and no "mywork" row created.
+	stillThere, err := db.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get personal after rejected rename: %v", err)
+	}
+	if stillThere == nil {
+		t.Fatal("personal project disappeared after rejected rename")
+	}
+	if stillThere.ID != personalID {
+		t.Errorf("personal project ID = %d, want %d", stillThere.ID, personalID)
+	}
+	if stillThere.Name != "personal" {
+		t.Errorf("personal project Name = %q, want %q", stillThere.Name, "personal")
+	}
+	if other, _ := db.GetProjectByName("mywork"); other != nil {
+		t.Errorf("a 'mywork' project exists after rejected rename: %+v", other)
+	}
+
+	// Attempt #2: retry without resetting the in-memory Name (mimics surfaces
+	// that don't refetch between attempts, including the UI's reshow loop).
+	// The DB guard reads the row's current name, not the in-memory struct, so
+	// the retry must also be rejected.
+	err = db.UpdateProject(personal) // personal.Name still "mywork"
+	if err == nil {
+		t.Fatal("expected retry of personal rename to be rejected, got nil")
+	}
+	if err.Error() != "cannot rename the personal project" {
+		t.Errorf("expected 'cannot rename the personal project' on retry, got %q", err.Error())
+	}
+
+	// Attempt #3: a non-rename update of the personal project (editing other
+	// fields while keeping Name = "personal") must succeed.
+	stillThere.Instructions = "edited instructions"
+	stillThere.Color = "#FF0000"
+	if err := db.UpdateProject(stillThere); err != nil {
+		t.Fatalf("expected non-rename update of personal to succeed, got %v", err)
+	}
+	edited, err := db.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("get personal after edit: %v", err)
+	}
+	if edited.Instructions != "edited instructions" {
+		t.Errorf("instructions = %q, want %q", edited.Instructions, "edited instructions")
+	}
+	if edited.Color != "#FF0000" {
+		t.Errorf("color = %q, want %q", edited.Color, "#FF0000")
+	}
+
+	// Attempt #4: setting Name = "personal" explicitly (an ordinary
+	// "save my edits" with no rename) must also succeed.
+	edited.Name = "personal"
+	edited.Instructions = "stage two edit"
+	if err := db.UpdateProject(edited); err != nil {
+		t.Fatalf("expected same-name update of personal to succeed, got %v", err)
+	}
+
+	// Attempt #5: default task creation still routes to "personal" — i.e. the
+	// guard did not accidentally break the row or the default-resolution path.
+	task := &Task{Title: "default-path task", Status: StatusBacklog}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("expected default task creation to still work, got %v", err)
+	}
+	if task.Project != "personal" {
+		t.Errorf("task.Project = %q, want %q", task.Project, "personal")
+	}
+
+	// Attempt #6: the name-based DeleteProject guard must still fire for the
+	// personal row.
+	if err := db.DeleteProject(personalID); err == nil {
+		t.Error("expected deleting the personal project to still be blocked")
+	}
+
+	// Attempt #7: renaming a non-personal project must still succeed — the
+	// guard must not produce false positives.
+	other := &Project{Name: "sideproj", Path: filepath.Join(tmpDir, "side")}
+	if err := db.CreateProject(other); err != nil {
+		t.Fatalf("create other project: %v", err)
+	}
+	other.Name = "sideproj-renamed"
+	if err := db.UpdateProject(other); err != nil {
+		t.Fatalf("expected renaming a non-personal project to succeed, got %v", err)
+	}
+	if got, _ := db.GetProjectByName("sideproj"); got != nil {
+		t.Error("old project name still resolved after rename")
+	}
+	if got, _ := db.GetProjectByName("sideproj-renamed"); got == nil {
+		t.Error("renamed non-personal project not found")
+	}
+
+	// Attempt #8: reopen the same DB. The rejected rename left the original
+	// "personal" row intact, so ensurePersonalProject must NOT seed a duplicate.
+	// This is the durable-invariant half of the bug: a rename-then-reopen would
+	// have orphaned the user's customized row behind a fresh default. Here,
+	// only the rejection+reopen happens, and there must be exactly one.
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db before reopen: %v", err)
+	}
+	db2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db2.Close()
+
+	personalCount := 0
+	projects, err := db2.ListProjects()
+	if err != nil {
+		t.Fatalf("list projects on reopen: %v", err)
+	}
+	for _, p := range projects {
+		if p.Name == "personal" {
+			personalCount++
+		}
+	}
+	if personalCount != 1 {
+		t.Errorf("expected exactly 1 personal project after reopen, got %d", personalCount)
+	}
+	// The reopened personal row should have the original ID (no fresh seed).
+	reopened, err := db2.GetProjectByName("personal")
+	if err != nil || reopened == nil {
+		t.Fatalf("get personal on reopen: err=%v personal=%v", err, reopened)
+	}
+	if reopened.ID != personalID {
+		t.Errorf("personal ID after reopen = %d, want %d (no re-seed)", reopened.ID, personalID)
+	}
+}
+
 func TestListProjectsPersonalFirst(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
