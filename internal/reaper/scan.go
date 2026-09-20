@@ -18,8 +18,19 @@ import (
 const psFormat = "pid=,ppid=,tty=,etime=,command="
 
 // ScanProcesses returns the current process table.
+//
+// `-ww` disables `ps`'s output-width limiting. procps-ng's `ps` inherits this
+// process's environment (`osexec.Cmd.Env` is nil here, so `COLUMNS` is inherited
+// verbatim), and when `COLUMNS` is exported it truncates the `command=` column
+// to that width even though stdout is a pipe. The worktree path and the
+// `node_modules/.bin/<name>` substring that the reaper matches on both sit past
+// a long prefix, so truncation silently defeats both `TaskIDFor` and
+// `IsDevServer` — leaving orphaned dev servers running. `-w` alone is
+// insufficient (procps-ng still caps output at 132 bytes under `-w`); `-ww` is
+// genuinely unlimited. `-ww` is documented on both Linux procps-ng and macOS
+// BSD `ps`.
 func ScanProcesses() ([]Process, error) {
-	out, err := osexec.Command("ps", "-Ao", psFormat).Output()
+	out, err := osexec.Command("ps", "-ww", "-Ao", psFormat).Output()
 	if err != nil {
 		return nil, fmt.Errorf("ps: %w", err)
 	}
