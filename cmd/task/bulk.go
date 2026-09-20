@@ -299,10 +299,10 @@ Examples:
 				succeeded++
 			}
 
-			printBulkSummary("queue", succeeded, failed)
 			if succeeded > 0 {
 				ensureDaemonForQueuedWork()
 			}
+			printBulkSummary("queue", succeeded, failed)
 		},
 	}
 	bulkExecuteCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (skip permission prompts)")
