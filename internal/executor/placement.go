@@ -82,6 +82,24 @@ func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (runner 
 			e.logLine(task.ID, "system",
 				"Running here: an archived task keeps its saved worktree in this machine's repo, so placement is skipped.")
 		}
+		// The recorded decision named the host this task ran on BEFORE it was
+		// archived; setupWorktree (next) calls UnarchiveWorktree, which restores
+		// the worktree HERE. PlacementTarget still holds that host, though —
+		// nothing in the archive/unarchive path writes it — so the task is
+		// genuinely running on this machine while every surface that trusts
+		// PlacementTarget alone (TaskCodeLocation.Remote, the browser bridge's
+		// resolveTaskRoot, the `o` editor button) believes the code is on the
+		// other host. Clear it in the same branch that already decided "local",
+		// so PlacementTarget keeps meaning "where this task runs": a real local
+		// decision's full field-set, including the stale remote_worktree_path
+		// and a fresh placement_decided_at the next spawn reuses verbatim.
+		if IsRemotePlacement(task.PlacementTarget) {
+			if err := e.db.CommitTaskPlacement(task.ID, "", "running archived task locally (placement cleared)", "", ""); err != nil {
+				e.logger.Warn("could not clear stale placement for archived-then-unarchived task",
+					"task", task.ID, "error", err)
+			}
+			task.PlacementTarget = ""
+		}
 		return LocalRunner{}, hooks.Placement{}, nil
 	}
 
