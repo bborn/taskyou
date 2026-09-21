@@ -193,8 +193,11 @@ func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, run
 	// Suppress the staged prompt arg for Remote Control so claude starts with a
 	// blank, drivable session instead of running the staged prompt — matching the
 	// local launch/resume sites. The flag itself is added above via rcFlag.
+	// Remote Control is Claude-only (see rcFlag and the codex flags reset above):
+	// codex never reads RemoteControl, so a codex task with Remote Control on must
+	// still stage and clean up its prompt exactly like a Remote Control-off one.
 	promptArg := fmt.Sprintf(`"$(cat %s)"; rm -f %s`, promptFile, promptFile)
-	if task.RemoteControl {
+	if task.RemoteControl && executorName == "claude" {
 		promptArg = ""
 	}
 	return fmt.Sprintf(`%s %s %s%s`, env, executorName, flags, promptArg), nil
