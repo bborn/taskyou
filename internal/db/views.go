@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -88,6 +89,16 @@ func (db *DB) GetSavedView(name string) (*SavedView, error) {
 	return v, nil
 }
 
+// ErrViewAlreadyExists is returned by RenameView when the target name is
+// already taken by a different saved view. The handler maps it to 409 so the
+// caller's source view is preserved untouched.
+var ErrViewAlreadyExists = errors.New("a saved view with that name already exists")
+
+// ErrViewNotFound is returned by RenameView when the source view no longer
+// exists when the transaction commits — a concurrent request deleted it
+// between the handler's lookup and the write. The handler maps it to 404.
+var ErrViewNotFound = errors.New("saved view not found")
+
 // SaveView creates or updates a view by name and returns the stored row.
 // Saving over an existing name replaces its query, which is what "save current
 // filter as <name>" should do when the name is already taken.
@@ -117,6 +128,86 @@ func (db *DB) SaveView(name, query string) (*SavedView, error) {
 		return nil, fmt.Errorf("save saved view: %w", err)
 	}
 	return db.GetSavedView(name)
+}
+
+// RenameView atomically renames (and re-queries) a saved view. The conflict
+// check, the insert of the new row, and the deletion of the source all run in
+// a single transaction guarded by viewsMu, so two concurrent renames onto the
+// same fresh target name cannot both succeed: exactly one wins and returns the
+// new row, the others get ErrViewAlreadyExists with their source views left
+// intact. This closes the TOCTOU window the old handleUpdateView left between
+// its GetSavedView conflict check and the subsequent SaveView/DeleteSavedView,
+// which let a loser overwrite the winner's target row and then delete its own
+// source — silent, irreversible data loss returned to the client as a 200.
+func (db *DB) RenameView(oldName, newName, query string) (*SavedView, error) {
+	oldName = NormalizeViewName(oldName)
+	newName = NormalizeViewName(newName)
+	if err := ValidateViewName(newName); err != nil {
+		return nil, err
+	}
+	query = strings.TrimSpace(query)
+
+	// Serialize renames within this process regardless of the connection-pool
+	// size. Combined with the transaction below, the read-check-write becomes
+	// atomic in-process; the conditional INSERT makes it atomic across
+	// processes (SQLite serializes writers, so a concurrent rename that
+	// commits first makes this one's INSERT match zero rows).
+	db.viewsMu.Lock()
+	defer db.viewsMu.Unlock()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin rename transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Re-check the source under the write lock. The handler's requireView saw
+	// it, but a concurrent request may have deleted it since; refuse rather
+	// than resurrect a deleted view under a new name.
+	var srcID int64
+	err = tx.QueryRow(`SELECT id FROM saved_views WHERE name = ? COLLATE NOCASE`, oldName).Scan(&srcID)
+	if err == sql.ErrNoRows {
+		return nil, ErrViewNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load source view: %w", err)
+	}
+
+	// Insert the target only if the name is free. ON CONFLICT DO UPDATE would
+	// silently upsert (and so overwrite the conflicting row); the
+	// WHERE NOT EXISTS form reports the collision via RowsAffected, which is
+	// the 409 the rename guard is supposed to return. Held under the same
+	// transaction lock as the eventual commit, a concurrent rename cannot
+	// slip a row in between this check and the write.
+	var next int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sort_order), 0) + 1 FROM saved_views`).Scan(&next); err != nil {
+		return nil, fmt.Errorf("next saved view order: %w", err)
+	}
+	res, err := tx.Exec(`
+		INSERT INTO saved_views (name, query, sort_order)
+		SELECT ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM saved_views WHERE name = ? COLLATE NOCASE)
+	`, newName, query, next, newName)
+	if err != nil {
+		return nil, fmt.Errorf("insert renamed view: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("check renamed insert: %w", err)
+	}
+	if inserted == 0 {
+		return nil, ErrViewAlreadyExists
+	}
+
+	// Drop the original only after the replacement exists, inside the same
+	// transaction so a crash between them cannot leave both rows.
+	if _, err := tx.Exec(`DELETE FROM saved_views WHERE id = ?`, srcID); err != nil {
+		return nil, fmt.Errorf("delete source view: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit rename transaction: %w", err)
+	}
+	return db.GetSavedView(newName)
 }
 
 // DeleteSavedView removes a view by name. Deleting a view that does not exist
