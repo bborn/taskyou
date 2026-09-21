@@ -60,7 +60,7 @@ func (s *Server) handleGetView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := s.db.ListTasks(db.ListTasksOptions{IncludeClosed: true})
+	tasks, err := s.db.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: -1})
 	if err != nil {
 		jsonErr(w, "failed to list tasks", http.StatusInternalServerError)
 		return
