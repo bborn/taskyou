@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bborn/workflow/internal/textutil"
@@ -439,6 +440,51 @@ type apiError struct {
 
 func (e apiError) Error() string { return e.msg }
 
+// moveLock is the per-source-task lock serializing the move critical section in
+// moveTask. refs is the count of in-flight goroutines holding or waiting on
+// this entry; the last one out removes it from Server.moveLocks, so the map
+// can't grow without bound on a long-running daemon that moves many tasks.
+type moveLock struct {
+	mu   sync.Mutex
+	refs int64 // protected by Server.moveMu
+}
+
+// acquireMoveLock returns a per-task *moveLock to hold across the move critical
+// section (the guard reload + teardown + DeleteTask + CreateTask inside
+// moveTask). Two concurrent movers of the same source task that both read the
+// still-existing row at requireTask-time serialize here; the loser, holding
+// back on this lock while the winner tears the row down, then bails inside
+// moveTask's guard with 404 instead of inserting a duplicate. Different source
+// tasks get different locks so unrelated moves on a board stay concurrent.
+func (s *Server) acquireMoveLock(id int64) *moveLock {
+	s.moveMu.Lock()
+	defer s.moveMu.Unlock()
+	if s.moveLocks == nil {
+		s.moveLocks = make(map[int64]*moveLock)
+	}
+	ml, ok := s.moveLocks[id]
+	if !ok {
+		ml = &moveLock{}
+		s.moveLocks[id] = ml
+	}
+	ml.refs++
+	return ml
+}
+
+// releaseMoveLock undoes acquireMoveLock, and when the last interested
+// goroutine leaves, drops the entry from moveLocks so the map can't leak.
+// The ml identity check defends against the (impossible in practice but
+// defensive) case where the entry was replaced under our feet — never delete
+// an entry we don't own.
+func (s *Server) releaseMoveLock(id int64, ml *moveLock) {
+	s.moveMu.Lock()
+	defer s.moveMu.Unlock()
+	ml.refs--
+	if ml.refs == 0 && s.moveLocks[id] == ml {
+		delete(s.moveLocks, id)
+	}
+}
+
 func (s *Server) handleMoveTask(w http.ResponseWriter, r *http.Request) {
 	task, ok := s.requireTask(w, r)
 	if !ok {
@@ -484,6 +530,38 @@ func (s *Server) handleMoveTask(w http.ResponseWriter, r *http.Request) {
 // backlog task has no worktree, no agent, and no port to clean up, so its move
 // is a cheap delete + create.
 func (s *Server) moveTask(oldTask *db.Task, targetProject string) (*db.Task, error) {
+	// Serialize moves of the same source task across the whole read-modify-write
+	// critical section. requireTask ran outside this lock and handed the caller
+	// a plain *db.Task snapshot; a concurrent mover racing it could have already
+	// torn this row down by the time we acquire the lock. Holding the per-task
+	// lock across the guard reload + teardown + DeleteTask + CreateTask below
+	// is what prevents two movers both reaching CreateTask on a row that still
+	// exists — the bug 2c1f5fd introduced when it rewrote UpdateTask into a
+	// delete + recreate sequence with no per-task serialization.
+	//
+	// The single pooled connection (SetMaxOpenConns(1) in internal/db/sqlite.go)
+	// only serializes individual statements; the connection is released between
+	// GetTask, DeleteTask, and CreateTask, so the application layer has to hold
+	// the lock across the multi-statement critical section itself.
+	ml := s.acquireMoveLock(oldTask.ID)
+	defer s.releaseMoveLock(oldTask.ID, ml)
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+
+	// Complementary guard: holding the per-task lock guarantees any earlier
+	// concurrent mover has finished its DeleteTask + CreateTask by now. If an
+	// earlier mover won, the source row is gone — bail with 404 ("task not
+	// found") instead of letting DeleteTask succeed idempotently (it does not
+	// treat zero rows as an error) and then CreateTask insert a duplicate row.
+	// This is the load-bearing short-circuit: without it, the second mover
+	// would proceed to CreateTask and produce the exact N-duplicate outcome the
+	// bug report describes.
+	if still, gerr := s.db.GetTask(oldTask.ID); gerr != nil {
+		return nil, apiError{code: http.StatusInternalServerError, msg: "reload moved task: " + gerr.Error()}
+	} else if still == nil {
+		return nil, apiError{code: http.StatusNotFound, msg: "task not found"}
+	}
+
 	// Validate the destination project. CreateTask would refuse an unknown
 	// project too, but doing it early lets the handler return a 404 (the
 	// documented contract for /move on a missing project) instead of a 500.
