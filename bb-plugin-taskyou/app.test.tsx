@@ -326,6 +326,71 @@ describe("TaskYou board", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("shows a stale-data banner, not the total-failure panel, when a refresh fails against a populated board, and recovers", async () => {
+    const { rpc } = fixture();
+    const healthy = rpc.board;
+    let failing = false;
+    rpc.board = vi.fn((input) =>
+      failing
+        ? Promise.reject(new Error("Connection refused"))
+        : healthy(input),
+    );
+    mount(rpc);
+    await screen.findByRole("button", { name: /Ship the board/ });
+    // A refresh fails after the board was already loaded (data && error).
+    failing = true;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    const banner = await screen.findByRole("alert");
+    // The distinct, non-destructive stale-data banner is used (not the
+    // total-failure panel whose wording is only correct when data is null).
+    expect(banner.textContent).toContain("Last refresh failed");
+    expect(banner.textContent).toContain("Connection refused");
+    expect(banner.textContent).toContain("previous load");
+    expect(screen.queryByText("Could not load TaskYou")).toBeNull();
+    // The stale board grid is still visible rather than being wiped.
+    expect(screen.getByRole("button", { name: /Ship the board/ })).toBeTruthy();
+    // A manual retry that succeeds clears the banner and keeps the board.
+    failing = false;
+    fireEvent.click(within(banner).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByRole("button", { name: /Ship the board/ })).toBeTruthy();
+  });
+
+  it("shows a stale-data banner in the task detail when a refresh fails against an already-loaded task, and recovers", async () => {
+    const { rpc } = fixture([task({ status: "blocked" })]);
+    const healthyDetail = rpc.detail;
+    let failing = false;
+    rpc.detail = vi.fn((input) =>
+      failing
+        ? Promise.reject(new Error("Connection refused"))
+        : healthyDetail(input),
+    );
+    const slot = mount(rpc);
+    await openTask();
+    expect(
+      within(screen.getByRole("dialog")).getByText("Executor started"),
+    ).toBeTruthy();
+    // A realtime-triggered refresh fails against the already-loaded task.
+    failing = true;
+    await slot.behavior.emitRealtime("taskyou-changed", {});
+    const banner = await screen.findByRole("alert");
+    expect(banner.textContent).toContain("Last refresh failed");
+    expect(banner.textContent).toContain("Connection refused");
+    expect(banner.textContent).toContain("previous load");
+    expect(screen.queryByText("Could not load TaskYou")).toBeNull();
+    // The stale task body and logs remain visible underneath the banner.
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText("Keep CLI access")).toBeTruthy();
+    expect(dialog.getByText("Executor started")).toBeTruthy();
+    // Recovering clears the banner while preserving the task detail.
+    failing = false;
+    fireEvent.click(within(banner).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(
+      within(screen.getByRole("dialog")).getByText("Executor started"),
+    ).toBeTruthy();
+  });
+
   it("reconciles missed events on reconnect and coalesces event bursts", async () => {
     const { rpc, setTasks } = fixture();
     const slot = mount(rpc);
