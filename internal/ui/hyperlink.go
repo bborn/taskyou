@@ -24,7 +24,18 @@ var renderedURLPattern = regexp.MustCompile(`https?://[A-Za-z0-9\-._~%!$&'()*+,;
 // width unchanged, so a linkified line still aligns and truncates the same way.
 func linkifyURLs(s string) string {
 	return renderedURLPattern.ReplaceAllStringFunc(s, func(url string) string {
-		trimmed := strings.TrimRight(url, ".,;:!?)]}'\"")
+		// Sentence punctuation that cannot legally end a URL path is shed
+		// unconditionally.
+		trimmed := strings.TrimRight(url, ".,!?")
+		// A trailing ')' or ']' belongs to surrounding prose, not to the URL,
+		// only when it does not balance an opening '(' or '[' inside the
+		// captured match — e.g. "(url)." vs a Wikipedia "Foo_(bar)" URL.
+		for strings.HasSuffix(trimmed, ")") && strings.Count(trimmed, "(") < strings.Count(trimmed, ")") {
+			trimmed = strings.TrimSuffix(trimmed, ")")
+		}
+		for strings.HasSuffix(trimmed, "]") && strings.Count(trimmed, "[") < strings.Count(trimmed, "]") {
+			trimmed = strings.TrimSuffix(trimmed, "]")
+		}
 		rest := url[len(trimmed):]
 		if trimmed == "" || strings.HasSuffix(trimmed, "://") {
 			return url
