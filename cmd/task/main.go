@@ -1950,11 +1950,19 @@ Examples:
 				// If blocked, show the last question
 				if task.Status == db.StatusBlocked {
 					logs, _ := database.GetTaskLogs(taskID, 50)
-					for _, l := range logs {
+					for i, l := range logs {
 						if l.LineType == "question" {
 							fmt.Println()
 							fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Bold(true).Render("Waiting on:"))
 							fmt.Println(l.Content)
+							// Answers the agent offered; reply with one via `ty input`.
+							for n, o := range db.QuestionOptionsFor(logs, i) {
+								line := fmt.Sprintf("  %d. %s", n+1, o.Label)
+								if o.Description != "" {
+									line += dimStyle.Render(" — " + o.Description)
+								}
+								fmt.Println(line)
+							}
 							break
 						}
 					}
@@ -3996,6 +4004,7 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 				DB:        database,
 				CmdRunner: runner,
 				Sessions:  exec,
+				Mover:     exec,
 			})
 
 			// Handle signals for graceful shutdown
@@ -4924,6 +4933,7 @@ func startDaemonHTTPAPI(database *db.DB, exec *executor.Executor, logger *log.Lo
 		DB:        database,
 		CmdRunner: &execCommandRunner{},
 		Sessions:  exec,
+		Mover:     exec,
 	})
 
 	go func() {

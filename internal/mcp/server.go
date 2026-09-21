@@ -168,13 +168,27 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 				},
 				{
 					Name:        "taskyou_needs_input",
-					Description: "Request input from the user. Call this when you need clarification or additional information to proceed.",
+					Description: "Request input from the user. Call this when you need clarification or additional information to proceed. When the answer is one of a few discrete choices (which approach, which item, yes or no), pass them as options: the user can then answer with one tap in the GUI, and the label they pick arrives as your next message. Leave options out when the answer needs explaining.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
 							"question": map[string]interface{}{
 								"type":        "string",
 								"description": "The question to ask the user",
+							},
+							"options": map[string]interface{}{
+								"type":        "array",
+								"minItems":    minQuestionOptions,
+								"maxItems":    maxQuestionOptions,
+								"description": "Optional: 2-6 answers the user can pick with one tap. The picked label is sent back to you verbatim, so keep labels short and distinct; put any trade-off in the description. The user can still reply in their own words.",
+								"items": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"label":       map[string]interface{}{"type": "string"},
+										"description": map[string]interface{}{"type": "string"},
+									},
+									"required": []string{"label"},
+								},
 							},
 						},
 						"required": []string{"question"},
@@ -417,6 +431,23 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 
 	case "taskyou_needs_input":
 		question, _ := params.Arguments["question"].(string)
+		options, err := parseQuestionOptions(params.Arguments["options"])
+		if err != nil {
+			// A tool error the agent reads and can fix; nothing is asked.
+			s.sendResult(id, toolCallResult{
+				IsError: true,
+				Content: []contentBlock{{Type: "text", Text: "taskyou_needs_input: " + err.Error()}},
+			})
+			return
+		}
+
+		// Offered answers go in just ahead of the question, so the question stays
+		// the latest line for everything that looks for it.
+		if len(options) > 0 {
+			if data, err := json.Marshal(options); err == nil {
+				s.db.AppendTaskLog(s.taskID, db.LogQuestionOptions, string(data))
+			}
+		}
 
 		// Log the question
 		s.db.AppendTaskLog(s.taskID, "question", question)
@@ -431,10 +462,12 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			s.onNeedsInput(question)
 		}
 
+		result := "Input requested. The user will be notified."
+		if len(options) > 0 {
+			result += " They can tap one of your options; the label they pick arrives as your next message."
+		}
 		s.sendResult(id, toolCallResult{
-			Content: []contentBlock{
-				{Type: "text", Text: "Input requested. The user will be notified."},
-			},
+			Content: []contentBlock{{Type: "text", Text: result}},
 		})
 
 	case "taskyou_show_task":
@@ -922,4 +955,44 @@ func truncateForEvidence(s string) string {
 		return s[:300] + "…"
 	}
 	return s
+}
+
+// Bounds on offered answers: they are buttons on a phone.
+const (
+	minQuestionOptions = 2
+	maxQuestionOptions = 6
+)
+
+// parseQuestionOptions reads taskyou_needs_input's optional options argument.
+func parseQuestionOptions(v interface{}) ([]db.QuestionOption, error) {
+	if v == nil {
+		return nil, nil
+	}
+	items, ok := v.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf(`options must be an array of {"label": "...", "description": "..."} objects`)
+	}
+	if len(items) < minQuestionOptions || len(items) > maxQuestionOptions {
+		return nil, fmt.Errorf("options needs %d to %d entries, got %d", minQuestionOptions, maxQuestionOptions, len(items))
+	}
+	opts := make([]db.QuestionOption, 0, len(items))
+	seen := map[string]bool{}
+	for i, item := range items {
+		obj, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf(`option %d must be an object like {"label": "Redis"}`, i+1)
+		}
+		label, _ := obj["label"].(string)
+		label = strings.TrimSpace(label)
+		if label == "" {
+			return nil, fmt.Errorf("option %d needs a non-empty label", i+1)
+		}
+		if seen[strings.ToLower(label)] {
+			return nil, fmt.Errorf("option labels must differ; %q appears twice", label)
+		}
+		seen[strings.ToLower(label)] = true
+		desc, _ := obj["description"].(string)
+		opts = append(opts, db.QuestionOption{Label: label, Description: strings.TrimSpace(desc)})
+	}
+	return opts, nil
 }

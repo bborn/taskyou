@@ -225,25 +225,51 @@ func processCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 
-			// Start adapter briefly to poll
-			if err := adp.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start adapter: %w", err)
-			}
+			// Run one poll in a goroutine and drain its emails concurrently.
+			//
+			// The adapter now applies backpressure: when emailsCh is full the
+			// poll's push loop blocks until the consumer drains instead of
+			// dropping overflow (the old drop-on-full path combined with a
+			// non-PEEK FETCH permanently lost every dropped message). That
+			// requires a concurrent consumer — a poll-then-drain sequence
+			// would deadlock as soon as the channel filled on a >cap backlog.
+			//
+			// PollOnce returns only after the push loop completes, so once the
+			// consumer receives from pollErr an empty channel genuinely means
+			// "no more emails this run" — there is no momentary-empty race
+			// with a still-running producer (which the previous 5s sleep +
+			// select/default drain had, causing premature exit and message
+			// loss).
+			pollErr := make(chan error, 1)
+			go func() {
+				pollErr <- adp.PollOnce(ctx)
+			}()
 
-			// Wait a bit for emails to come in
-			time.Sleep(5 * time.Second)
-
-			// Process any emails
 			for {
 				select {
 				case email := <-adp.Emails():
 					if err := proc.ProcessEmail(ctx, email); err != nil {
 						logger.Error("failed to process email", "error", err)
 					}
-				default:
-					// No more emails
-					adp.Stop()
-					return proc.SendPendingReplies(ctx)
+				case err := <-pollErr:
+					if err != nil {
+						adp.Stop()
+						return fmt.Errorf("failed to poll: %w", err)
+					}
+					// Push loop complete: drain anything still buffered. With
+					// the producer done, a momentary-empty channel now
+					// genuinely means "no more this run".
+					for {
+						select {
+						case email := <-adp.Emails():
+							if err := proc.ProcessEmail(ctx, email); err != nil {
+								logger.Error("failed to process email", "error", err)
+							}
+						default:
+							adp.Stop()
+							return proc.SendPendingReplies(ctx)
+						}
+					}
 				}
 			}
 		},

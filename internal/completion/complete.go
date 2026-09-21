@@ -161,6 +161,54 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// verifyDir resolves WHERE a step's `verify:` command should run on THIS
+// machine, or returns deferRemote=true when the gate must NOT be run locally.
+//
+// A local task records its worktree in worktree_path; a worktree_path that is
+// not a directory on this machine belongs to another host and is not usable
+// (the same isDir guard prLookupTarget uses to keep a remote path from being
+// handed to a local git as if it were local). With no usable worktree, a local
+// task falls back to the daemon's project checkout, where the work was done —
+// the gate runs against the tree where the commit lives.
+//
+// A remotely placed step keeps its worktree in remote_worktree_path on another
+// machine, leaving the local worktree_path column empty by design
+// (SetTaskRemoteWorktree writes only the remote columns). The daemon's local
+// project checkout here is a DIFFERENT tree from where the work was done, so
+// running `verify:` against it would evaluate the wrong tree — false-pass on a
+// checkout the remote work never touched, or false-reject on one that does
+// not satisfy it. Rather than run against the wrong tree, the gate is deferred:
+// the backstop for remote+verify belongs on the remote done path, which runs
+// `verify:` on the agent's host before `signal done` is honoured.
+//
+// (dir=="", deferRemote==false) is preserved for the rare case where a local
+// task has neither a usable worktree nor a registered project: RunStepVerify
+// then runs in the daemon's CWD exactly as it did before this guard, which is
+// the original semantics rather than a new failure mode.
+func verifyDir(database *db.DB, task *db.Task, taskID int64) (dir string, deferRemote bool) {
+	dir = strings.TrimSpace(task.WorktreePath)
+	if !isDir(dir) {
+		// A worktree path that is not a directory here is another machine's
+		// path, not a usable one — checking rather than assuming is what keeps
+		// a remote path from being handed to a local command as if it were
+		// local. The same guard prLookupTarget applies.
+		dir = ""
+	}
+	if dir != "" {
+		return dir, false
+	}
+	remote, _, rerr := database.GetTaskRemoteWorktree(taskID)
+	if rerr == nil && strings.TrimSpace(remote) != "" {
+		// Remote-placed step: the worktree is on another host. Defer the gate
+		// rather than fall back to proj.Path, which would test the wrong tree.
+		return "", true
+	}
+	if proj, perr := database.GetProjectByName(task.Project); perr == nil && proj != nil {
+		return proj.Path, false
+	}
+	return "", false
+}
+
 // Complete runs the full completion decision for a task and applies its effects.
 //
 // The order matters and is load-bearing:
@@ -182,18 +230,29 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 	// Tasks with no verify row fall straight through.
 	verifiedGate := ""
 	if verifyCmd, _ := database.GetStepVerify(taskID); strings.TrimSpace(verifyCmd) != "" {
-		dir := strings.TrimSpace(task.WorktreePath)
-		if dir == "" {
-			if proj, err := database.GetProjectByName(task.Project); err == nil && proj != nil {
-				dir = proj.Path
-			}
-		}
-		if out, passed := pipeline.RunStepVerify(dir, verifyCmd); !passed {
+		dir, deferRemote := verifyDir(database, task, taskID)
+		if deferRemote {
+			// A remotely placed step keeps its worktree on another host, so the
+			// local worktree_path column is empty by design and the daemon's
+			// project checkout here is a DIFFERENT tree from where the agent's
+			// commit lives. Running `verify:` against that checkout would either
+			// false-pass (the local checkout satisfies the command independent
+			// of the agent's work) or false-reject (it does not, parking correct
+			// pushed work as "Verification failed"). Defer the gate to the
+			// remote done path, which runs `verify:` on the agent's host before
+			// `signal done` is honoured. The no-run skip is strictly better than
+			// the wrong-tree run; restoring the backstop for remote+verify
+			// belongs on the remote host, not in this checkout.
+			database.AppendTaskLog(taskID, "system",
+				"Verify gate deferred — the step's worktree is on another host. "+
+					"Run `verify: "+verifyCmd+"` there before this step is accepted.")
+		} else if out, passed := pipeline.RunStepVerify(dir, verifyCmd); !passed {
 			database.AppendTaskLog(taskID, "system", "Verification failed — completion rejected; the step keeps running so the agent can fix it.")
 			return &Outcome{Kind: KindVerifyFailed, VerifyCommand: verifyCmd, VerifyOutput: out}, nil
+		} else {
+			database.AppendTaskLog(taskID, "system", "Verification passed: "+verifyCmd)
+			verifiedGate = verifyCmd
 		}
-		database.AppendTaskLog(taskID, "system", "Verification passed: "+verifyCmd)
-		verifiedGate = verifyCmd
 	}
 
 	database.AppendTaskLog(taskID, "system", fmt.Sprintf("Task completed: %s", summary))
