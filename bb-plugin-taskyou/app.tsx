@@ -154,6 +154,33 @@ function ConnectionError({
   );
 }
 
+/** A refresh failed but a previous load is still shown, so the board is stale
+ * rather than empty. Distinct from {@link ConnectionError}, which is only
+ * coherent when there is no data to display. */
+function StaleDataBanner({
+  error,
+  refresh,
+}: {
+  error: string;
+  refresh: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      className="space-y-2 rounded-lg border border-border bg-card p-4 text-sm"
+    >
+      <p className="font-medium">Last refresh failed</p>
+      <p className="break-words">{error}</p>
+      <p className="text-muted-foreground">
+        Showing data from the previous load while waiting to retry.
+      </p>
+      <Button variant="outline" size="sm" onClick={refresh}>
+        Try again
+      </Button>
+    </div>
+  );
+}
+
 type Catalog = {
   projects: Project[];
   types: TaskType[];
@@ -415,7 +442,8 @@ function TaskDetail({
               : " · Loading details"}
           </DialogDescription>
         </DialogHeader>
-        {error && <ConnectionError error={error} refresh={refresh} />}
+        {error && !data && <ConnectionError error={error} refresh={refresh} />}
+        {error && data && <StaleDataBanner error={error} refresh={refresh} />}
         {!data && !error && <EmptyState>Loading task…</EmptyState>}
         {task && data && (
           <>
@@ -590,7 +618,8 @@ function Board() {
             Reconnecting to bb… The board will refresh when connected.
           </p>
         )}
-        {error && <ConnectionError error={error} refresh={refresh} />}
+        {error && !data && <ConnectionError error={error} refresh={refresh} />}
+        {error && data && <StaleDataBanner error={error} refresh={refresh} />}
         {!data && !error && <EmptyState>Loading tasks…</EmptyState>}
         {data && (
           <>
