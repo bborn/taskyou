@@ -61,6 +61,18 @@ type Server struct {
 	// often it retries. 0 uses the annotationNudge* defaults; tests shrink them.
 	nudgeWindow time.Duration
 	nudgeRetry  time.Duration
+
+	// moveMu guards moveLocks, the map of per-source-task.Mutexes serializing
+	// the moveTask critical section (requireTask → teardown → DeleteTask →
+	// CreateTask) introduced in 2c1f5fd. Without it, two concurrent movers of
+	// the same task both read the still-existing row and each INSERT a
+	// distinct new row, duplicating the task and fanning out one "created"
+	// notification per duplicate to every subscriber. Different tasks get
+	// different locks so unrelated moves on a board stay concurrent; the
+	// refcount lets the last user out of a per-task lock drop its entry so
+	// the map can't grow without bound on a long-running daemon.
+	moveMu    sync.Mutex
+	moveLocks map[int64]*moveLock
 }
 
 // agentSender delivers prompts to a task's live agent: one path, shared with the

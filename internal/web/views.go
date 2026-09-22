@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -60,7 +61,7 @@ func (s *Server) handleGetView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := s.db.ListTasks(db.ListTasksOptions{IncludeClosed: true})
+	tasks, err := s.db.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: -1})
 	if err != nil {
 		jsonErr(w, "failed to list tasks", http.StatusInternalServerError)
 		return
@@ -92,7 +93,6 @@ func (s *Server) handleUpdateView(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = view.Name
 	}
-	renaming := !strings.EqualFold(name, view.Name)
 
 	// Validate BEFORE touching anything. Deleting the old row first meant a
 	// rejected name (too long, blank) destroyed the original and returned a 500:
@@ -101,34 +101,39 @@ func (s *Server) handleUpdateView(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if renaming {
-		// SaveView upserts by name, so renaming onto another view would silently
-		// overwrite it. Refuse instead — losing a view to a rename is the same
-		// data loss in a different costume.
-		existing, err := s.db.GetSavedView(name)
-		if err != nil {
-			jsonErr(w, "failed to check the new name", http.StatusInternalServerError)
-			return
-		}
-		if existing != nil {
-			jsonErr(w, fmt.Sprintf("a view named %q already exists", existing.Name), http.StatusConflict)
-			return
-		}
-	}
 
-	// Write the replacement first; only drop the original once it exists.
-	updated, err := s.db.SaveView(name, req.Query)
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	renaming := !strings.EqualFold(name, view.Name)
+
+	var (
+		updated *db.SavedView
+		err     error
+	)
 	if renaming {
-		if err := s.db.DeleteSavedView(view.Name); err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		// SaveView upserts by name, so renaming onto another view would
+		// silently overwrite it. Refuse instead — losing a view to a rename is
+		// the same data loss in a different costume. The conflict check and
+		// the writes run in one transaction (db.RenameView) so two concurrent
+		// renames onto the same fresh target name cannot both succeed: exactly
+		// one wins (200) and the others get 409 with their source view intact.
+		// The prior form performed the GetSavedView check outside any lock or
+		// transaction, leaving a TOCTOU window where a loser overwrote the
+		// winner's target row and then deleted its own source.
+		updated, err = s.db.RenameView(view.Name, name, req.Query)
+	} else {
+		// Editing in place: SaveView's atomic upsert is the whole story, and
+		// there is no target name to collide with.
+		updated, err = s.db.SaveView(name, req.Query)
 	}
-	jsonOK(w, updated)
+	switch {
+	case err == nil:
+		jsonOK(w, updated)
+	case errors.Is(err, db.ErrViewAlreadyExists):
+		jsonErr(w, fmt.Sprintf("a view named %q already exists", name), http.StatusConflict)
+	case errors.Is(err, db.ErrViewNotFound):
+		jsonErr(w, "view not found", http.StatusNotFound)
+	default:
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleDeleteView(w http.ResponseWriter, r *http.Request) {

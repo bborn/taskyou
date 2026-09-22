@@ -270,7 +270,7 @@ func parseViewQuery(database *db.DB, query string) taskfilter.Query {
 // tasksForView returns every task a view matches. It reads the whole task list
 // (including closed tasks) because a view is free to ask for done ones.
 func tasksForView(database *db.DB, view *db.SavedView) ([]*db.Task, error) {
-	tasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true})
+	tasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: -1})
 	if err != nil {
 		return nil, err
 	}

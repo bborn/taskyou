@@ -670,6 +670,298 @@ func gitCurrentBranchSkipErr(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// TestRemoteWorktreeScriptFastForwardsStaleLocalRefToOrigin pins the cross-host
+// sequential-revisit bug: a host that ran an earlier phase of a multi-host
+// sequential pipeline carries a stale local refs/heads/<shared> at that earlier
+// phase's pushed tip (created by the phase's case-2 attach and advanced by its
+// in-worktree commit). When another host later advances origin/<shared> and
+// the revisiting host runs a later sequential phase, the modeAttach case-1 arm
+// used to attach to refs/heads/$branch VERBATIM — without fast-forwarding it to
+// origin/<branch> first — so the new worktree started at the stale tip and the
+// immediately-preceding phase's content was absent. The fix mirrors
+// addSourceBranchWorktree's fast-forward guard (executor.go:6421-6429): when
+// origin/$branch exists and the local ref is a STRICT ancestor of it (never the
+// reverse), advance the local ref before attaching — so a local ref that
+// carries this workflow's own unpushed commits is never force-moved over them.
+//
+// The "behind origin" sub-test seeds the behind-origin configuration the
+// existing suite never exercised (every existing case-1 test seeds the local
+// ref AT origin, where the missing fast-forward is a no-op), keeps a
+// predecessor's worktree on the branch (the production design keeps finished
+// worktrees) so the holder-detach path also runs, then renders and runs
+// remoteWorktreeScript(modeAttach) and asserts the worktree starts at
+// origin/<shared> with the immediately-preceding phase's content present. The
+// "ahead of origin" sub-test is the regression guard for the strict-ancestor
+// guard: a local ref with unpushed commits beyond origin must be preserved
+// (the local path's "never when the two have diverged" promise).
+func TestRemoteWorktreeScriptFastForwardsStaleLocalRefToOrigin(t *testing.T) {
+	const shared = "pipeline/1-revisit"
+
+	t.Run("behind origin fast-forwards to origin tip", func(t *testing.T) {
+		origin, repo := remoteScriptRepo(t, shared)
+		// remoteScriptRepo leaves origin/<shared> at "phase 1" (P1) with the
+		// host clone carrying only an origin remote-tracking ref for it.
+
+		gitIn := func(dir string, args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = gitEnv()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+			}
+		}
+		revParse := func(dir, ref string) string {
+			t.Helper()
+			out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output()
+			if err != nil {
+				t.Fatalf("rev-parse %s in %s: %v", ref, dir, err)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		isAncestor := func(ancestor, descendant string) bool {
+			cmd := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", ancestor, descendant)
+			cmd.Env = gitEnv()
+			return cmd.Run() == nil
+		}
+
+		// P1 ran on THIS host: case-2 attach created refs/heads/<shared> at
+		// origin's current tip (P1) and a worktree holding the branch. The
+		// production design keeps the finished step's worktree
+		// (remote_worktree.go:225-227), so it keeps <shared> checked out —
+		// the holder-detach paragraph must run before the case-1 attach.
+		p1wt := filepath.Join(repo, ".task-worktrees", "1-plan")
+		gitIn(repo, "worktree", "add", "-b", shared, p1wt, "origin/"+shared)
+
+		// Another host advances origin/<shared> with the immediately-preceding
+		// phase's work (P2). A second clone of the same bare origin moves
+		// origin/<shared> past the local ref on this host.
+		root := filepath.Dir(repo)
+		hostB := filepath.Join(root, "hostB")
+		gitIn(root, "clone", "-q", origin, hostB)
+		gitIn(hostB, "checkout", "-q", shared)
+		if err := os.WriteFile(filepath.Join(hostB, "OUT2.md"), []byte("phase 2 output\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(hostB, "add", "-A")
+		gitIn(hostB, "commit", "-q", "-m", "phase 2")
+		gitIn(hostB, "push", "-q", "origin", "HEAD:"+shared)
+
+		// The revisiting host fetches: refs/remotes/origin/<shared> advances
+		// to P2, refs/heads/<shared> stays at P1 (fetch never moves local
+		// heads). This is the behind-origin config the fix targets.
+		gitIn(repo, "fetch", "-q", "origin")
+		localTip := revParse(repo, "refs/heads/"+shared)
+		originTip := revParse(repo, "refs/remotes/origin/"+shared)
+		if localTip == originTip {
+			t.Fatalf("fixture: local ref == origin tip; the behind-origin config was not produced")
+		}
+		if !isAncestor(localTip, originTip) {
+			t.Fatalf("fixture: local ref %s is not an ancestor of origin tip %s", localTip, originTip)
+		}
+
+		// Render remoteWorktreeScript(modeAttach) — NOT bare `git worktree add`
+		// — so the holder-detach + fast-forward + attach path all execute.
+		task := &db.Task{ID: 3, Title: "phase three", SourceBranch: shared}
+		script := scriptForTask(t, task, repo)
+		p3wt := filepath.Join(repo, ".task-worktrees", "3-phase-three")
+		runScript(t, script)
+
+		// (a) HEAD == origin/<shared>: the worktree started at the
+		// immediately-preceding phase's tip, not the stale local tip.
+		if got := revParse(p3wt, "HEAD"); got != originTip {
+			t.Errorf("worktree HEAD = %s, want origin tip %s (attached to stale local ref)", got, originTip)
+		}
+		// (b) OUT2.md present — the immediately-preceding phase's content. The
+		// current bug drops this: it attaches at P1, before OUT2.md existed.
+		if _, err := os.Stat(filepath.Join(p3wt, "OUT2.md")); err != nil {
+			t.Errorf("immediately-preceding phase's OUT2.md is ABSENT: %v", err)
+		}
+		// phase1.txt (P1's file, still in history) must also be present, so the
+		// OUT2.md check is not vacuous.
+		if _, err := os.Stat(filepath.Join(p3wt, "phase1.txt")); err != nil {
+			t.Errorf("predecessor phase1.txt is ABSENT: %v", err)
+		}
+		// (c) The worktree is on refs/heads/<shared>, not detached — the
+		// fast-forward advanced the local ref, then `worktree add <wt> <branch>`
+		// attached to it (a detached HEAD would mean the agent's later
+		// `git push` lands its commits nowhere).
+		symOut, err := exec.Command("git", "-C", p3wt, "symbolic-ref", "HEAD").Output()
+		if err != nil {
+			t.Fatalf("symbolic-ref HEAD in worktree: %v", err)
+		}
+		if got, want := strings.TrimSpace(string(symOut)), "refs/heads/"+shared; got != want {
+			t.Errorf("worktree HEAD symbolic-ref = %q, want %q (fast-forward must not detach)", got, want)
+		}
+		// (d) The local ref was actually advanced to origin's tip — a later
+		// revisit on this same host must not re-bite.
+		if got := revParse(repo, "refs/heads/"+shared); got != originTip {
+			t.Errorf("local ref refs/heads/%s = %s, want origin tip %s (was not fast-forwarded)", shared, got, originTip)
+		}
+	})
+
+	t.Run("ahead of origin preserves local commits", func(t *testing.T) {
+		_, repo := remoteScriptRepo(t, shared)
+		// remoteScriptRepo: origin/<shared> at P1, host clone with origin ref only.
+
+		gitIn := func(dir string, args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = gitEnv()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+			}
+		}
+		revParse := func(dir, ref string) string {
+			t.Helper()
+			out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output()
+			if err != nil {
+				t.Fatalf("rev-parse %s in %s: %v", ref, dir, err)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		isAncestor := func(ancestor, descendant string) bool {
+			cmd := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", ancestor, descendant)
+			cmd.Env = gitEnv()
+			return cmd.Run() == nil
+		}
+
+		// The host ran P1: case-2 attach created the local ref at P1 and a
+		// worktree holding it.
+		p1wt := filepath.Join(repo, ".task-worktrees", "1-plan")
+		gitIn(repo, "worktree", "add", "-b", shared, p1wt, "origin/"+shared)
+		// The previous phase committed its work (advancing refs/heads/<shared>
+		// beyond origin) but the push was silently rejected / never landed —
+		// the "local side carries this workflow's own commits" case the local
+		// path's guard explicitly protects. Do NOT push: origin/<shared>
+		// stays at P1 while refs/heads/<shared> moves to P1+extra.
+		if err := os.WriteFile(filepath.Join(p1wt, "EXTRA.md"), []byte("unpushed local work\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(p1wt, "add", "-A")
+		gitIn(p1wt, "commit", "-q", "-m", "unpushed local commit")
+		gitIn(repo, "fetch", "-q", "origin")
+
+		localTip := revParse(repo, "refs/heads/"+shared)
+		originTip := revParse(repo, "refs/remotes/origin/"+shared)
+		if localTip == originTip {
+			t.Fatalf("fixture: local ref == origin tip; the ahead-of-origin config was not produced")
+		}
+		// local is NOT an ancestor of origin — origin is an ancestor of local.
+		if isAncestor(localTip, originTip) {
+			t.Fatalf("fixture: local ref %s IS an ancestor of origin tip %s (expected strictly ahead)", localTip, originTip)
+		}
+
+		task := &db.Task{ID: 2, Title: "phase two", SourceBranch: shared}
+		script := scriptForTask(t, task, repo)
+		wt := filepath.Join(repo, ".task-worktrees", "2-phase-two")
+		runScript(t, script)
+
+		// The strict-ancestor guard must NOT fast-forward: the worktree
+		// attaches to the local tip (P1+extra), preserving the unpushed
+		// commit. Force-moving to origin would have discarded EXTRA.md.
+		if got := revParse(wt, "HEAD"); got != localTip {
+			t.Errorf("worktree HEAD = %s, want local tip %s (strict-ancestor guard should not fast-forward an ahead local ref)", got, localTip)
+		}
+		if _, err := os.Stat(filepath.Join(wt, "EXTRA.md")); err != nil {
+			t.Errorf("unpushed local commit's EXTRA.md is ABSENT (guard force-moved the local ref over it): %v", err)
+		}
+		if got := revParse(repo, "refs/heads/"+shared); got != localTip {
+			t.Errorf("local ref refs/heads/%s = %s, want unchanged %s (guard must not move an ahead local ref)", shared, got, localTip)
+		}
+	})
+
+	t.Run("diverged from origin preserves local commits", func(t *testing.T) {
+		// Belt-and-braces for the strict-ancestor guard's diverged branch
+		// (G4): when local and origin have EACH advanced with commits the
+		// other doesn't have (neither is an ancestor of the other), the guard
+		// must NOT fast-forward — force-moving the local ref to origin would
+		// discard the local-only commits. The "ahead" sub-test already
+		// exercises the same `gitIsAncestor(local, origin)==false` guard
+		// branch; this sub-test makes the divergence explicit by also
+		// advancing origin past the common base.
+		origin, repo := remoteScriptRepo(t, shared)
+
+		gitIn := func(dir string, args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = gitEnv()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+			}
+		}
+		revParse := func(dir, ref string) string {
+			t.Helper()
+			out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output()
+			if err != nil {
+				t.Fatalf("rev-parse %s in %s: %v", ref, dir, err)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		isAncestor := func(ancestor, descendant string) bool {
+			cmd := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", ancestor, descendant)
+			cmd.Env = gitEnv()
+			return cmd.Run() == nil
+		}
+
+		// Local side: host ran P1 (case-2 attach at P1) and committed an
+		// unpushed local-only commit on top.
+		p1wt := filepath.Join(repo, ".task-worktrees", "1-plan")
+		gitIn(repo, "worktree", "add", "-b", shared, p1wt, "origin/"+shared)
+		if err := os.WriteFile(filepath.Join(p1wt, "LOCAL.md"), []byte("local-only\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(p1wt, "add", "-A")
+		gitIn(p1wt, "commit", "-q", "-m", "local-only commit")
+
+		// Origin side: a different host advances origin/<shared> with a
+		// commit the local side does NOT have (origin-only commit). Now
+		// local and origin have diverged from the P1 base.
+		root := filepath.Dir(repo)
+		hostB := filepath.Join(root, "hostB-div")
+		gitIn(root, "clone", "-q", origin, hostB)
+		gitIn(hostB, "checkout", "-q", shared)
+		if err := os.WriteFile(filepath.Join(hostB, "REMOTE.md"), []byte("origin-only\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(hostB, "add", "-A")
+		gitIn(hostB, "commit", "-q", "-m", "origin-only commit")
+		gitIn(hostB, "push", "-q", "origin", "HEAD:"+shared)
+
+		gitIn(repo, "fetch", "-q", "origin")
+		localTip := revParse(repo, "refs/heads/"+shared)
+		originTip := revParse(repo, "refs/remotes/origin/"+shared)
+		if localTip == originTip {
+			t.Fatalf("fixture: local ref == origin tip; divergence was not produced")
+		}
+		if isAncestor(localTip, originTip) {
+			t.Fatalf("fixture: local IS an ancestor of origin (expected diverged): %s < %s", localTip, originTip)
+		}
+		if isAncestor(originTip, localTip) {
+			t.Fatalf("fixture: origin IS an ancestor of local (expected diverged): %s < %s", originTip, localTip)
+		}
+
+		task := &db.Task{ID: 2, Title: "phase two", SourceBranch: shared}
+		script := scriptForTask(t, task, repo)
+		wt := filepath.Join(repo, ".task-worktrees", "2-phase-two")
+		runScript(t, script)
+
+		// Guard must NOT fast-forward: the worktree attaches to the local
+		// tip, preserving the local-only commit. LOCAL.md stays present.
+		if got := revParse(wt, "HEAD"); got != localTip {
+			t.Errorf("worktree HEAD = %s, want local tip %s (guard must not fast-forward a diverged local ref)", got, localTip)
+		}
+		if _, err := os.Stat(filepath.Join(wt, "LOCAL.md")); err != nil {
+			t.Errorf("local-only commit's LOCAL.md is ABSENT (guard force-moved the diverged local ref over it): %v", err)
+		}
+		if got := revParse(repo, "refs/heads/"+shared); got != localTip {
+			t.Errorf("local ref refs/heads/%s = %s, want unchanged %s (guard must not move a diverged local ref)", shared, got, localTip)
+		}
+	})
+}
+
 // ============ setupRemoteWorktree: end-to-end against a stub ssh ============
 
 // TestSetupRemoteWorktreeHonorsSourceBranchSequentialAndFanOut is the
