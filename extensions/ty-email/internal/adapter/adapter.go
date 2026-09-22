@@ -52,6 +52,15 @@ type Adapter interface {
 	// For polling adapters, this starts the poll loop.
 	Start(ctx context.Context) error
 
+	// PollOnce runs a single poll synchronously and returns once the poll's
+	// push loop has completed (or errored). It is used by one-shot callers
+	// (e.g. the "process" subcommand) so that an empty emails channel means
+	// "no more emails this run" rather than a momentary-empty race with a
+	// still-running producer. For long-running callers (e.g. the "serve"
+	// subcommand) Start's background poll loop is preferred over PollOnce.
+	// Push-based adapters may implement PollOnce as a no-op that returns nil.
+	PollOnce(ctx context.Context) error
+
 	// Stop gracefully shuts down the adapter.
 	Stop() error
 

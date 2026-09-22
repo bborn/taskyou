@@ -116,7 +116,11 @@ func (a *IMAPAdapter) pollLoop(ctx context.Context, interval time.Duration) {
 	defer ticker.Stop()
 
 	// Initial poll
-	a.poll(ctx)
+	//
+	// poll returns an error but already logs every failure path itself, so
+	// callers can safely drop it here: continued polling is desired even after
+	// a transient failure (the next ticker tick will retry).
+	_ = a.poll(ctx)
 
 	for {
 		select {
@@ -125,12 +129,27 @@ func (a *IMAPAdapter) pollLoop(ctx context.Context, interval time.Duration) {
 		case <-a.stopCh:
 			return
 		case <-ticker.C:
-			a.poll(ctx)
+			_ = a.poll(ctx)
 		}
 	}
 }
 
-func (a *IMAPAdapter) poll(ctx context.Context) {
+// poll runs a single fetch cycle. It returns an error (already logged via
+// a.logger) so one-shot callers like PollOnce can propagate failures.
+//
+// The fetch uses BODY.PEEK[] (Peek: true) so the IMAP server does NOT
+// implicitly set \Seen during the FETCH (RFC 3501 §6.4.5). Messages are
+// only marked \Seen by MarkProcessed, which runs after the email has been
+// successfully handled. Without PEEK, any email that is fetched but then
+// dropped (e.g. the consumer is slow, the adapter is stopped, or the email
+// is deferred by the rate limiter) would be permanently skipped by the next
+// poll's NotFlag:\Seen search, causing silent permanent mail loss.
+//
+// The push into emailsCh blocks (with select on stopCh/ctx.Done) rather than
+// dropping on a full channel: a slow consumer must exert backpressure instead
+// of causing loss. The drop-on-full arm previously combined with the
+// non-PEEK FETCH to make every dropped message permanently invisible.
+func (a *IMAPAdapter) poll(ctx context.Context) error {
 	a.mu.Lock()
 	client := a.client
 	a.mu.Unlock()
@@ -138,7 +157,7 @@ func (a *IMAPAdapter) poll(ctx context.Context) {
 	if client == nil {
 		if err := a.connect(); err != nil {
 			a.logger.Error("failed to reconnect", "error", err)
-			return
+			return err
 		}
 		a.mu.Lock()
 		client = a.client
@@ -157,7 +176,7 @@ func (a *IMAPAdapter) poll(ctx context.Context) {
 		// A failed SELECT usually means the connection died. Drop it so the
 		// next poll reconnects instead of failing forever.
 		a.resetConnection()
-		return
+		return err
 	}
 
 	// Search for unseen messages
@@ -168,29 +187,30 @@ func (a *IMAPAdapter) poll(ctx context.Context) {
 	if err != nil {
 		a.logger.Error("failed to search emails", "error", err)
 		a.resetConnection()
-		return
+		return err
 	}
 
 	// Get sequence numbers from search results
 	seqNums := searchData.AllSeqNums()
 	if len(seqNums) == 0 {
-		return
+		return nil
 	}
 
 	// Build sequence set
 	seqSet := imap.SeqSetNum(seqNums...)
 
-	// Fetch messages
+	// Fetch messages with PEEK so \Seen is only set by MarkProcessed after
+	// successful processing. See the poll doc comment for why this matters.
 	fetchOptions := &imap.FetchOptions{
 		Envelope:    true,
-		BodySection: []*imap.FetchItemBodySection{{}},
+		BodySection: []*imap.FetchItemBodySection{{Peek: true}},
 	}
 
 	messages, err := client.Fetch(seqSet, fetchOptions).Collect()
 	if err != nil {
 		a.logger.Error("failed to fetch emails", "error", err)
 		a.resetConnection()
-		return
+		return err
 	}
 
 	for _, msg := range messages {
@@ -200,13 +220,33 @@ func (a *IMAPAdapter) poll(ctx context.Context) {
 			continue
 		}
 
+		// Block until the consumer drains, the adapter is stopped, or the
+		// context is cancelled. Blocking (rather than dropping on a full
+		// channel) turns a >cap backlog into backpressure instead of loss;
+		// combined with PEEK, even a cancelled/abandoned poll leaves the
+		// unfetched-or-unpushed messages unseen and re-eligible for the next
+		// poll.
 		select {
 		case a.emailsCh <- email:
 			a.logger.Info("received email", "from", email.From, "subject", email.Subject)
-		default:
-			a.logger.Warn("email channel full, dropping message")
+		case <-a.stopCh:
+			a.logger.Warn("adapter stopped, abandoning pending messages")
+			return nil
+		case <-ctx.Done():
+			a.logger.Warn("context done, abandoning pending messages", "error", ctx.Err())
+			return ctx.Err()
 		}
 	}
+	return nil
+}
+
+// PollOnce runs a single poll synchronously and returns once the poll's push
+// loop has completed (or errored). It is used by one-shot callers (processCmd)
+// so that "the channel is empty" genuinely means "no more emails this run",
+// rather than the momentary-empty race produced by a sleep-then-drain pattern.
+// PollOnce connects on demand like poll does.
+func (a *IMAPAdapter) PollOnce(ctx context.Context) error {
+	return a.poll(ctx)
 }
 
 func (a *IMAPAdapter) parseMessage(msg *imapclient.FetchMessageBuffer) (*Email, error) {

@@ -252,6 +252,22 @@ func remoteWorktreeScript(repo, dirName, branch string, mode remoteWorktreeMode,
 			`  esac`,
 			`fi`,
 			`if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then`,
+			// Fast-forward a strictly-behind local ref to origin/<branch> before
+			// attaching, mirroring addSourceBranchWorktree (executor.go:6421-6429).
+			// A host that ran an earlier phase carries refs/heads/<branch> at the
+			// earlier phase's tip; `git fetch` advances only refs/remotes/origin/*
+			// and leaves refs/heads/* untouched, so attaching to the local ref
+			// verbatim would start the next phase from a stale baseline. The
+			// strict-ancestor pair guards against divergence: only when the local
+			// ref is an ancestor of origin/<branch> AND the reverse is not true
+			// (i.e. strictly behind, not equal and not ahead/diverged) is the ref
+			// moved — so a local ref that carries this workflow's own unpushed
+			// commits is never force-moved over them.
+			`  if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch" &&`,
+			`     git -C "$repo" merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch" &&`,
+			`     ! git -C "$repo" merge-base --is-ancestor "refs/remotes/origin/$branch" "refs/heads/$branch"; then`,
+			`    git -C "$repo" update-ref "refs/heads/$branch" "refs/remotes/origin/$branch" >&2`,
+			`  fi`,
 			`  git -C "$repo" worktree add "$wt" "$branch" >&2`,
 			`elif git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then`,
 			`  git -C "$repo" worktree add -b "$branch" "$wt" "origin/$branch" >&2`,
