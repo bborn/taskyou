@@ -130,7 +130,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	// rows BEFORE filtering. Widen the fetch and re-apply the limit below.
 	filterQuery := strings.TrimSpace(q.Get("filter"))
 	if filterQuery != "" {
-		opts.Limit = 0
+		opts.Limit = -1
 		opts.IncludeClosed = true
 	}
 
