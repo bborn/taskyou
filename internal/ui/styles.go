@@ -173,19 +173,6 @@ var (
 	ColorDone       = lipgloss.Color("#98C379") // Green
 	ColorBlocked    = lipgloss.Color("#E06C75") // Red
 
-	// Default project colors palette - used when no color is set
-	// These are distinct, visually pleasing colors for project labels
-	DefaultProjectColors = []string{
-		"#C678DD", // Purple
-		"#61AFEF", // Blue
-		"#56B6C2", // Cyan
-		"#98C379", // Green
-		"#E5C07B", // Yellow
-		"#E06C75", // Red/Pink
-		"#D19A66", // Orange
-		"#ABB2BF", // Gray
-	}
-
 	// Type colors (fixed, not theme-dependent)
 	ColorCode     = lipgloss.Color("#C678DD") // Purple
 	ColorWriting  = lipgloss.Color("#E5C07B") // Yellow
@@ -274,20 +261,6 @@ var (
 		Italic(true)
 )
 
-// StatusStyle returns the style for a given status.
-func StatusStyle(status string) lipgloss.Style {
-	switch status {
-	case "queued", "processing":
-		return StatusInProgress
-	case "done":
-		return StatusDone
-	case "blocked":
-		return StatusBlocked
-	default:
-		return Dim
-	}
-}
-
 // StatusIcon returns the icon for a given status.
 func StatusIcon(status string) string {
 	switch status {
@@ -326,15 +299,6 @@ func SetProjectColor(project, color string) {
 	projectColorCache[project] = color
 	projectColorMu.Unlock()
 	bumpStyleGeneration()
-}
-
-// GetDefaultProjectColor returns a default color for a project based on its index.
-// Used when a project doesn't have a color set.
-func GetDefaultProjectColor(index int) string {
-	if index < 0 {
-		index = 0
-	}
-	return DefaultProjectColors[index%len(DefaultProjectColors)]
 }
 
 // LoadProjectColors loads all project colors from the database into the cache.
