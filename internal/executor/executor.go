@@ -6860,6 +6860,25 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 	// Clear archive state
 	e.db.ClearArchiveState(task.ID)
 
+	// The worktree is now HERE, so any placement decision that named another
+	// host (the one this task ran on before it was archived) is stale. Nothing
+	// else in the archive/unarchive path writes placement_target, so without
+	// this it stays pointed at the old host while the task is genuinely
+	// running on this machine — and TaskCodeLocation.Remote(), the browser
+	// bridge's resolveTaskRoot, and the editor surfaces all believe the code
+	// is somewhere the agent cannot reach. Clear it here, the moment the
+	// local worktree is restored, so PlacementTarget keeps meaning "where this
+	// task runs": the same field-set a real local decision writes. resolvePlacement
+	// also clears this for the spawn path; this covers a direct unarchive that
+	// is not yet followed by a spawn (the board's unarchive button).
+	if IsRemotePlacement(task.PlacementTarget) {
+		if err := e.db.CommitTaskPlacement(task.ID, "", "unarchived locally (placement cleared)", "", ""); err != nil {
+			e.logger.Warn("could not clear stale placement for an unarchived task",
+				"task", task.ID, "error", err)
+		}
+		task.PlacementTarget = ""
+	}
+
 	// Run init script
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
