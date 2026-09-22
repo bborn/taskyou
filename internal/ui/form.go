@@ -219,11 +219,16 @@ type hostChoice struct {
 }
 
 // hostsLoadedMsg carries the machines a placement plugin offered. It names the
-// project it answered for: the answer arrives after an out-of-process call, by
-// which time the user may have cycled to a different project.
+// project and the executor it answered for: the answer arrives after an
+// out-of-process call, by which time the user may have cycled to a different
+// project or a different executor (each FieldExecutor keystroke fires this
+// lookup), so an answer for a prior executor — e.g. a slow lookup for claude
+// landing after the user switched to a non-remote executor like gemini — must
+// not repopulate the selector with machines that cannot be honoured.
 type hostsLoadedMsg struct {
-	project string
-	choices []hostChoice
+	project  string
+	executor string
+	choices  []hostChoice
 }
 
 // loadHosts asks the placement plugin which machines could run a task in this
@@ -245,7 +250,7 @@ func (m *FormModel) loadHosts() tea.Cmd {
 		defer cancel()
 		hosts := executor.PlacementChoices(ctx, database, project, executorName)
 		if len(hosts) == 0 {
-			return hostsLoadedMsg{project: project}
+			return hostsLoadedMsg{project: project, executor: executorName}
 		}
 		choices := []hostChoice{
 			{Label: "automatic"},
@@ -254,7 +259,7 @@ func (m *FormModel) loadHosts() tea.Cmd {
 		for _, h := range hosts {
 			choices = append(choices, hostChoice{Label: h.Name, Target: h.Target, WorkDir: h.WorkDir})
 		}
-		return hostsLoadedMsg{project: project, choices: choices}
+		return hostsLoadedMsg{project: project, executor: executorName, choices: choices}
 	}
 }
 
@@ -667,10 +672,15 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// The placement plugin answered which machines could run this task.
 	case hostsLoadedMsg:
-		// Ignore an answer for a project the user has already cycled past: the
-		// lookup is out-of-process, so a slow fleet must not repopulate the
-		// selector with the previous project's machines.
-		if msg.project != m.project {
+		// Ignore an answer the user has already cycled past: the lookup is
+		// out-of-process, so a slow fleet must not repopulate the selector with
+		// the previous project's machines, and a prior executor's answer must
+		// not overwrite the current one — every FieldExecutor keystroke fires
+		// this lookup, and only some executors can be launched over SSH, so a
+		// stale answer from a remote-capable executor repopulating the selector
+		// after a switch to one that cannot run remotely would offer a choice
+		// ChoosePlacement would refuse on submit.
+		if msg.project != m.project || msg.executor != m.executor {
 			return m, nil
 		}
 		// Keep the machine the user already picked if the new list still has it;
