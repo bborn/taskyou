@@ -46,6 +46,16 @@ func (db *DB) BeginRemoteRun(taskID int64, host string) (string, error) {
 	return id, err
 }
 
+// IsCurrentRemoteRun reports whether runID is the run task taskID is on right
+// now, on host. It is the identity check for a relayed MCP call: a placed agent
+// names its task and run, and only the live run on the host that placed it is
+// answered — an earlier attempt, or a task that has since moved, is not.
+func (db *DB) IsCurrentRemoteRun(taskID int64, runID, host string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM remote_runs WHERE task_id=? AND run_id=? AND host=?`, taskID, runID, host).Scan(&n)
+	return n > 0, err
+}
+
 // RemoteEvent is a durable inbox entry. The sender retains it until this DB
 // accepts it; reads are repeatable until the task's next run replaces its fence.
 type RemoteEvent struct {

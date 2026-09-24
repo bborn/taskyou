@@ -2,11 +2,13 @@ package executor
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,9 +85,22 @@ type hostChannel struct {
 	// an agent that said "needs-input" and then "done" is done.
 	events map[int64]hostEvent
 
+	// relay answers the MCP requests placed tasks send up this connection (see
+	// mcpproxy.go). nil answers every one with an error.
+	relay relayFunc
+	// wch queues what ty sends DOWN the connection — pings, and relay acks and
+	// answers — for the current connection's writer. nil between connections.
+	// Sends never block: a wedged connection drops them, and the host's stubs
+	// then see a stale ping and fail fast, which is the point.
+	wch   chan []byte
+	wdone chan struct{}
+
 	stop context.CancelFunc
 	done chan struct{}
 }
+
+// relayFunc answers one relayed MCP request from host.
+type relayFunc func(host, name string, payload []byte) []byte
 
 // hostAgentScript is the POSIX shell the host runs.
 //
@@ -124,6 +139,53 @@ for d in ${TMPDIR:-/tmp}/ty-hostagent-*; do
   [ "$d" = "$state" ] || kill -0 "$p" 2>/dev/null || rm -rf "$d"
 done
 sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-16; else cksum | cut -d" " -f1; fi; }
+# The MCP relay (mcpproxy.go). Stubs spool requests in $relay; this agent
+# carries them up as M lines, and what ty sends DOWN arrives on stdin: P (still
+# here), A (received), R (the answer). A background job would read /dev/null,
+# so the reader is handed the channel explicitly — and not stdout, which it never
+# writes and must not hold open once this agent is gone.
+relay="$spool/mcp"
+mkdir -p "$relay" 2>/dev/null || true
+named() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+stamp() { printf '%s\n' "$1" >"$relay/.alive.$$" && mv -f "$relay/.alive.$$" "$relay/alive"; }
+exec 3<&0
+(
+  last=
+  while IFS=' ' read -r op name body; do
+    case "$op" in
+      P) now=$(date +%s); printf '%s\n' "$now" >"$state/alive"; stamp "$now"; last=$now ;;
+      A) named "$name" && : >"$relay/$name.ack" ;;
+      R) named "$name" && printf '%s' "$body" | base64 -d >"$relay/.$name.part" 2>/dev/null &&
+           mv -f "$relay/.$name.part" "$relay/$name.resp" ;;
+    esac
+  done
+  # ty hung up: say so now rather than letting stubs learn it from a stale
+  # stamp — unless a newer agent has stamped since. A connection that died
+  # silently (the Mac asleep) can reach EOF hours after its replacement is up.
+  [ "$(cat "$relay/alive" 2>/dev/null)" != "$last" ] || stamp 0
+) <&3 >/dev/null &
+exec 3<&-
+fresh() {
+  a=$(cat "$state/alive" 2>/dev/null) || return 1
+  case "$a" in ''|*[!0-9]*) return 1 ;; esac
+  [ $(( $(date +%s) - a )) -le @@STALE@@ ]
+}
+# A request is claimed by renaming it, so of two agents (a redial overlapping a
+# dying one) exactly one sends it — and only one that has heard from ty lately,
+# so a request is not handed to a connection nobody is reading.
+forward() {
+  for f in "$relay"/*.req; do
+    [ -f "$f" ] || continue
+    fresh || return 0
+    r=${f##*/}; r=${r%.req}
+    named "$r" || { rm -f "$f"; continue; }
+    mv "$f" "$relay/$r.sent" 2>/dev/null || continue
+    printf 'M %s %s\n' "$r" "$(base64 <"$relay/$r.sent" | tr -d '\n')"
+    rm -f "$relay/$r.sent"
+  done
+}
+if sleep 0.2 2>/dev/null; then slice=0.2 per=5; else slice=1 per=1; fi
+sweep=0
 while :; do
   printf 'S\n'
   if tmux list-windows -a -F '#{session_name}:#{window_name}' >"$state/windows" 2>/dev/null; then
@@ -151,7 +213,18 @@ while :; do
     done <"$f"
   done
   printf 'H\n'
-  sleep "$tick"
+  # Answers nobody collected (a stub that gave up, or died) are swept eventually.
+  sweep=$((sweep + 1))
+  if [ "$sweep" -ge 60 ]; then
+    sweep=0
+    find "$relay" -type f -mmin +20 ! -name alive -exec rm -f {} + 2>/dev/null
+  fi
+  i=0
+  while [ "$i" -lt $((tick * per)) ]; do
+    forward
+    sleep "$slice"
+    i=$((i + 1))
+  done
 done
 `
 
@@ -162,8 +235,9 @@ func hostAgentProgram(coordinators ...string) string {
 	if len(coordinators) > 0 {
 		coordinator = coordinators[0]
 	}
-	return "WORKTREE_COORDINATOR_ID=" + shellQuote(coordinator) + "\n" + fmt.Sprintf("TY_HOST_TICK=%d\n", int(hostAgentTick.Seconds())) +
-		strings.ReplaceAll(hostAgentScript, spoolToken, remoteSpoolDir)
+	script := strings.ReplaceAll(hostAgentScript, spoolToken, remoteSpoolDir)
+	script = strings.ReplaceAll(script, "@@STALE@@", strconv.Itoa(int(mcpRelayStale.Seconds())))
+	return "WORKTREE_COORDINATOR_ID=" + shellQuote(coordinator) + "\n" + fmt.Sprintf("TY_HOST_TICK=%d\n", int(hostAgentTick.Seconds())) + script
 }
 
 // Window reports what the host last said about a target ("session:window").
@@ -222,6 +296,8 @@ func (c *hostChannel) consume(r io.Reader, carry map[string]string) {
 			if target != "" {
 				pending[target] = win
 			}
+		case strings.HasPrefix(line, "M "):
+			c.relayRequest(line)
 		case strings.HasPrefix(line, "E "):
 			// Signals are published as they arrive rather than held for the end of
 			// the tick. A window snapshot is only meaningful complete; a signal is
@@ -275,7 +351,11 @@ func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec
 		if err == nil {
 			stopped := make(chan struct{})
 			go func() {
-				ticker := time.NewTicker(hostAgentTick)
+				// The ping is what a stub on the host reads as "ty is there": it
+				// goes first, then every mcpRelayPingInterval, so a relayed call
+				// made as soon as the channel is up does not read as offline.
+				c.send([]byte("P\n"))
+				ticker := time.NewTicker(mcpRelayPingInterval)
 				defer ticker.Stop()
 				for {
 					select {
@@ -284,6 +364,7 @@ func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec
 					case <-connectionCtx.Done():
 						return
 					case <-ticker.C:
+						c.send([]byte("P\n"))
 						c.mu.RLock()
 						stale := time.Since(c.lastRead) > hostSnapshotTTL
 						c.mu.RUnlock()
@@ -299,6 +380,7 @@ func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec
 			close(stopped)
 			_ = cmd.Wait()
 		}
+		c.detach()
 		cancel()
 		c.mu.Lock()
 		healthy := !c.snap.At.IsZero() && time.Since(c.snap.At) < hostSnapshotTTL
@@ -334,9 +416,9 @@ func (c *hostChannel) run(ctx context.Context, dial func(context.Context) (*exec
 }
 
 // startHostChannel dials a host and starts consuming its agent's stream.
-func startHostChannel(host string, databases ...*db.DB) *hostChannel {
+func startHostChannel(host string, relay relayFunc, databases ...*db.DB) *hostChannel {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &hostChannel{host: host, stop: cancel, done: make(chan struct{}), coordinator: "legacy"}
+	c := &hostChannel{host: host, stop: cancel, done: make(chan struct{}), coordinator: "legacy", relay: relay}
 	if len(databases) > 0 && databases[0] != nil {
 		c.database = databases[0]
 		id, err := c.database.CoordinatorID()
@@ -355,12 +437,100 @@ func startHostChannel(host string, databases ...*db.DB) *hostChannel {
 		if err != nil {
 			return nil, nil, err
 		}
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, nil, err
+		}
 		if err := cmd.Start(); err != nil {
 			return nil, nil, err
 		}
+		c.attach(in)
 		return cmd, out, nil
 	})
 	return c
+}
+
+// attach gives the channel a writer for the connection just dialled. Writes go
+// through one goroutine so a connection that stops draining can never block
+// the reader, the ping ticker or a relay answer.
+func (c *hostChannel) attach(w io.WriteCloser) {
+	ch := make(chan []byte, 256)
+	done := make(chan struct{})
+	c.mu.Lock()
+	if c.wdone != nil {
+		close(c.wdone)
+	}
+	c.wch, c.wdone = ch, done
+	c.mu.Unlock()
+	go func() {
+		defer w.Close()
+		for {
+			select {
+			case <-done:
+				return
+			case b := <-ch:
+				if _, err := w.Write(b); err != nil {
+					<-done
+					return
+				}
+			}
+		}
+	}()
+}
+
+// detach drops the writer when its connection has ended.
+func (c *hostChannel) detach() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.wdone != nil {
+		close(c.wdone)
+	}
+	c.wch, c.wdone = nil, nil
+}
+
+// send queues a line for the host, dropping it when there is no connection or
+// the connection is not keeping up. It reports whether the line was queued.
+func (c *hostChannel) send(line []byte) bool {
+	c.mu.RLock()
+	ch := c.wch
+	c.mu.RUnlock()
+	if ch == nil {
+		return false
+	}
+	select {
+	case ch <- line:
+		return true
+	default:
+		return false
+	}
+}
+
+// relayRequest acknowledges an "M <name> <base64 request>" line at once, then
+// answers it when the relay has. The acknowledgement is what lets the stub tell
+// "this machine is away" (the request is withdrawn, nothing happened) from
+// "the answer was lost" (it may have taken effect).
+func (c *hostChannel) relayRequest(line string) {
+	fields := strings.SplitN(strings.TrimPrefix(line, "M "), " ", 2)
+	if len(fields) != 2 || !validRelayName(fields[0]) {
+		return
+	}
+	name := fields[0]
+	payload, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
+		return
+	}
+	c.send([]byte("A " + name + "\n"))
+	go func() {
+		var out []byte
+		if c.relay != nil {
+			out = c.relay(c.host, name, payload)
+		}
+		if len(out) == 0 {
+			out = rpcErrorLine(rpcIDOf(payload), -32000, "unavailable: this machine relays no MCP servers")
+		}
+		out = append(bytes.TrimRight(out, "\n"), '\n')
+		c.send([]byte("R " + name + " " + base64.StdEncoding.EncodeToString(out) + "\n"))
+	}()
 }
 
 // Close stops the channel and waits for its goroutine to finish, so a shutting
@@ -379,7 +549,7 @@ type hostChannels struct {
 
 // get returns the channel for a host, starting one on first use. It returns nil
 // for an empty host (a local task) and after Close.
-func (h *hostChannels) get(host string, databases ...*db.DB) *hostChannel {
+func (h *hostChannels) get(host string, relay relayFunc, databases ...*db.DB) *hostChannel {
 	if strings.TrimSpace(host) == "" {
 		return nil
 	}
@@ -394,7 +564,7 @@ func (h *hostChannels) get(host string, databases ...*db.DB) *hostChannel {
 	if c, ok := h.byHost[host]; ok {
 		return c
 	}
-	c := startHostChannel(host, databases...)
+	c := startHostChannel(host, relay, databases...)
 	h.byHost[host] = c
 	return c
 }
@@ -417,5 +587,5 @@ func (h *hostChannels) Close() {
 
 // hostChannelFor returns the executor's channel to a placed host.
 func (e *Executor) hostChannelFor(host string) *hostChannel {
-	return e.hostChans.get(host, e.db)
+	return e.hostChans.get(host, e.mcpRelayFor().handle, e.db)
 }

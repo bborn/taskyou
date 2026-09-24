@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1056,4 +1057,36 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 	}
 
 	t.Log("No reminder when context saved works correctly!")
+}
+
+// Handle is how a relay reaches this server for a task placed on another
+// machine: one message in, the reply out, nothing on stdio. It must answer
+// exactly as Run does, and say nothing to a notification.
+func TestHandleAnswersOneMessageWithoutStdio(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+	srv := NewServer(database, task.ID)
+
+	var list jsonRPCResponse
+	if err := json.Unmarshal(srv.Handle([]byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list"}`)), &list); err != nil {
+		t.Fatalf("tools/list reply is not JSON: %v", err)
+	}
+	if list.Error != nil || list.ID != float64(7) {
+		t.Fatalf("tools/list = %+v, want a result for id 7", list)
+	}
+	if !strings.Contains(fmt.Sprint(list.Result), "taskyou_complete") {
+		t.Errorf("tools/list result does not list taskyou_complete: %v", list.Result)
+	}
+
+	out := srv.Handle([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":"s-1","method":"tools/call","params":{"name":"taskyou_show_task","arguments":{"task_id":%d}}}`, task.ID)))
+	if !strings.Contains(string(out), `"id":"s-1"`) || !strings.Contains(string(out), "Test Task") {
+		t.Errorf("show_task reply = %s, want the task, answered to id s-1", out)
+	}
+
+	if out := srv.Handle([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); out != nil {
+		t.Errorf("a notification got a reply: %s", out)
+	}
+	if out := srv.Handle([]byte(`not json`)); !strings.Contains(string(out), "-32700") {
+		t.Errorf("garbage got %s, want a parse error", out)
+	}
 }

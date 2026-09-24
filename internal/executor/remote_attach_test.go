@@ -202,12 +202,18 @@ func TestRemoteGuidanceDoesNotTellTheAgentToCallCommandsThatCannotWorkThere(t *t
 			t.Errorf("remote guidance still instructs the agent to run %q", forbidden)
 		}
 	}
-	// It must instead say, once, that those calls are unavailable here.
-	if !strings.Contains(guidance, "Do not call taskyou_complete") {
-		t.Error("remote guidance never tells the agent the completion tools are not there")
+	// It must instead say that the host's ty cannot act on this task...
+	if !strings.Contains(guidance, "Do not run `ty complete`") {
+		t.Error("remote guidance never tells the agent the host's ty CLI cannot act on this task")
+	}
+	// ...and not settle whether the taskyou tools exist: that depends on what
+	// could be installed on the host, and is said by the section appended at
+	// launch, which this must point at.
+	if strings.Contains(guidance, "NO taskyou MCP server") {
+		t.Error("remote guidance still says there is no taskyou server, which the relay makes false")
 	}
 	// It must say what DOES finish a remote run, or the agent is left guessing.
-	for _, want := range []string{"ol-agents", "open a PR", "STOP", "watching this session"} {
+	for _, want := range []string{"ol-agents", "open a PR", "STOP", "watching this session", "HOW TO FINISH THIS TASK"} {
 		if !strings.Contains(guidance, want) {
 			t.Errorf("remote guidance never mentions %q:\n%s", want, guidance)
 		}

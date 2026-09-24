@@ -637,6 +637,7 @@ Examples:
 	// plain status write that skips all of it.
 	rootCmd.AddCommand(newCompleteCmd())
 	rootCmd.AddCommand(newPlaceCmd())
+	rootCmd.AddCommand(newHostsCmd())
 
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
@@ -3049,6 +3050,13 @@ and open TUIs switch to the new version with agent sessions left running.`,
 			}
 			fmt.Printf("idle_suspend_timeout: %s\n", idleTimeout)
 
+			// MCP servers relayed to placed tasks
+			relayed, _ := database.GetSetting(executor.SettingRemoteMCPProxy)
+			if relayed == "" {
+				relayed = dimStyle.Render("(none: placed tasks get only the taskyou tools)")
+			}
+			fmt.Printf("remote_mcp_proxy: %s\n", relayed)
+
 			fmt.Println()
 			fmt.Println(dimStyle.Render("Use 'task settings set <key> <value>' to change settings"))
 		},
@@ -3066,7 +3074,10 @@ Available settings:
   autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)
   idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)
   http_api_port         Port the daemon-hosted HTTP API listens on (default 8080)
-  http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)`,
+  http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)
+  remote_mcp_proxy      MCP servers that only work on this machine, which tasks
+                        placed on other hosts should reach through ty
+                        (comma-separated, e.g. claude-in-chrome; "" for none)`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			key := args[0]
@@ -3099,9 +3110,14 @@ Available settings:
 					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
 					return
 				}
+			case executor.SettingRemoteMCPProxy:
+				if err := executor.ValidateRemoteMCPProxy(value); err != nil {
+					fmt.Println(errorStyle.Render(err.Error()))
+					return
+				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, http_api_port, http_api_disabled"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, http_api_port, http_api_disabled, remote_mcp_proxy"))
 				return
 			}
 

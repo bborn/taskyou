@@ -135,6 +135,49 @@ signals remain available after a daemon restart. Existing sessions launched
 before this protocol continue using the previous observation fallback until
 they are restarted.
 
+## Skills, plugins and MCP on the host
+
+Before a Claude task spawns on a host, ty brings that host's skills and plugins
+in step with this machine's:
+
+- User skills in `~/.claude/skills` are copied with `rsync -L`, so symlinked
+  skills arrive as real files. `node_modules`, `.git`, virtualenvs and macOS
+  binaries are not copied. When a skill with a `./setup` script changes, the
+  script is started on the host in the background (log in `~/.ty-sync/`).
+  Account-synced skills (`skills/synced/`) already follow the Claude login and
+  are left alone.
+- Enabled plugins are installed on the host from their marketplaces with
+  `claude plugin install`. Caches and credentials are never copied. A plugin
+  that fails to install is tried again a day later. Plugins whose marketplace
+  exists only on this machine (a local directory) are skipped.
+- `CLAUDE.md`, `~/.claude-shared`, settings, hooks and credentials are never
+  touched. Each host keeps its own.
+
+ty keeps a record of what it put on each host in `~/.ty-sync/state`. When
+nothing changed, the check is one short command. A failed sync is logged and
+the task launches anyway. A first sync that takes longer than two minutes
+finishes in the background. To sync without spawning a task, run
+`ty hosts sync <host>` (`--force` redoes everything).
+
+A placed Claude task also gets its taskyou tools. The tools run on this
+machine. A small MCP server in the task's worktree (`.ty/mcp-proxy`) sends each
+call over the SSH connection ty already holds to the host, and nothing listens
+on this machine. Calls act only on the task's current run on that host. When
+this machine is asleep or offline, the tool list still loads and a tool call
+fails immediately with an "unavailable" error. The agent then reports with
+`.ty/signal`, which is queued until this machine is back.
+
+MCP servers that work only on this machine can be relayed the same way. Name
+them in `remote_mcp_proxy`, comma-separated:
+
+```
+ty settings set remote_mcp_proxy claude-in-chrome
+```
+
+`claude-in-chrome` is built in. Any other name must be a stdio server in
+`~/.claude.json`. Each placed task that uses one gets its own server process
+on this machine. The process is stopped after ten idle minutes.
+
 ## HTTP API
 
 - `GET /api/placement/hosts?project=<name>&executor=<name>` lists the machines a
