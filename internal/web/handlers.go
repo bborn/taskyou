@@ -95,6 +95,40 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, BuildBoardSnapshot(tasks, limit))
 }
 
+// taskCountsJSON is what GET /api/tasks/counts returns.
+type taskCountsJSON struct {
+	Total   int            `json:"total"`
+	Status  map[string]int `json:"status"`
+	Project map[string]int `json:"project"`
+}
+
+// handleTaskCounts counts the tasks a filter matches, by status and by project,
+// across every task. Clients load a page of tasks (the web UI the newest 1000),
+// and counting that page under-reports any board bigger than it: 973 tasks and
+// "Done 857" on a board with 2,100 done. Archived tasks are not counted; no
+// client shows them. `filter` is the shared query grammar, as for /api/tasks.
+func (s *Server) handleTaskCounts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	tasks, err := s.db.ListTasks(db.ListTasksOptions{Project: q.Get("project"), Limit: -1, IncludeClosed: true})
+	if err != nil {
+		jsonErr(w, "failed to count tasks", http.StatusInternalServerError)
+		return
+	}
+	if filterQuery := strings.TrimSpace(q.Get("filter")); filterQuery != "" {
+		tasks = s.parseViewQuery(filterQuery).Filter(tasks)
+	}
+	counts := taskCountsJSON{Status: map[string]int{}, Project: map[string]int{}}
+	for _, t := range tasks {
+		if t.Status == db.StatusArchived {
+			continue
+		}
+		counts.Total++
+		counts.Status[t.Status]++
+		counts.Project[t.Project]++
+	}
+	jsonOK(w, counts)
+}
+
 // --- Tasks CRUD ---
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {

@@ -1,24 +1,4 @@
-import type {
-  Attachment,
-  CatalogPlugin,
-  InstalledPlugin,
-  PluginCatalog,
-  ChatMessage,
-  Placement,
-  PlacementHost,
-  Routine,
-  RoutineRun,
-  Dependencies,
-  ExecutorInfo,
-  LogLine,
-  Project,
-  SavedView,
-  SavedViewResult,
-  Task,
-  TaskDetail,
-  TaskType,
-  TerminalInfo,
-} from "./types";
+import type { Attachment, CatalogPlugin, InstalledPlugin, PluginCatalog, ChatMessage, Placement, PlacementHost, Routine, RoutineRun, Dependencies, ExecutorInfo, LogLine, Project, SavedView, SavedViewResult, Task, TaskDetail, TaskType, TerminalInfo, TaskCounts } from "./types";
 
 // Default API base: when the production bundle is served by `ty serve` itself,
 // the API is same-origin; in vite dev and in the Tauri shell (tauri://) we
@@ -92,6 +72,13 @@ export const api = {
     if (opts?.filter) params.set("filter", opts.filter);
     params.set("limit", String(opts?.limit ?? 1000));
     return request<Task[]>("GET", `/api/tasks?${params}`);
+  },
+  // Counts come from the server over every task. The list above is a page (the
+  // newest 1000), and counting a page under-reports any board bigger than it.
+  taskCounts: (filter?: string) => {
+    const params = new URLSearchParams();
+    if (filter) params.set("filter", filter);
+    return request<TaskCounts>("GET", `/api/tasks/counts?${params}`);
   },
   taskLogsBefore: (id: number, before: number, limit = 200) =>
     request<LogLine[]>("GET", `/api/tasks/${id}/logs?before=${before}&limit=${limit}`),

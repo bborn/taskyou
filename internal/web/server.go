@@ -117,6 +117,7 @@ func New(cfg Config) *Server {
 	// Tasks CRUD
 	mux.HandleFunc("POST /api/tui/reload", s.handleTUIReload)
 	mux.HandleFunc("GET /api/tasks", s.handleListTasks)
+	mux.HandleFunc("GET /api/tasks/counts", s.handleTaskCounts)
 	mux.HandleFunc("POST /api/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /api/tasks/{id}", s.handleTaskDetail)
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.handleUpdateTask)

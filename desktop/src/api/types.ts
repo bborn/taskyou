@@ -265,3 +265,11 @@ export interface SavedViewResult {
   task_count: number;
   tasks: Task[];
 }
+
+/** GET /api/tasks/counts: tasks matching a filter across the whole board, by
+ * status and by project (archived not counted). */
+export interface TaskCounts {
+  total: number;
+  status: Record<string, number>;
+  project: Record<string, number>;
+}

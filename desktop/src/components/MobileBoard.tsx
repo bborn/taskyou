@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
-import type { Task } from "../api/types";
+import type { Task, TaskCounts } from "../api/types";
 import { api } from "../api/client";
 import { parseFilter } from "../lib/board";
 import { normalizeListOptions, DEFAULT_LIST_OPTIONS, GROUP_BY_OPTIONS, SORT_OPTIONS, type ListGroupBy, type ListSort } from "../lib/list";
@@ -123,32 +123,31 @@ function MobileFilters({ onClose }: { onClose: () => void }) {
   // underneath it.
   const statusQuery = useMemo(() => withToken(filter, STATUS_TOKEN, null), [filter]);
   const projectQuery = useMemo(() => withToken(filter, PROJECT_TOKEN, null), [filter]);
-  const statusTasks = useFilteredTasks(statusQuery, true, tasks);
-  const projectTasks = useFilteredTasks(projectQuery, true, tasks);
+  // The server counts across every task: the loaded list is only the newest
+  // 1000, and counting it read "973 tasks, 857 done" on a board with 2,100 done.
+  const statusCountsRaw = useTaskCounts(statusQuery, tasks);
+  const projectCountsRaw = useTaskCounts(projectQuery, tasks);
 
   const { statusCounts, projectChips, grandTotal, projectTotal } = useMemo(() => {
     const byStatus = new Map<string, number>();
-    const byProject = new Map<string, number>();
-    for (const t of statusTasks) {
-      const pill = pillFor(t.status);
-      if (pill) byStatus.set(pill, (byStatus.get(pill) ?? 0) + 1);
+    for (const [status, n] of Object.entries(statusCountsRaw?.status ?? {})) {
+      const pill = pillFor(status);
+      if (pill) byStatus.set(pill, (byStatus.get(pill) ?? 0) + n);
     }
-    for (const t of projectTasks) {
-      byProject.set(t.project, (byProject.get(t.project) ?? 0) + 1);
-    }
+    const byProject = projectCountsRaw?.project ?? {};
 
     const chips = projects
-      .map((project) => ({ project, count: byProject.get(project.name) ?? 0 }))
+      .map((project) => ({ project, count: byProject[project.name] ?? 0 }))
       .filter((c) => c.count > 0 || c.project.name === activeProject)
       .sort((a, b) => b.count - a.count || a.project.name.localeCompare(b.project.name));
 
     return {
-      statusCounts: byStatus,
+      statusCounts: statusCountsRaw ? byStatus : null,
       projectChips: chips,
-      grandTotal: statusTasks.length,
-      projectTotal: projectTasks.length,
+      grandTotal: statusCountsRaw?.total,
+      projectTotal: projectCountsRaw?.total,
     };
-  }, [statusTasks, projectTasks, projects, activeProject]);
+  }, [statusCountsRaw, projectCountsRaw, projects, activeProject]);
 
   // "All projects" sits above rows counted within the chosen status, so it has
   // to be that status's total — or everything when no status is chosen.
@@ -250,7 +249,7 @@ function MobileFilters({ onClose }: { onClose: () => void }) {
             <Row
               key={f.key}
               label={f.label}
-              count={statusCounts.get(f.key) ?? 0}
+              count={statusCounts ? statusCounts.get(f.key) ?? 0 : undefined}
               selected={activeStatus === f.key}
               onClick={() => setStatus(f.key)}
             />
@@ -381,32 +380,25 @@ function Row({
 /** Tasks matching a query, resolved by the server so the sheet's counts use the
  * same grammar as the filter itself. Only runs while the sheet is open; falls
  * back to the unfiltered set so a count is never blank. */
-function useFilteredTasks(query: string, active: boolean, all: Task[]): Task[] {
-  const [matched, setMatched] = useState<Task[] | null>(null);
+function useTaskCounts(query: string, board: Task[]): TaskCounts | null {
+  const [counts, setCounts] = useState<TaskCounts | null>(null);
 
+  // Refetched when the query changes and whenever the board does (`board` is a
+  // new array on every refresh), so the counts follow tasks as they move.
   useEffect(() => {
-    if (!active) {
-      setMatched(null);
-      return;
-    }
-    if (query.trim() === "") {
-      setMatched(null);
-      return;
-    }
     let live = true;
     void api
-      .listTasks({ all: true, filter: query })
-      .then((tasks) => {
-        if (live) setMatched(tasks);
+      .taskCounts(query.trim())
+      .then((c) => {
+        if (live) setCounts(c);
       })
       .catch(() => {
-        if (live) setMatched(null);
+        if (live) setCounts(null);
       });
     return () => {
       live = false;
     };
-  }, [query, active]);
+  }, [query, board]);
 
-  const visible = useMemo(() => all.filter((t) => t.status !== "archived"), [all]);
-  return matched ?? visible;
+  return counts;
 }
