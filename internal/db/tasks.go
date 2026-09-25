@@ -1599,6 +1599,58 @@ func (db *DB) ClearTaskPlacement(taskID int64) error {
 	return err
 }
 
+// RemoteAgentTask is a task whose agent window lives on ANOTHER machine's tmux
+// server, carrying just the fields needed to list it.
+type RemoteAgentTask struct {
+	ID            int64
+	Title         string
+	Status        string
+	Executor      string
+	Model         string
+	EffortLevel   string
+	Host          string // placement_target: the ssh destination the task was placed on
+	DaemonSession string // the daemon tmux session holding its window, on that host
+}
+
+// ListRemoteAgentTasks returns the live tasks a placement hook put on another
+// host, grouped by host.
+//
+// `ty sessions list` enumerates THIS machine's tmux server, so a remotely placed
+// task never appeared in it — and with nothing running locally it asserted "No
+// agent sessions running" while remote agents were working. These rows are the
+// hosts it has to go and ask; the answer about which windows are actually alive
+// still comes from tmux over there, never from this table.
+//
+// A task with no daemon_session has no window to ask about yet (placement is
+// decided well before the remote session exists), so it is left out rather than
+// costing an ssh round-trip that can only come back empty.
+func (db *DB) ListRemoteAgentTasks() ([]RemoteAgentTask, error) {
+	rows, err := db.Query(`
+		SELECT id, title, status, COALESCE(executor, 'claude'), COALESCE(model, ''),
+		       COALESCE(effort_level, ''), placement_target, daemon_session
+		FROM tasks
+		WHERE COALESCE(placement_target, '') != ''
+		  AND COALESCE(daemon_session, '') != ''
+		  AND status IN (?, ?)
+		  AND deleted_at IS NULL
+		ORDER BY placement_target, id`, StatusProcessing, StatusBlocked)
+	if err != nil {
+		return nil, fmt.Errorf("query remote agent tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []RemoteAgentTask
+	for rows.Next() {
+		var t RemoteAgentTask
+		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Executor, &t.Model,
+			&t.EffortLevel, &t.Host, &t.DaemonSession); err != nil {
+			return nil, fmt.Errorf("scan remote agent task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 // SetTaskRemoteWorktree records the isolated worktree a remotely placed task was
 // given on its host, so the TUI can say where the task actually is and a retry
 // can find the same directory.

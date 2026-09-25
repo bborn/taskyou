@@ -55,7 +55,8 @@ The skill provides structured guidance for common orchestration patterns, JSON o
 | Mark blocked/done/backlog/etc. | `ty status <id> <status>` |
 | Pin/unpin priorities | `ty pin <id> [--unpin|--toggle]` |
 | Close/delete | `ty close <id>`, `ty delete <id>` |
-| Tail executor output | `ty logs` |
+| See a task's live agent pane | `ty output <id>` (reaches a placed host over ssh) |
+| Tail every Claude session file on this machine | `ty logs` (a firehose; takes no task id) |
 
 Statuses accepted by `ty status` are: `backlog`, `queued`, `processing`, `blocked`, `done`, `archived`.
 
