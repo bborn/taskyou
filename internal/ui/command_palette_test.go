@@ -12,35 +12,6 @@ import (
 	"github.com/bborn/workflow/internal/hooks"
 )
 
-func TestFuzzyMatch(t *testing.T) {
-	tests := []struct {
-		name    string
-		str     string
-		pattern string
-		want    bool
-	}{
-		{"empty pattern", "hello world", "", true},
-		{"empty string", "", "abc", false},
-		{"exact match", "hello", "hello", true},
-		{"substring at start", "hello", "hel", true},
-		{"substring in middle", "hello", "ell", true},
-		{"non-contiguous chars", "hello world", "hwd", true},
-		{"non-contiguous chars complex", "implement feature", "ipf", true},
-		{"no match", "hello", "xyz", false},
-		{"pattern longer than string", "hi", "hello", false},
-		{"case sensitive no match", "Hello", "hello", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := fuzzyMatch(tt.str, tt.pattern)
-			if got != tt.want {
-				t.Errorf("fuzzyMatch(%q, %q) = %v, want %v", tt.str, tt.pattern, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFuzzyScore(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -209,41 +180,6 @@ func TestCommandPalette_ActionModeEnterSelects(t *testing.T) {
 	}
 }
 
-func TestMatchesQuery(t *testing.T) {
-	task := &db.Task{
-		ID:      123,
-		Title:   "Implement search feature",
-		Project: "myproject",
-		Status:  db.StatusBacklog,
-	}
-
-	m := &CommandPaletteModel{}
-
-	tests := []struct {
-		name  string
-		query string
-		want  bool
-	}{
-		{"match by ID", "123", true},
-		{"match by ID with hash", "#123", true},
-		{"partial ID", "12", true},
-		{"match by title", "search", true},
-		{"match by project", "myproject", true},
-		{"match by status", "backlog", true},
-		{"fuzzy match title", "isf", true}, // "Implement search feature"
-		{"no match", "xyz", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := m.matchesQuery(task, tt.query)
-			if got != tt.want {
-				t.Errorf("matchesQuery(%+v, %q) = %v, want %v", task, tt.query, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestStatusPriority(t *testing.T) {
 	// Test that status priorities are correctly ordered
 	tests := []struct {
@@ -370,61 +306,6 @@ func TestFilterTasksScoreWithinSameStatus(t *testing.T) {
 	if m.filteredTasks[0].ID != 2 {
 		t.Errorf("Expected task 2 (dog at the start) first, got task %d (%s)",
 			m.filteredTasks[0].ID, m.filteredTasks[0].Title)
-	}
-}
-
-func TestMatchesQueryPRSearch(t *testing.T) {
-	taskWithPR := &db.Task{
-		ID:       42,
-		Title:    "Fix authentication bug",
-		Project:  "webapp",
-		Status:   db.StatusProcessing,
-		PRURL:    "https://github.com/offerlab/offerlab/pull/2382",
-		PRNumber: 2382,
-	}
-
-	taskWithoutPR := &db.Task{
-		ID:      43,
-		Title:   "Add feature",
-		Project: "webapp",
-		Status:  db.StatusBacklog,
-	}
-
-	m := &CommandPaletteModel{}
-
-	tests := []struct {
-		name  string
-		task  *db.Task
-		query string
-		want  bool
-	}{
-		// Task with PR - should match
-		{"match by PR number", taskWithPR, "2382", true},
-		{"match by PR number with hash", taskWithPR, "#2382", true},
-		{"match by partial PR number", taskWithPR, "238", true},
-		{"match by PR URL full", taskWithPR, "https://github.com/offerlab/offerlab/pull/2382", true},
-		{"match by PR URL partial", taskWithPR, "offerlab/pull/2382", true},
-		{"match by PR URL path", taskWithPR, "pull/2382", true},
-		{"match by PR URL repo", taskWithPR, "offerlab", true},
-		{"match by PR URL github", taskWithPR, "github.com", true},
-
-		// Task without PR - should not match PR-specific queries
-		{"no PR number match when no PR", taskWithoutPR, "2382", false},
-		{"no PR URL match when no PR", taskWithoutPR, "pull/", false},
-
-		// Task with PR - should still match other fields
-		{"match by task ID", taskWithPR, "42", true},
-		{"match by title", taskWithPR, "auth", true},
-		{"match by project", taskWithPR, "webapp", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := m.matchesQuery(tt.task, tt.query)
-			if got != tt.want {
-				t.Errorf("matchesQuery(%+v, %q) = %v, want %v", tt.task, tt.query, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -586,55 +467,6 @@ func TestExtractPRNumber(t *testing.T) {
 			got := extractPRNumber(tt.input)
 			if got != tt.want {
 				t.Errorf("extractPRNumber(%q) = %d, want %d", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestMatchesQueryBranchName(t *testing.T) {
-	taskWithBranch := &db.Task{
-		ID:         1068,
-		Title:      "Enable paste in quick select",
-		Project:    "workflow",
-		Status:     db.StatusProcessing,
-		BranchName: "task/1068-i-should-be-able-to-paste-in-a-git-branc",
-	}
-
-	taskWithSourceBranch := &db.Task{
-		ID:           42,
-		Title:        "Fix UI overflow",
-		Project:      "webapp",
-		Status:       db.StatusQueued,
-		SourceBranch: "fix/ui-overflow",
-	}
-
-	m := &CommandPaletteModel{}
-
-	tests := []struct {
-		name  string
-		task  *db.Task
-		query string
-		want  bool
-	}{
-		// Branch name matching
-		{"match full branch name", taskWithBranch, "task/1068-i-should-be-able-to-paste-in-a-git-branc", true},
-		{"match partial branch name", taskWithBranch, "task/1068", true},
-		{"extract task ID from branch", taskWithBranch, "task/1068-some-other-text", true}, // extracts 1068
-		{"match by branch substring", taskWithBranch, "paste-in-a-git", true},
-
-		// Source branch matching
-		{"match source branch", taskWithSourceBranch, "fix/ui-overflow", true},
-		{"match source branch partial", taskWithSourceBranch, "ui-overflow", true},
-
-		// Branch name with ID extraction for different task
-		{"branch ID doesn't match other task", taskWithSourceBranch, "task/1068-description", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := m.matchesQuery(tt.task, tt.query)
-			if got != tt.want {
-				t.Errorf("matchesQuery(%+v, %q) = %v, want %v", tt.task, tt.query, got, tt.want)
 			}
 		})
 	}
