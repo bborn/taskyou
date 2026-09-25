@@ -117,21 +117,6 @@ func TestKanbanBoard_NeedsInputPrompt(t *testing.T) {
 	if !strings.Contains(out, "needs your input") {
 		t.Errorf("blocked task needing input should show prompt, got:\n%s", out)
 	}
-	if board.NeedsInputCount() != 1 {
-		t.Errorf("NeedsInputCount = %d, want 1", board.NeedsInputCount())
-	}
-}
-
-func TestKanbanBoard_RunningTaskCount(t *testing.T) {
-	board := NewKanbanBoard(120, 50)
-	board.SetTasks([]*db.Task{
-		{ID: 1, Title: "a", Status: db.StatusProcessing},
-		{ID: 2, Title: "b", Status: db.StatusProcessing},
-		{ID: 3, Title: "c", Status: db.StatusBacklog},
-	})
-	if got := board.RunningTaskCount(); got != 2 {
-		t.Errorf("RunningTaskCount = %d, want 2", got)
-	}
 }
 
 func TestFormatShortDuration(t *testing.T) {

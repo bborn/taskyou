@@ -23,32 +23,6 @@ func (k *KanbanBoard) SetLatestActivity(activity map[int64]*db.TaskLog) {
 	k.latestActivity = activity
 }
 
-// RunningTaskCount returns how many tasks are currently processing.
-func (k *KanbanBoard) RunningTaskCount() int {
-	n := 0
-	for _, col := range k.columns {
-		for _, t := range col.Tasks {
-			if t.Status == db.StatusProcessing {
-				n++
-			}
-		}
-	}
-	return n
-}
-
-// NeedsInputCount returns how many tasks are waiting on the user.
-func (k *KanbanBoard) NeedsInputCount() int {
-	n := 0
-	for _, col := range k.columns {
-		for _, t := range col.Tasks {
-			if k.NeedsInput(t.ID) {
-				n++
-			}
-		}
-	}
-	return n
-}
-
 // cardSubLine renders the live-mode third line for a card: the agent's latest
 // activity for running tasks, an attention prompt for tasks needing input, and
 // a concise age hint otherwise. Returns the rendered (already styled) line.
