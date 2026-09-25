@@ -162,3 +162,51 @@ func TestIsCurrentRemoteRunFencesOldRunsAndOtherHosts(t *testing.T) {
 		}
 	}
 }
+
+// A finished task's run stays listed until it is ended, and ending it names the
+// run: a task reopened and placed again keeps its new run.
+func TestFinishedRemoteRunsAndEndRemoteRun(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task := &Task{Title: "Remote work", Status: StatusBlocked}
+	if err = d.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	oldRun, err := d.BeginRemoteRun(task.ID, "mona")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs, _ := d.FinishedRemoteRuns(); len(runs) != 0 {
+		t.Fatalf("blocked task listed as finished: %+v", runs)
+	}
+	if err = d.SetTaskStatus(task.ID, StatusDone, ActorCLI, "closed", ByHuman("closed it")); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := d.FinishedRemoteRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0] != (RemoteRun{TaskID: task.ID, RunID: oldRun, Host: "mona", Status: StatusDone}) {
+		t.Fatalf("finished runs = %+v", runs)
+	}
+
+	newRun, err := d.BeginRemoteRun(task.ID, "mona")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.EndRemoteRun(task.ID, oldRun); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := d.IsCurrentRemoteRun(task.ID, newRun, "mona"); !ok {
+		t.Fatal("ending the old run removed the new one")
+	}
+	if err = d.EndRemoteRun(task.ID, newRun); err != nil {
+		t.Fatal(err)
+	}
+	if runs, _ := d.FinishedRemoteRuns(); len(runs) != 0 {
+		t.Fatalf("ended run still listed: %+v", runs)
+	}
+}

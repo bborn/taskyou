@@ -244,9 +244,15 @@ func remoteLaunchScriptWith(task *db.Task, executorName, workDir, prompt, mcpCon
 // SupportsRemoteExecutor reports whether a remote launch adapter is available.
 func SupportsRemoteExecutor(name string) bool { return name == "claude" || name == "codex" }
 
-// A coordinator owns its session namespace even when task IDs overlap on a host.
+// remoteDaemonSessionName is the tmux session this coordinator's tasks run in on
+// a placed host. A coordinator owns its session namespace even when task IDs
+// overlap on a host.
+func remoteDaemonSessionName(coordinator string) string {
+	return "task-daemon-remote-" + coordinator
+}
+
 func findOrCreateRemoteDaemonSession(ctx context.Context, coordinator string) (string, error) {
-	session := "task-daemon-remote-" + coordinator
+	session := remoteDaemonSessionName(coordinator)
 	if err := tmuxCmd(ctx, "has-session", "-t", "="+session).Run(); err != nil {
 		// Same size as a local agent session, for the same reason (see
 		// tmuxctl.DefaultWidth): a detached session otherwise starts at tmux's
