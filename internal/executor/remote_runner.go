@@ -134,12 +134,17 @@ func (r RemoteRunner) ssh() string {
 // whose passphrase is not cached drops ssh into an interactive prompt inside the
 // daemon, where nobody can answer it, and the task hangs instead of failing.
 func (r RemoteRunner) sshArgs() []string {
+	return append(r.sshOptions(), "--", r.Host)
+}
+
+// sshOptions are sshArgs without the destination, for a tool (rsync) that is
+// handed the ssh command and names the host itself.
+func (r RemoteRunner) sshOptions() []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(r.connectTimeout().Seconds())),
 	}
-	args = append(args, sshMultiplexArgs()...)
-	return append(args, "--", r.Host)
+	return append(args, sshMultiplexArgs()...)
 }
 
 // sshMultiplexArgs reuse ONE ssh connection per host across every command ty

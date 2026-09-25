@@ -92,6 +92,15 @@ type Executor struct {
 	// hostChans holds one long-lived connection per placed host, so polling costs
 	// O(hosts) rather than O(tasks). See hostchannel.go.
 	hostChans hostChannels
+
+	// relay runs the MCP calls placed tasks make, here. See mcpproxy.go.
+	relayMu sync.Mutex
+	relay   *mcpRelay
+
+	// hostSync keeps placed hosts' skills and plugins in step with this
+	// machine's. See hostsync.go.
+	hostSyncOnce sync.Once
+	hostSync     *hostSyncer
 }
 
 // windowExists reports whether a live executor tmux window exists for a task,
@@ -884,6 +893,8 @@ func (e *Executor) Stop() {
 	// that stops without closing them leaves one process per placed host alive
 	// until the machine reboots.
 	e.hostChans.Close()
+	// Likewise the servers started here for placed tasks' relayed MCP calls.
+	e.closeMCPRelay()
 
 	e.logger.Info("Background executor stopped")
 }
@@ -2241,6 +2252,13 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 			return
 		}
 
+		// Give the host this machine's skills and plugins, so the task has the
+		// tools it would have here. Never a reason not to spawn: a failure is
+		// logged and the task runs with what the host has. See hostsync.go.
+		if executorSlug == db.ExecutorClaude {
+			e.syncHostTools(taskCtx, task, remotePlacement.Host)
+		}
+
 		var wt remoteWorktree
 		wt, err = e.setupRemoteWorktree(taskCtx, task, remotePlacement)
 		if err != nil {
@@ -2728,30 +2746,30 @@ Working directory constraint (isolated git worktree):
 // remoteUniversalGuidance is the execution guidance for an agent running on a
 // PLACED HOST rather than on this machine.
 //
-// Everything the local guidance says about signalling completion is not merely
-// unhelpful there — it is wrong. A remote session is launched with plain
-// `claude`: no taskyou MCP server, and the `ty` on that host (if there is one)
-// talks to THAT machine's task store, where this task does not exist. Task 5245
-// spent its last turns calling `ty complete` and `ty artifact list` and getting
-// "task not found" back, because ty had told it to.
+// Much of what the local guidance says is not merely unhelpful there — it is
+// wrong. The `ty` on that host (if there is one) talks to THAT machine's task
+// store, where this task does not exist. Task 5245 spent its last turns calling
+// `ty complete` and `ty artifact list` and getting "task not found" back,
+// because ty had told it to.
 //
-// What replaces it is the truth about how a remote run finishes: the local
-// daemon watches this host's tmux window, and when the session ends it parks the
-// task for a human to review. The agent's job is to leave its work somewhere
-// visible — a pushed branch and a PR — and then stop.
+// How the agent reports back depends on what could be installed on the host —
+// its taskyou tools relayed to this machine, or only the .ty/signal script — so
+// that part is appended at launch (proxyInstructions / signalInstructions) and
+// this only points at it. Either way the agent leaves its work somewhere
+// visible — a pushed branch and a PR.
 func remoteUniversalGuidance(task *db.Task, usesWorktrees bool) string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf(`Where you are running:
 - You are running on %s, which is NOT the machine that scheduled this task. Its task store does not contain this task.
-- There is therefore NO taskyou MCP server here and NO usable `+"`ty`"+` CLI for this task. Do not call taskyou_complete, taskyou_needs_input, taskyou_get_artifact/taskyou_set_artifact, `+"`ty complete`"+`, `+"`ty artifact`"+` or `+"`ty close`"+`: they will fail with "task not found", and a failed call is not a completion signal.`, task.PlacementTarget))
+- The `+"`ty`"+` CLI on this host (if there is one) talks to this host's task store, so it cannot act on this task. Do not run `+"`ty complete`"+`, `+"`ty artifact`"+` or `+"`ty close`"+`: they fail with "task not found", and a failed call is not a completion signal.`, task.PlacementTarget))
 
 	b.WriteString(`
 
-Completion signaling (REQUIRED — and it is not a command you run):
+Completion signaling (REQUIRED):
 - Do your work, commit it, push the branch, and open a PR with the ` + "`gh`" + ` CLI. Put the PR link in your final message.
-- Then STOP and let your session end. The machine that scheduled this task is watching this session; when it ends, the task is parked for a human to review. That is the completion signal — there is nothing to call, and nothing marks itself done.
-- If you cannot finish (a question only a human can answer, a missing credential, a blocked dependency): say so plainly in your final message and stop. The same review step picks it up. Do not idle waiting for a reply — nobody can see this terminal.`)
+- Then report that you are finished, the way "HOW TO FINISH THIS TASK" at the end of this prompt describes, and STOP. The machine that scheduled this task is watching this session; nothing marks itself done.
+- If you cannot finish (a question only a human can answer, a missing credential, a blocked dependency): report that the same way, say so plainly in your final message, and stop. Do not idle waiting for a reply — nobody can see this terminal.`)
 
 	if usesWorktrees {
 		b.WriteString(`

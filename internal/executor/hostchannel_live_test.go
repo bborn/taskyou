@@ -15,7 +15,7 @@ func TestHostChannelAgainstALiveHost(t *testing.T) {
 		t.Skip("set TY_LIVE_HOST to run against a real host")
 	}
 
-	c := startHostChannel(host)
+	c := startHostChannel(host, nil)
 	defer c.Close()
 
 	deadline := time.Now().Add(45 * time.Second)

@@ -46,20 +46,48 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 	// Every command built from this context lands on the placed host.
 	ctx = WithRunner(ctx, r)
 
+	// The host's standing connection carries the agent's relayed MCP calls as
+	// well as its screen, so it is opened now rather than at the first poll: an
+	// agent that calls a taskyou tool the moment it starts must not find this
+	// machine "offline" only because nothing had dialled the host yet.
+	e.hostChannelFor(r.Host)
+
 	// The agent gets a way to say it has finished, and its prompt gets told about
 	// it. Without both halves the remote path is back to inferring completion from
 	// a silent screen. A failure to install is not fatal — the idle heuristic is
 	// still there underneath — but it is worth saying out loud, because the task
 	// will then finish two minutes late for a reason nothing else would explain.
+	signalReady := true
 	if err := e.installSignalScript(ctx, r.WorkDir); err != nil {
+		signalReady = false
 		e.logLine(task.ID, "system", fmt.Sprintf(
 			"Could not install the completion signal on %s (%v); falling back to idle detection, "+
 				"so this task will park a couple of minutes after it actually finishes.", r.Host, err))
-	} else {
-		prompt += signalInstructions()
 	}
 
-	script, err := remoteLaunchScript(task, executorName, r.WorkDir, prompt, runID)
+	// Claude also gets its taskyou tools, relayed to this machine (mcpproxy.go).
+	// Without them it still has the signal script, so a failure here costs the
+	// tools, not the task.
+	mcpConfig := ""
+	if executorName == "claude" {
+		if install, err := e.installMCPProxy(ctx, task, r.WorkDir); err != nil {
+			e.logLine(task.ID, "system", fmt.Sprintf(
+				"Could not give this task its taskyou tools on %s (%v); it will report through .ty/signal instead.", r.Host, err))
+		} else {
+			mcpConfig = install.ConfigPath
+			e.logger.Info("relaying MCP for placed task", "task", task.ID, "host", r.Host, "servers", install.Servers)
+		}
+	}
+	switch {
+	case mcpConfig != "":
+		prompt += proxyInstructions(controllerName())
+	case signalReady:
+		prompt += signalInstructions()
+	default:
+		prompt += fallbackFinishInstructions()
+	}
+
+	script, err := remoteLaunchScriptWith(task, executorName, r.WorkDir, prompt, mcpConfig, runID)
 	script = "export WORKTREE_COORDINATOR_ID=" + shellQuote(coordinator) + " WORKTREE_RUN_ID=" + shellQuote(runID) + "; " + script
 	if err != nil {
 		e.logLine(task.ID, "error", err.Error())
@@ -157,6 +185,13 @@ func (e *Executor) writeRemotePrompt(ctx context.Context, taskID int64, prompt s
 // Claude and Codex have remote launch adapters. Another executor is not silently
 // downgraded to a local run: it fails, visibly, with a message saying why.
 func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, runs ...string) (string, error) {
+	return remoteLaunchScriptWith(task, executorName, workDir, prompt, "", runs...)
+}
+
+// remoteLaunchScriptWith is remoteLaunchScript plus the --mcp-config file that
+// installMCPProxy staged ON THE HOST, when there is one. Unlike the local
+// config, that file and everything it names exist where the agent runs.
+func remoteLaunchScriptWith(task *db.Task, executorName, workDir, prompt, mcpConfig string, runs ...string) (string, error) {
 	if !SupportsRemoteExecutor(executorName) {
 		return "", fmt.Errorf(
 			"placement chose a remote host, but ty can launch Claude and Codex remotely, not %q (this task uses %q); "+
@@ -176,6 +211,9 @@ func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, run
 	// return so both the prompt-bearing and empty-prompt branches emit it,
 	// mirroring the local fresh-launch and resume paths (executor.go).
 	flags := claudePermissionFlag(task) + rcFlag(task) + effortFlag(task.EffortLevel) + modelFlag(task.Model)
+	if mcpConfig != "" {
+		flags = "--mcp-config " + shellQuote(mcpConfig) + " " + flags
+	}
 	if executorName == "codex" {
 		flags = ""
 		if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {

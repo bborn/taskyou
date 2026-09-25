@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,10 @@ type Server struct {
 	reader *bufio.Reader
 	writer io.Writer
 	mu     sync.Mutex
+
+	// handleMu serializes Handle, which borrows writer for the length of one
+	// request.
+	handleMu sync.Mutex
 
 	// Callbacks for task state changes
 	onComplete   func()
@@ -130,6 +135,41 @@ func (s *Server) Run() error {
 
 		s.handleRequest(&req)
 	}
+}
+
+// Handle answers one JSON-RPC message exactly as Run would, and returns the reply
+// line without its newline — or nil for a notification, which gets no reply.
+//
+// It exists for callers that do not own a stdio pipe: a task placed on another
+// machine reaches this server through a relay (see executor/mcpproxy.go), one
+// message at a time, and needs the answer back rather than written to stdout.
+// Messages are handled one at a time, in arrival order, as they are over stdio.
+func (s *Server) Handle(line []byte) []byte {
+	s.handleMu.Lock()
+	defer s.handleMu.Unlock()
+
+	var buf bytes.Buffer
+	s.mu.Lock()
+	prev := s.writer
+	s.writer = &buf
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.writer = prev
+		s.mu.Unlock()
+	}()
+
+	var req jsonRPCRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		s.sendError(nil, -32700, "Parse error")
+	} else {
+		s.handleRequest(&req)
+	}
+	out := bytes.TrimSpace(buf.Bytes())
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *Server) handleRequest(req *jsonRPCRequest) {

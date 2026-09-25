@@ -122,6 +122,7 @@ func completeSettingKeys(cmd *cobra.Command, args []string, toComplete string) (
 			"idle_suspend_timeout\tIdle timeout before suspending (e.g. 6h)",
 			"http_api_port\tPort for the daemon-hosted HTTP API (default 8080)",
 			"http_api_disabled\tDisable the daemon-hosted HTTP API (true/false)",
+			"remote_mcp_proxy\tMac-only MCP servers placed tasks reach through ty (e.g. claude-in-chrome)",
 		}, cobra.ShellCompDirectiveNoFileComp
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp

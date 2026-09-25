@@ -127,3 +127,38 @@ func TestRemoteHostHealthDistinguishesIdleFromReconnecting(t *testing.T) {
 		t.Fatalf("recorded problem: got %q, want reconnecting", h.State)
 	}
 }
+
+// A relayed MCP call is answered only for the run the task is on now, on the
+// host that placed it: an earlier attempt's session, or the same run claimed
+// from another host, must not act on the task.
+func TestIsCurrentRemoteRunFencesOldRunsAndOtherHosts(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task := &Task{Title: "Remote work"}
+	if err = d.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := d.BeginRemoteRun(task.ID, "build-box")
+	current, _ := d.BeginRemoteRun(task.ID, "build-box")
+
+	for _, c := range []struct {
+		run, host string
+		want      bool
+	}{
+		{current, "build-box", true},
+		{old, "build-box", false},
+		{current, "gpu-box", false},
+		{"", "build-box", false},
+	} {
+		got, err := d.IsCurrentRemoteRun(task.ID, c.run, c.host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("IsCurrentRemoteRun(run=%q, host=%q) = %v, want %v", c.run, c.host, got, c.want)
+		}
+	}
+}

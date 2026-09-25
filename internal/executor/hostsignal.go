@@ -120,6 +120,21 @@ scheduled you cannot tell whether you are thinking or finished.`,
 		signalScriptPath, signalScriptPath, signalScriptPath)
 }
 
+// fallbackFinishInstructions is the finish section for a placed agent that got
+// neither its relayed tools nor the signal script: all that is left is the
+// session ending, which the machine that placed it is watching.
+func fallbackFinishInstructions() string {
+	return `
+
+---
+HOW TO FINISH THIS TASK
+
+Nothing on this host can report back to the machine that scheduled you. When
+you are finished (or cannot go on), say so plainly in your final message and
+stop; that machine is watching this session and parks the task for review once
+it goes quiet.`
+}
+
 // installSignalScript writes the signal script into a task's remote worktree.
 func (e *Executor) installSignalScript(ctx context.Context, workDir string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
