@@ -101,6 +101,10 @@ type Executor struct {
 	// machine's. See hostsync.go.
 	hostSyncOnce sync.Once
 	hostSync     *hostSyncer
+
+	// sessionEnd ends finished tasks' sessions on placed hosts. See
+	// remote_session_end.go.
+	sessionEnd remoteSessionEnder
 }
 
 // windowExists reports whether a live executor tmux window exists for a task,
@@ -1542,14 +1546,16 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
 	// Check for stale worktrees to archive every 10 minutes (300 ticks)
+	// End finished tasks' sessions on placed hosts every 30 seconds (15 ticks)
 	tickCount := 0
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150    // 5 minutes at 2 second ticks
-	const staleWorktreeInterval = 300  // 10 minutes at 2 second ticks
-	const authCheckInterval = 15       // 30 seconds at 2 second ticks
-	const prStatusInterval = 5         // 10 seconds; the poller decides which PRs are actually due
-	const readyTasksInterval = 8       // 16 seconds at 2 second ticks
-	const orphanReconcileInterval = 30 // 60 seconds at 2 second ticks
+	const doneCleanupInterval = 150     // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 300   // 10 minutes at 2 second ticks
+	const authCheckInterval = 15        // 30 seconds at 2 second ticks
+	const prStatusInterval = 5          // 10 seconds; the poller decides which PRs are actually due
+	const readyTasksInterval = 8        // 16 seconds at 2 second ticks
+	const orphanReconcileInterval = 30  // 60 seconds at 2 second ticks
+	const remoteSessionEndInterval = 15 // 30 seconds at 2 second ticks
 
 	for {
 		select {
@@ -1601,6 +1607,13 @@ func (e *Executor) worker(ctx context.Context) {
 			// hook miss): complete them so the DAG advances instead of stalling.
 			if tickCount%readyTasksInterval == 0 {
 				e.reconcileFinishedWorkflowSteps()
+			}
+
+			// End the remote agents of tasks that were closed or archived. A
+			// placed task's window is on another host, where none of the local
+			// cleanup reaches.
+			if tickCount%remoteSessionEndInterval == 0 {
+				e.startEndingFinishedRemoteSessions(ctx)
 			}
 
 			// Periodically cleanup Claude processes for inactive done tasks

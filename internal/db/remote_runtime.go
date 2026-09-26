@@ -152,3 +152,40 @@ func (db *DB) CommitTaskPlacement(taskID int64, target, reason, workDir, branch 
 	}
 	return tx.Commit()
 }
+
+// RemoteRun is the run a placed task last started on a host.
+type RemoteRun struct {
+	TaskID int64
+	RunID  string
+	Host   string
+	Status string
+}
+
+// FinishedRemoteRuns lists the remote runs of tasks that are done or archived.
+// Their agents have nothing left to do; a row stays here until the daemon has
+// ended the run's tmux windows on its host (see EndRemoteRun), so a host that
+// cannot be reached right now is retried rather than forgotten.
+func (db *DB) FinishedRemoteRuns() ([]RemoteRun, error) {
+	rows, err := db.Query(`SELECT r.task_id,r.run_id,r.host,t.status FROM remote_runs r JOIN tasks t ON t.id=r.task_id
+ WHERE t.status IN (?,?) ORDER BY r.host, r.task_id`, StatusDone, StatusArchived)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []RemoteRun
+	for rows.Next() {
+		var r RemoteRun
+		if err := rows.Scan(&r.TaskID, &r.RunID, &r.Host, &r.Status); err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+// EndRemoteRun forgets a finished run once its session is gone. It matches the
+// run ID, so a task reopened and placed again in the meantime keeps its new run.
+func (db *DB) EndRemoteRun(taskID int64, runID string) error {
+	_, err := db.Exec(`DELETE FROM remote_runs WHERE task_id=? AND run_id=?`, taskID, runID)
+	return err
+}
