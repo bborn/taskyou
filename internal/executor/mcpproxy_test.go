@@ -452,7 +452,9 @@ func TestRemoteLaunchPassesTheStagedMCPConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(script, "claude --mcp-config '/srv/x/.task-worktrees/42-x/.ty/mcp/config.json' ") {
+	// The `=` form, never `--mcp-config <path>`: the option is variadic, so the
+	// spaced form swallows the prompt that follows as a second config file.
+	if !strings.Contains(script, "claude --mcp-config='/srv/x/.task-worktrees/42-x/.ty/mcp/config.json' ") {
 		t.Errorf("launch line does not pass the staged config: %s", script)
 	}
 	if strings.Contains(script, worktreeMCPConfigPath(42)) {

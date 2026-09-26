@@ -212,14 +212,14 @@ func remoteLaunchScriptWith(task *db.Task, executorName, workDir, prompt, mcpCon
 	// mirroring the local fresh-launch and resume paths (executor.go).
 	flags := claudePermissionFlag(task) + rcFlag(task) + effortFlag(task.EffortLevel) + modelFlag(task.Model)
 	if mcpConfig != "" {
-		flags = "--mcp-config " + shellQuote(mcpConfig) + " " + flags
+		flags = "--mcp-config=" + shellQuote(mcpConfig) + " " + flags // `=` form: see claudeMCPConfigFlag
 	}
 	if executorName == "codex" {
 		flags = ""
 		if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 			flags += "--dangerously-bypass-approvals-and-sandbox "
 		}
-		if task.Model != "" {
+		if task.Model != "" && task.Model != "claude" {
 			flags += "--model " + shellQuote(task.Model) + " "
 		}
 	}

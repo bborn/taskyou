@@ -5981,7 +5981,10 @@ func ensureWorktreeMCPConfig(taskID int64) (string, error) {
 }
 
 // claudeMCPConfigFlag ensures the per-task MCP config file exists and returns the
-// `--mcp-config <path> ` flag (with trailing space) to splice into the claude command.
+// `--mcp-config=<path> ` flag (with trailing space) to splice into the claude command.
+// The `=` form matters: --mcp-config is variadic, so the spaced form swallows the
+// next bare argument (the prompt) as a second config file and claude exits with
+// ENAMETOOLONG. A trailing `--model` used to end the list by accident.
 // Returns "" on failure so a config-write hiccup degrades to "no taskyou tools" rather
 // than a broken command line.
 func (e *Executor) claudeMCPConfigFlag(taskID int64) string {
@@ -5992,7 +5995,7 @@ func (e *Executor) claudeMCPConfigFlag(taskID int64) string {
 		}
 		return ""
 	}
-	return fmt.Sprintf("--mcp-config %q ", path)
+	return fmt.Sprintf("--mcp-config=%q ", path)
 }
 
 // ensureProjectTrusted pre-trusts a project in Claude Code's config so an unattended

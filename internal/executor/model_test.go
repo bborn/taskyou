@@ -16,6 +16,7 @@ func TestModelFlag(t *testing.T) {
 		want  string
 	}{
 		{"", ""},
+		{"claude", ""}, // executor slug left by the column default, not a model
 		{db.ModelOpus, "--model 'opus' "},
 		{db.ModelSonnet, "--model 'sonnet' "},
 		{db.ModelHaiku, "--model 'haiku' "},

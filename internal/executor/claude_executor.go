@@ -86,8 +86,14 @@ func effortFlag(level string) string {
 // model setting untouched. The model name is shell-single-quoted because the
 // returned flag is concatenated into a script run via `sh -c` and may be an
 // arbitrary full model ID supplied via the CLI/MCP.
+//
+// "claude" is the executor slug, not a model, and is treated as no override.
+// The tasks.model column still carries the early `DEFAULT 'claude'` (SQLite
+// cannot change a column default in place), so the one-time repair in sqlite.go
+// cleared old rows but every new row got the slug again, and `--model claude`
+// makes the agent fail on its first turn while the card looks busy.
 func modelFlag(model string) string {
-	if model == "" {
+	if model == "" || model == "claude" {
 		return ""
 	}
 	return fmt.Sprintf("--model %s ", shellSingleQuote(model))
@@ -196,7 +202,7 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	// with the daemon launch path (see ensureWorktreeMCPConfig in executor.go).
 	mcpFlag := ""
 	if p, err := ensureWorktreeMCPConfig(task.ID); err == nil && p != "" {
-		mcpFlag = fmt.Sprintf("--mcp-config %q ", p)
+		mcpFlag = fmt.Sprintf("--mcp-config=%q ", p) // `=` form: see claudeMCPConfigFlag
 	}
 
 	// Build command - resume if we have a session ID, otherwise start fresh
