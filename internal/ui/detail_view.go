@@ -339,7 +339,7 @@ func (m *DetailModel) ensureViewSession(ctx context.Context, daemonSession, wind
 		agentTmux(ctx, "kill-session", "-t", "="+view).Run()
 		return "", fmt.Errorf("select %s in %s: %w", windowID, view, err)
 	}
-	runTmuxBatchOn(ctx, agentTmux, [][]string{
+	cmds := [][]string{
 		// A view, not a workspace: no status line, and no prefix — every key goes
 		// to the agent. The mouse selects, scrolls and resizes as usual.
 		{"set-option", "-t", view, "status", "off"},
@@ -354,7 +354,12 @@ func (m *DetailModel) ensureViewSession(ctx context.Context, daemonSession, wind
 		{"set-option", "-w", "-t", windowID, "window-size", "latest"},
 		{"set-option", "-w", "-t", windowID, "pane-border-status", "top"},
 		{"set-option", "-w", "-t", windowID, "pane-border-format", " #{pane_title} "},
-	})
+		// A copy made in the agent's pane has to leave this server before the
+		// UI server can relay it to the clipboard (see tmuxctl.AgentClipboardArgs).
+		// Set before the viewer pane attaches: features are read on attach.
+		tmuxctl.PassthroughArgs(windowID),
+	}
+	runTmuxBatchOn(ctx, agentTmux, append(cmds, tmuxctl.AgentClipboardArgs()...))
 	return view, nil
 }
 
