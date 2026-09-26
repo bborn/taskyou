@@ -6,6 +6,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bborn/workflow/internal/textutil"
 
+	"github.com/bborn/workflow/internal/clipboard"
 	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/pipeline"
@@ -38,6 +40,10 @@ type Server struct {
 
 	// Track if context was requested but empty (for reminder on completion)
 	contextWasEmpty bool
+
+	// copyToClipboard delivers taskyou_copy_to_clipboard's text. Nil means
+	// clipboard.Copy; tests stand in their own.
+	copyToClipboard func(ctx context.Context, text string) ([]string, error)
 }
 
 // NewServer creates a new MCP server for a specific task.
@@ -378,6 +384,20 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 						},
 						"required": []string{"name", "content"},
+					},
+				},
+				{
+					Name:        "taskyou_copy_to_clipboard",
+					Description: "Put text on the user's clipboard, exactly as given. Use it whenever you hand the user something to paste — a shell command, a URL, a token, a config snippet — instead of asking them to select it in your terminal: a terminal selection picks up a hard line break wherever your output wrapped, and escape-sequence clipboards (OSC 52, tmux load-buffer -w) often do not survive the tmux/ssh hops between you and the user. The text travels over TaskYou's own connection to the machine the user is on, so it works when you run on a remote host too, and nothing has to be written to disk. The text is not logged.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"text": map[string]interface{}{
+								"type":        "string",
+								"description": "The exact text to copy. It is delivered byte for byte — no trimming, no wrapping.",
+							},
+						},
+						"required": []string{"text"},
 					},
 				},
 				{
@@ -951,6 +971,29 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "taskyou_copy_to_clipboard":
+		text, _ := params.Arguments["text"].(string)
+		copyFn := s.copyToClipboard
+		if copyFn == nil {
+			copyFn = clipboard.Copy
+		}
+		routes, err := copyFn(context.Background(), text)
+		if err != nil {
+			// A tool error the agent reads: it can fall back to printing the text.
+			s.sendResult(id, toolCallResult{
+				IsError: true,
+				Content: []contentBlock{{Type: "text", Text: "taskyou_copy_to_clipboard: " + err.Error() + ". Give the user the text another way."}},
+			})
+			return
+		}
+		// The size only: the text may be a secret, and task logs are not.
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Copied %d bytes to the user's clipboard", len(text)))
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Copied %d bytes to the user's clipboard via %s. Tell the user it is on their clipboard.", len(text), strings.Join(routes, " and "))},
 			},
 		})
 
