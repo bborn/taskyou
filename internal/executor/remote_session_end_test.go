@@ -63,7 +63,10 @@ host=$2
 printf '%s %s\n' "$host" "$3" >> `+shellQuote(f.log)+`
 [ "$host" = asleep ] && exit 255
 inner=${3#sh -lc }
-FAKE_HOST=$host PATH=`+shellQuote(bin)+`:$PATH eval "sh -c $inner"
+# Exported, not prefixed to eval: dash (Ubuntu's sh) keeps assignments before a
+# special builtin in this shell, so the fake tmux would never see FAKE_HOST.
+export FAKE_HOST=$host PATH=`+shellQuote(bin)+`:$PATH
+eval "sh -c $inner"
 `)
 	return f
 }
