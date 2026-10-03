@@ -1447,13 +1447,59 @@ func TestClaudeEnvPrefix(t *testing.T) {
 	}
 }
 
+// ClaudeConfigFilePath must name the file Claude Code itself reads for a config
+// dir, or everything TaskYou writes there (worktree trust above all) is ignored.
+func TestClaudeConfigFilePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	t.Run("default dir uses the home-level file Claude reads with no CLAUDE_CONFIG_DIR", func(t *testing.T) {
+		want := filepath.Join(home, ".claude.json")
+		for _, dir := range []string{"", filepath.Join(home, ".claude"), filepath.Join(home, ".claude") + "/", "~/.claude"} {
+			if got := ClaudeConfigFilePath(dir); got != want {
+				t.Errorf("ClaudeConfigFilePath(%q) = %q, want %q", dir, got, want)
+			}
+		}
+	})
+
+	t.Run("a profile dir uses the file inside it, as Claude does with CLAUDE_CONFIG_DIR set", func(t *testing.T) {
+		profile := filepath.Join(home, ".claude-work")
+		want := filepath.Join(profile, ".claude.json")
+		for _, dir := range []string{profile, profile + "/", "~/.claude-work"} {
+			if got := ClaudeConfigFilePath(dir); got != want {
+				t.Errorf("ClaudeConfigFilePath(%q) = %q, want %q", dir, got, want)
+			}
+		}
+	})
+
+	t.Run("a legacy .config.json in the dir wins, as it does for Claude", func(t *testing.T) {
+		profile := filepath.Join(home, ".claude-legacy")
+		if err := os.MkdirAll(profile, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		legacy := filepath.Join(profile, ".config.json")
+		if err := os.WriteFile(legacy, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := ClaudeConfigFilePath(profile); got != legacy {
+			t.Errorf("ClaudeConfigFilePath(%q) = %q, want %q", profile, got, legacy)
+		}
+	})
+}
+
 func TestEnsureProjectTrusted(t *testing.T) {
 	setupTempConfigDir := func(t *testing.T) string {
 		t.Helper()
 		tempDir := t.TempDir()
 		configDir := filepath.Join(tempDir, ".claude")
 		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-		return configDir + ".json" // ClaudeConfigFilePath returns dir + ".json"
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// A non-default dir: Claude reads <dir>/.claude.json, so that is where the
+		// trust has to land.
+		return filepath.Join(configDir, ".claude.json")
 	}
 
 	readProject := func(t *testing.T, configPath, key string) map[string]interface{} {
@@ -1558,7 +1604,10 @@ func TestEnsureProjectTrusted(t *testing.T) {
 	t.Run("honors per-project CLAUDE_CONFIG_DIR override", func(t *testing.T) {
 		defaultConfigPath := setupTempConfigDir(t)
 		customDir := filepath.Join(t.TempDir(), "custom-claude")
-		customConfigPath := ClaudeConfigFilePath(customDir)
+		// Claude launched with CLAUDE_CONFIG_DIR=<customDir> reads
+		// <customDir>/.claude.json. A task stalled on the trust dialog because
+		// the trust went to <customDir>.json instead, which Claude never opens.
+		customConfigPath := filepath.Join(customDir, ".claude.json")
 		projectDir := t.TempDir()
 
 		if err := ensureProjectTrusted(projectDir, customDir); err != nil {
@@ -1566,6 +1615,12 @@ func TestEnsureProjectTrusted(t *testing.T) {
 		}
 		if _, err := os.Stat(customConfigPath); err != nil {
 			t.Fatalf("expected config written to custom dir: %v", err)
+		}
+		if readProject(t, customConfigPath, projectDir)["hasTrustDialogAccepted"] != true {
+			t.Errorf("expected %s to trust %s", customConfigPath, projectDir)
+		}
+		if _, err := os.Stat(customDir + ".json"); !os.IsNotExist(err) {
+			t.Errorf("trust was written to %s.json, a file Claude never reads", customDir)
 		}
 		if _, err := os.Stat(defaultConfigPath); !os.IsNotExist(err) {
 			t.Errorf("expected default claude.json untouched, but it exists at %s", defaultConfigPath)

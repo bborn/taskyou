@@ -5578,13 +5578,39 @@ func ResolveClaudeConfigDir(custom string) string {
 	return filepath.Clean(expandUserPath(custom))
 }
 
-// ClaudeConfigFilePath returns the path to the claude.json configuration alongside the directory.
+// ClaudeConfigFilePath returns the global config file Claude Code actually reads
+// (trust, onboarding, per-project MCP servers) when it runs against config dir.
+//
+// Claude resolves that file as $CLAUDE_CONFIG_DIR/.claude.json, and as
+// ~/.claude.json only when CLAUDE_CONFIG_DIR is unset; a legacy .config.json in
+// the config dir wins over both. TaskYou exports CLAUDE_CONFIG_DIR only for a
+// non-default dir (see claudeEnvPrefix), so:
+//
+//   - the default ~/.claude → ~/.claude.json
+//   - any other dir D       → D/.claude.json
+//
+// This used to return D + ".json" for every dir. For the default that is the
+// same file, but for a profile like ~/.claude-work it named ~/.claude-work.json, a
+// file Claude never reads. Pre-trusting a project there did nothing, so a task
+// routed to a non-default profile stopped at Claude's "Quick safety check"
+// trust dialog in its fresh worktree.
 func ClaudeConfigFilePath(dir string) string {
-	if dir == "" {
+	if strings.TrimSpace(dir) == "" {
 		dir = DefaultClaudeConfigDir()
 	}
-	dir = strings.TrimRight(dir, string(os.PathSeparator))
-	return dir + ".json"
+	dir = filepath.Clean(expandUserPath(strings.TrimSpace(dir)))
+	if legacy := filepath.Join(dir, ".config.json"); regularFileExists(legacy) {
+		return legacy
+	}
+	if isDefaultClaudeConfigDir(dir) {
+		return dir + ".json"
+	}
+	return filepath.Join(dir, ".claude.json")
+}
+
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func expandUserPath(path string) string {

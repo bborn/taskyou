@@ -27,8 +27,17 @@ import "strings"
 var blockingPromptPatterns = []authPattern{
 	{"enter to confirm · esc to cancel", "Executor is waiting on a dialog — answer it, or re-run with the prompt disabled"},
 	{"teach auto mode about your environment", "Claude is asking to learn the environment (auto-mode onboarding) — answer it to let the task start"},
-	{"do you trust the files in this folder", "Claude is asking whether to trust this folder — answer it to let the task start"},
+	// Claude Code's workspace trust dialog, current wording (2.1.28x) then the
+	// older one. TaskYou pre-trusts every project it launches in (see
+	// ensureProjectTrusted), so reaching this means that write missed the config
+	// file this Claude reads — a task could sit here under a generic "waiting
+	// on a dialog" while `ty show` printed an unrelated placement note.
+	{"quick safety check: is this a project you created or one you trust", trustPromptReason},
+	{"do you trust the files in this folder", trustPromptReason},
 }
+
+// trustPromptReason is what a task parked on Claude's trust dialog says.
+const trustPromptReason = "Waiting on Claude Code's workspace trust prompt — choose \"Yes, I trust this folder\" to let the task start"
 
 // busyPatterns are things an executor paints only while a turn is genuinely in
 // flight. They matter because the idle tracker fingerprints the pane, and a

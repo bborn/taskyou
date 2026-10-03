@@ -83,10 +83,10 @@ git init --bare -q "$TY_QA_ROOT/remote.git"
 git -C "$PROJECT_PATH" remote add origin "$TY_QA_ROOT/remote.git"
 git -C "$PROJECT_PATH" push -q -u origin HEAD
 
-# NOTE: do NOT pass --claude-config-dir. ty writes its trust/MCP config to
-# ClaudeConfigFilePath(dir) == "<dir>.json", but launching claude with
-# CLAUDE_CONFIG_DIR=<dir> makes it read "<dir>/.claude.json". Pinning even the default
-# dir splits the two, and the step then hangs forever on the folder-trust prompt.
+# NOTE: no --claude-config-dir needed. ty used to write its trust/MCP config to
+# "<dir>.json" while claude launched with CLAUDE_CONFIG_DIR=<dir> reads
+# "<dir>/.claude.json", so a pinned non-default dir hung on the folder-trust prompt.
+# ClaudeConfigFilePath now names the file Claude reads.
 ty projects create "$PROJECT" --path "$PROJECT_PATH" >/dev/null 2>&1 || true
 
 echo "==> Stress workflow (root -> A||B -> sink), cheap model, trivial work"
@@ -115,10 +115,11 @@ echo "==> Starting isolated daemon"
 bash "$TY_QA_DIR/ty-qa-daemon.sh" >/dev/null
 sleep 1
 
-# Claude shows a first-run prompt in every fresh worktree whose .claude/settings.local.json
-# pre-approves a tool permission (ty's setupClaudeHooks writes Read(.claude/attachments/**)).
-# hasTrustDialogAccepted does NOT suppress it, and an unattended step waits on it forever.
-# Answer it, in the ISOLATED tmux server only.
+# Safety net: answer Claude's trust prompt if a step ever shows it, in the ISOLATED tmux
+# server only. The prompt lists the permission .claude/settings.local.json pre-approves
+# (ty's setupClaudeHooks writes Read(.claude/attachments/**)), but on Claude 2.1.288 a
+# hasTrustDialogAccepted entry in the config file Claude reads does suppress it; a step
+# reaching it means ty's pre-trust missed that file, which is a bug worth reporting.
 autotrust() {
   local end=$(( $(date +%s) + WATCH + 120 ))
   while [[ $(date +%s) -lt $end ]]; do
