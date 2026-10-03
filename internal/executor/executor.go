@@ -2745,6 +2745,8 @@ Completion signaling (REQUIRED — nothing else watches for completion):
   - If taskyou_complete is genuinely uncallable after you tried to load it, finish with the CLI instead: ty complete --summary "<your summary>". It runs the IDENTICAL logic (same verify gate, same gate parking, same PR routing). Do NOT substitute 'ty close' — that is a plain status write which skips those rules and is not yours to run: only a human closes a task.
 - When you need clarification, call taskyou_needs_input with the question. This moves the task to 'blocked' so a human is notified. Do not prompt in the terminal — the task system can't see TTY prompts.`)
 
+	b.WriteString(clipboardGuidance)
+
 	if e.taskUsesWorktrees(task) {
 		b.WriteString(`
 
@@ -2755,6 +2757,14 @@ Working directory constraint (isolated git worktree):
 
 	return b.String()
 }
+
+// clipboardGuidance tells the agent how to hand the user text to paste. Without
+// it agents print a command and leave the user to select it in the pane, which
+// picks up a line break wherever the output wrapped.
+const clipboardGuidance = `
+
+Giving the user text to paste:
+- When you hand the user something to paste (a shell command, URL, token or snippet), also call taskyou_copy_to_clipboard with the exact text. It reaches their clipboard over TaskYou's own connection, byte for byte; selecting it in your terminal adds a line break wherever your output wrapped. Never write a secret to a file just so it can be copied.`
 
 // remoteUniversalGuidance is the execution guidance for an agent running on a
 // PLACED HOST rather than on this machine.
@@ -5961,6 +5971,7 @@ func ensureWorktreeMCPConfig(taskID int64) (string, error) {
 			"taskyou_set_project_context",
 			"taskyou_get_artifact",
 			"taskyou_set_artifact",
+			"taskyou_copy_to_clipboard",
 		},
 	}
 	config := map[string]interface{}{

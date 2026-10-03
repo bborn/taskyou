@@ -106,6 +106,7 @@ func TestToolsList(t *testing.T) {
 		"taskyou_list_tasks":          false,
 		"taskyou_get_project_context": false,
 		"taskyou_set_project_context": false,
+		"taskyou_copy_to_clipboard":   false,
 	}
 	for _, toolI := range tools {
 		tool, ok := toolI.(map[string]interface{})

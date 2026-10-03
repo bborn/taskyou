@@ -82,6 +82,22 @@ same chrome.
   ty sets `set-clipboard on` on the server it opens its panes in. Without it a
   selection went into a paste buffer on the far side — for a placed task, a
   buffer on a machine you are not sitting at.
+
+  That is the outer half. The inner half is the tmux the agent runs on — the
+  host's, for a placed task — and ty configures it when a view opens:
+  `set-clipboard on` there too (otherwise an OSC 52 the agent or its tools
+  write is swallowed before it leaves the host), `terminal-features` entries
+  that tell it ty's view can take a clipboard, and `allow-passthrough on` on
+  the task's window for programs that wrap their OSC 52 for tmux. Your own
+  terminal still has to accept OSC 52 (iTerm2: *Applications in terminal may
+  access clipboard*).
+- **Exact text from the agent.** A terminal selection picks up a hard line
+  break wherever the agent's output wrapped, and no tmux setting can undo a
+  break the agent's UI drew itself. When an agent hands you something to
+  paste it calls `taskyou_copy_to_clipboard`, which carries the text over
+  ty's own connection to the machine that scheduled the task and puts it on
+  the clipboard there byte for byte — no terminal escapes, and no file on the
+  host for a secret to sit in.
 - **Size.** Remote agent sessions start at the same size as local ones (200x50),
   and the window follows whoever is looking at it, so an agent does not lay its
   screen out for tmux's 80x24 and reflow when you open the task.

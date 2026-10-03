@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tmuxctl"
 )
 
 // RemoteSessionStatus is what a local surface found when it looked for a
@@ -135,7 +136,7 @@ func remoteAttachChain(task *db.Task, view string) string {
 
 func remoteAttachWindowChain(task *db.Task, view, window string) string {
 	q := shellQuote
-	return strings.Join([]string{
+	lines := []string{
 		// Nothing to attach to: say so, and let the wrapper print the manual
 		// command. The exit status is the ordinary "no such session" 1.
 		fmt.Sprintf("tmux has-session -t %s 2>/dev/null || { echo 'the tmux session for this task is no longer running there' >&2; exit 1; }",
@@ -164,11 +165,25 @@ func remoteAttachWindowChain(task *db.Task, view, window string) string {
 		// its size has to follow whoever is looking at it — otherwise the agent
 		// renders for a size that is not the pane's and reflows on every glance.
 		fmt.Sprintf("tmux set-option -w -t %s window-size latest >/dev/null", q(view+":"+window)),
+	}
+	// Copies made in the agent's pane must leave the host's tmux, or they stop
+	// in a paste buffer on a machine the user is not sitting at (see
+	// tmuxctl.AgentClipboardArgs). Before the attach: a client's terminal
+	// features are read when it connects. Errors are discarded — a host whose
+	// tmux predates an option still attaches, it just copies as it always did.
+	for _, args := range append([][]string{tmuxctl.PassthroughArgs(view + ":" + window)}, tmuxctl.AgentClipboardArgs()...) {
+		quoted := make([]string, len(args))
+		for i, a := range args {
+			quoted[i] = q(a)
+		}
+		lines = append(lines, "tmux "+strings.Join(quoted, " ")+" >/dev/null 2>&1")
+	}
+	return strings.Join(append(lines,
 		// Attach, and only then mark the view session disposable: chained with
 		// tmux's ";" so destroy-unattached cannot fire before this client connects
 		// and take the session with it.
 		fmt.Sprintf("exec tmux attach-session -t %s ';' set-option destroy-unattached on", q(view)),
-	}, "\n")
+	), "\n")
 }
 
 // localSSHInvocation is the ssh command line (binary and options, no host) the

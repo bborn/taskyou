@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/tmuxtest"
 )
@@ -116,5 +117,109 @@ func TestViewAttachScriptTargetsTheAgentServer(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("ViewAttachScript = %q, missing %q", got, want)
 		}
+	}
+}
+
+// relayedCopy runs an agent that writes an OSC 52 copy on an inner server, views
+// it through a nested client in a pane of an outer server configured as ty
+// configures the UI server, and returns what reached the outer server's paste
+// buffers. The outer server stands in for the user's terminal: with
+// set-clipboard on, tmux keeps an OSC 52 it relays as a buffer.
+func relayedCopy(t *testing.T, inner [][]string) string {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tmuxtest.Isolate(t)
+	in, out := "tyclip-in", "tyclip-out"
+	tm := func(sock string, args ...string) *exec.Cmd {
+		return exec.Command("tmux", append([]string{"-f", "/dev/null", "-L", sock}, args...)...)
+	}
+	t.Cleanup(func() {
+		tm(out, "kill-server").Run()
+		tm(in, "kill-server").Run()
+	})
+
+	// The agent waits until a client is attached, then copies.
+	agent := `while [ "$(tmux display-message -p '#{session_attached}')" = 0 ]; do sleep 0.1; done; sleep 0.5; ` +
+		`printf '\033]52;c;%s\a' "$(printf 'exact text' | base64)"; sleep 30`
+	if b, err := tm(in, "new-session", "-d", "-s", "agent", "-x", "80", "-y", "24", agent).CombinedOutput(); err != nil {
+		t.Fatalf("inner server: %v: %s", err, b)
+	}
+	for _, args := range inner {
+		if b, err := tm(in, args...).CombinedOutput(); err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+	}
+	if b, err := tm(out, "new-session", "-d", "-s", "ui", "-x", "100", "-y", "30").CombinedOutput(); err != nil {
+		t.Fatalf("outer server: %v: %s", err, b)
+	}
+	if b, err := tm(out, ClipboardRelayArgs()...).CombinedOutput(); err != nil {
+		t.Fatalf("outer relay: %v: %s", err, b)
+	}
+	if b, err := tm(out, "split-window", "-t", "ui", "env -u TMUX tmux -L "+in+" attach -t agent").CombinedOutput(); err != nil {
+		t.Fatalf("nested client: %v: %s", err, b)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := tm(out, "show-buffer").Output(); err == nil && len(b) > 0 {
+			return string(b)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return ""
+}
+
+// A copy an application makes inside the agent's tmux — Claude Code's copy, an
+// editor's yank, a printf — must come out of it. Under tmux's default it does
+// not: the inner server swallows the OSC 52, and the user's clipboard never
+// hears of it, which is how a copy in a placed task's pane went missing.
+func TestAgentClipboardArgsLetAnAppCopyLeaveTheAgentServer(t *testing.T) {
+	if got := relayedCopy(t, AgentClipboardArgs()); got != "exact text" {
+		t.Fatalf("outer server got %q, want %q", got, "exact text")
+	}
+}
+
+// The control for the test above: without the agent-side options the copy is
+// dropped, so it is those options, not the outer relay alone, that deliver it.
+func TestWithoutAgentClipboardArgsAnAppCopyIsDropped(t *testing.T) {
+	if got := relayedCopy(t, nil); got != "" {
+		t.Fatalf("outer server got %q with tmux defaults; the test above proves nothing", got)
+	}
+}
+
+// Set every time a view opens, so applying them again must change nothing.
+func TestAgentClipboardArgsAreIdempotent(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tmuxtest.Isolate(t)
+	tm := func(args ...string) string {
+		b, err := exec.Command("tmux", append([]string{"-f", "/dev/null", "-L", "tyclip-idem"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return string(b)
+	}
+	t.Cleanup(func() { exec.Command("tmux", "-L", "tyclip-idem", "kill-server").Run() })
+	tm("new-session", "-d", "-s", "s")
+	apply := func() string {
+		for _, args := range AgentClipboardArgs() {
+			tm(args...)
+		}
+		return tm("show-options", "-s", "terminal-features")
+	}
+	once := apply()
+	if twice := apply(); twice != once {
+		t.Errorf("applying twice changed terminal-features:\n%s\nthen\n%s", once, twice)
+	}
+	for _, want := range []string{"tmux*:clipboard", "screen*:clipboard"} {
+		if !strings.Contains(once, want) {
+			t.Errorf("terminal-features lacks %q:\n%s", want, once)
+		}
+	}
+	if got := strings.Join(PassthroughArgs("@3"), " "); got != "set-option -w -t @3 allow-passthrough on" {
+		t.Errorf("PassthroughArgs = %q", got)
 	}
 }

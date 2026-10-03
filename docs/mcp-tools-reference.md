@@ -188,6 +188,33 @@ Get details of a specific past task by ID.
 
 **Note:** Only works for tasks in the same project (enforces project isolation).
 
+## Clipboard
+
+### taskyou_copy_to_clipboard
+
+Put text on the user's clipboard, exactly as given. Use it for anything the
+user will paste — a shell command, URL, token or snippet — rather than asking
+them to select it in the terminal, where wrapped output gains hard line breaks.
+
+The call is handled where the task was scheduled (for a task placed on another
+host, over ty's MCP relay), so the text lands on the clipboard of the machine
+the user is on. It is delivered by that machine's clipboard command (`pbcopy`,
+`wl-copy`, `xclip`, `xsel`, `clip.exe`) and, when a ty view is open, by OSC 52
+to the terminal showing it. The text is not written to the task log.
+
+**Parameters:**
+- `text` (string, required) - The exact text to copy (at most 1 MiB)
+
+**Example:**
+```json
+{
+  "name": "taskyou_copy_to_clipboard",
+  "arguments": {
+    "text": "ssh deploy@staging 'bin/rails runner \"Tenant.find(42).reindex!\"'"
+  }
+}
+```
+
 ## Screenshots & Attachments
 
 ### taskyou_screenshot

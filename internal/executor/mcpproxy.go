@@ -1088,7 +1088,8 @@ Your taskyou_* tools (the "taskyou" MCP server) are relayed to %[1]s, the
 machine that scheduled you, so they act on this task exactly as they would
 there. Use them as usual: taskyou_get_project_context, taskyou_get_artifact /
 taskyou_set_artifact, taskyou_needs_input, and taskyou_complete when you are
-finished. Your harness may DEFER them behind tool search — load one before use
+finished. taskyou_copy_to_clipboard puts text on the clipboard of the machine
+the user is on — use it rather than asking them to copy from your terminal. Your harness may DEFER them behind tool search — load one before use
 (e.g. ToolSearch "select:taskyou_complete") rather than concluding it is missing.
 
 If a taskyou_* call fails with "unavailable", %[1]s is asleep or offline. That

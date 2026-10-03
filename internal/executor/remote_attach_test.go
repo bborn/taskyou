@@ -219,3 +219,38 @@ func TestRemoteGuidanceDoesNotTellTheAgentToCallCommandsThatCannotWorkThere(t *t
 		}
 	}
 }
+
+// A copy made in a placed task's pane has to leave the HOST's tmux, or it stops
+// in a paste buffer on a machine the user is not at. The host server relays
+// application OSC 52 and knows its client (ty's view) can take it, and the
+// task's window lets passthrough-wrapped copies out — all before the client
+// attaches, since tmux reads a client's terminal features when it connects.
+func TestRemoteAttachScriptLetsCopiesLeaveTheHost(t *testing.T) {
+	script := attachChain(t)
+	attach := strings.Index(script, "exec tmux attach-session")
+	for _, want := range []string{
+		"'set-clipboard' 'on'",
+		"'tmux*:clipboard'",
+		"'screen*:clipboard'",
+		"'allow-passthrough' 'on'",
+	} {
+		i := strings.Index(script, want)
+		if i < 0 {
+			t.Errorf("chain does not set %s:\n%s", want, script)
+			continue
+		}
+		if i > attach {
+			t.Errorf("%s is set after the client attaches", want)
+		}
+	}
+	// Scoped to this task's window of the view, not the server's other panes.
+	if !strings.Contains(script, "'-w' '-t' '"+remoteViewSession(5250)+":task-5250' 'allow-passthrough'") {
+		t.Errorf("allow-passthrough is not scoped to the task's window:\n%s", script)
+	}
+	// An older tmux on the host that lacks an option must still attach.
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "clipboard") && !strings.HasSuffix(line, "2>&1") {
+			t.Errorf("an unsupported option would print into the pane: %q", line)
+		}
+	}
+}

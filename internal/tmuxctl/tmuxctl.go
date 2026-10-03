@@ -281,6 +281,48 @@ func ClipboardRelayArgs() []string {
 	return []string{"set-option", "-s", "set-clipboard", "on"}
 }
 
+// nestedClipboardFeatureSlot is where AgentClipboardArgs writes its
+// terminal-features entries. A fixed index, not an append (`-a`): the options
+// are set every time a view opens, and an append would add a copy each time.
+const nestedClipboardFeatureSlot = 90
+
+// AgentClipboardArgs are the tmux commands the server an AGENT runs on needs so
+// that a copy made in a task's pane leaves that server at all: the local agent
+// server, or the tmux on a placed host. They are the inner half of the chain
+// ClipboardRelayArgs is the outer half of.
+//
+// Two things stop a copy there without them:
+//
+//   - `set-clipboard on`. Under tmux's default, `external`, an OSC 52 an
+//     application writes — Claude Code's copy, an editor's yank, a printf from
+//     the agent's shell — is swallowed by the agent's tmux and goes nowhere.
+//     Only tmux's own copies (copy mode, `load-buffer -w`) are sent on.
+//   - A terminal that says it has a clipboard. The client attached to this
+//     server is ty's view, whose terminal is a tmux pane (TERM tmux-* or
+//     screen-*), and tmux sends OSC 52 only to terminals with the clipboard
+//     feature. A current tmux learns that by asking the terminal; an older
+//     one on a fleet host, or an answer lost on a slow ssh link, leaves it
+//     unknown and every copy is dropped. So say it outright.
+//
+// All are server options, set before the view's client attaches: tmux reads a
+// client's terminal features when it connects.
+func AgentClipboardArgs() [][]string {
+	return [][]string{
+		ClipboardRelayArgs(),
+		{"set-option", "-s", fmt.Sprintf("terminal-features[%d]", nestedClipboardFeatureSlot), "tmux*:clipboard"},
+		{"set-option", "-s", fmt.Sprintf("terminal-features[%d]", nestedClipboardFeatureSlot+1), "screen*:clipboard"},
+	}
+}
+
+// PassthroughArgs lets the panes of a task's window send escape sequences
+// straight through to the terminal outside, wrapped in tmux's DCS passthrough.
+// Programs that know they run in tmux (Claude Code among them) send their
+// OSC 52 copies that way, and tmux drops them unless the pane allows it. Set on
+// the task's window only, so no other pane on the server gains the ability.
+func PassthroughArgs(window string) []string {
+	return []string{"set-option", "-w", "-t", window, "allow-passthrough", "on"}
+}
+
 // ExitWithProcess prefixes a pane's shell command with a watcher that closes
 // the pane once process pid is gone. ty's view and remote-attach panes run
 // clients of their own, so a TUI that crashes or is killed -9 would otherwise
