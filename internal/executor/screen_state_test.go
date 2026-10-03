@@ -54,6 +54,49 @@ const retryLoopCapture = `✻ API error · Retrying in 8s · attempt 2/10
 ────────────────────────────────────────────────────────────────────────────────
   ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents   /rc`
 
+// trustDialogCapture is Claude Code 2.1.288's workspace trust dialog, as it
+// paints in a fresh worktree whose .claude/settings.local.json carries
+// TaskYou's attachment permission.
+const trustDialogCapture = `────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /Users/me/Projects/myapp/.task-worktrees/42-add-a-feature
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not,
+ take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ ⚠ This folder pre-approves 1 tool permission in .claude/settings.local.json:
+   Read(.claude/attachments/**)
+ These will apply without asking. Only proceed if you trust this configuration.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel`
+
+// The trust dialog must be named as such, not as a generic dialog: it is the one
+// prompt whose answer is always the same, and the one that means TaskYou's own
+// pre-trust missed.
+func TestDetectBlockingPromptNamesTheTrustDialog(t *testing.T) {
+	for name, content := range map[string]string{
+		"current wording": trustDialogCapture,
+		"older wording":   "Do you trust the files in this folder?\n1. Yes\n2. No",
+	} {
+		reason, ok := DetectBlockingPrompt(content)
+		if !ok {
+			t.Errorf("%s: trust dialog not detected", name)
+			continue
+		}
+		if reason != trustPromptReason {
+			t.Errorf("%s: reason = %q, want %q", name, reason, trustPromptReason)
+		}
+	}
+}
+
 func TestDetectBlockingPrompt(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -64,6 +107,7 @@ func TestDetectBlockingPrompt(t *testing.T) {
 		{"real onboarding dialog from task 5289", onboardingDialogCapture, true},
 		{"generic modal footer", "Something?\n\n  Enter to confirm · Esc to cancel", true},
 		{"folder trust prompt", "Do you trust the files in this folder?\n1. Yes\n2. No", true},
+		{"current workspace trust dialog", trustDialogCapture, true},
 		{"working agent", workingCapture, false},
 		{"agent that hit a 529", overloadedCapture, false},
 		{"ordinary task output", "Editing main.go\nRunning tests...\nAll tests passed.", false},

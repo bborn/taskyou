@@ -492,3 +492,62 @@ func TestRequiredRemoteDoesNotFallbackOnProbeFailure(t *testing.T) {
 		t.Fatalf("fallback: %+v", got)
 	}
 }
+
+// An inventory with four hosts, none of which has a checkout of
+// myapp. Hosts that serve other projects — including ones whose names
+// share a prefix or a substring, and one that lists the project with a blank
+// checkout — must never be chosen, and the task must stay local with a reason
+// that says so. The hosts listing must offer none of them either.
+func TestResolveNeverPlacesOnAHostThatDoesNotServeTheProject(t *testing.T) {
+	writeInventory(t, `
+hosts:
+  build-a:
+    ssh: build-a
+    capabilities: [agent, ruby, node]
+    repos:
+      api: ~/projects/api
+  build-b:
+    ssh: build-b
+    capabilities: [agent, ruby, node]
+    repos:
+      web: ~/projects/web
+      my: ~/projects/my
+      myapp-old: ~/projects/myapp-old
+  host-c:
+    ssh: host-c
+    capabilities: [agent, docker]
+    repos:
+      taskyou: ~/projects/taskyou
+      myapp: ""
+  host-d:
+    ssh: host-d
+    capabilities: [agent]
+`)
+	r := Resolver{Prober: unusedProber{t}}
+	got := r.Resolve(context.Background(), request("myapp"))
+	if got.Target != "" || got.Workdir != "" {
+		t.Fatalf("placed on %q (%q); no host serves myapp (reason: %s)", got.Target, got.Workdir, got.Reason)
+	}
+	if got.Unavailable {
+		t.Errorf("a project that does not require remote execution was marked unavailable")
+	}
+	if !strings.Contains(got.Reason, "serves myapp (4 hosts in inventory)") {
+		t.Errorf("reason = %q, want it to say no host serves myapp", got.Reason)
+	}
+	if hosts := r.Hosts(request("myapp")).Hosts; len(hosts) != 0 {
+		t.Errorf("offered %v for a project no host serves", hosts)
+	}
+}
+
+// With no inventory at all — `on` never configured — every task runs locally.
+func TestResolveWithNoInventoryRunsLocal(t *testing.T) {
+	t.Setenv("ON_HOSTS", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	got := Resolver{Prober: unusedProber{t}}.Resolve(context.Background(), request("myapp"))
+	if got.Target != "" {
+		t.Fatalf("placed on %q with no inventory configured", got.Target)
+	}
+	if !strings.Contains(got.Reason, "no host inventory at") {
+		t.Errorf("reason = %q, want it to name the missing inventory", got.Reason)
+	}
+}

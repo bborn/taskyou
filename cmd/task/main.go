@@ -1825,6 +1825,18 @@ Examples:
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
 				}
+				// ran_on_reason explains placement only; why a blocked task is
+				// blocked is its own field.
+				if task.Status == db.StatusBlocked {
+					if events, err := database.GetAppliedStatusEvents(taskID); err == nil {
+						if why, detail := blockReason(events); why != "" {
+							output["blocked_reason"] = why
+							if detail != "" {
+								output["blocked_detail"] = detail
+							}
+						}
+					}
+				}
 				// Add PR info to JSON output
 				if prInfo != nil {
 					output["pr"] = map[string]interface{}{
@@ -1868,6 +1880,19 @@ Examples:
 					statusColor = lipgloss.Color("#10B981")
 				}
 				fmt.Printf("Status:   %s\n", lipgloss.NewStyle().Foreground(statusColor).Render(task.Status))
+				// Why it is blocked, straight from the transition that blocked it,
+				// so the nearest explanation on screen is the real one and not
+				// whatever else happens to be printed below (see placementLine).
+				if task.Status == db.StatusBlocked {
+					if events, err := database.GetAppliedStatusEvents(taskID); err == nil {
+						if why, detail := blockReason(events); why != "" {
+							fmt.Printf("Blocked:  %s\n", why)
+							if detail != "" {
+								fmt.Printf("          %s\n", dimStyle.Render(detail))
+							}
+						}
+					}
+				}
 				fmt.Printf("Type:     %s\n", task.Type)
 				if task.Project != "" {
 					fmt.Printf("Project:  %s\n", task.Project)
@@ -1882,16 +1907,11 @@ Examples:
 					fmt.Printf("Completed: %s\n", task.CompletedAt.Time.Format("2006-01-02 15:04:05"))
 				}
 
-				// Where it ran. Only shown once a placement handler has answered for
-				// this task — a locally-run task on a machine with no placement
+				// Where it runs. Only shown once a placement handler has answered
+				// for this task — a locally-run task on a machine with no placement
 				// plugin prints exactly what it always has.
-				if task.PlacementTarget != "" {
-					fmt.Printf("Ran on:   %s\n", task.PlacementTarget)
-				} else if task.PlacementReason != "" {
-					fmt.Printf("Ran on:   %s\n", dimStyle.Render("local"))
-				}
-				if task.PlacementReason != "" {
-					fmt.Printf("Because:  %s\n", dimStyle.Render(task.PlacementReason))
+				if line := placementLine(task.PlacementTarget, task.PlacementReason); line != "" {
+					fmt.Printf("Placement: %s\n", line)
 				}
 				// A remotely placed task's worktree is on that host, not in
 				// worktree_path — which names a directory on THIS machine.
