@@ -2,6 +2,7 @@ package routine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -317,5 +318,93 @@ func TestRenderScheduleCronForExplicitExpression(t *testing.T) {
 	}
 	if !strings.Contains(content, "*/10 * * * *") || !strings.Contains(content, "# ty:routine:scout") {
 		t.Errorf("unexpected cron line: %q", content)
+	}
+}
+
+// macOS cron silently drops lines past ~1000 chars. The line used to inline the
+// whole invoking PATH, so a long PATH meant a routine that never fired.
+func TestCronLineStaysShortWithHugePath(t *testing.T) {
+	setupScheduleTest(t)
+	var dirs []string
+	for i := 0; len(strings.Join(dirs, ":")) < 5000; i++ {
+		dirs = append(dirs, "/opt/some/really/long/toolchain/path/number/"+strings.Repeat("x", i%7)+"/bin")
+	}
+	hugePath := strings.Join(dirs, ":")
+	t.Setenv("PATH", hugePath)
+
+	_, line, err := RenderSchedule("scout", ScheduleOptions{Cron: "0 8 * * 1-5"})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if len(line) > maxCronLineLen {
+		t.Errorf("cron line is %d chars, want <= %d:\n%s", len(line), maxCronLineLen, line)
+	}
+	if strings.Contains(line, "PATH=") {
+		t.Errorf("cron line must not inline PATH: %s", line)
+	}
+	if !strings.Contains(line, cronWrapperPath("scout")) {
+		t.Errorf("cron line should invoke the wrapper: %s", line)
+	}
+
+	// The PATH is preserved in the wrapper instead, deduplicated.
+	wrapper := RenderCronWrapper("scout")
+	if !strings.Contains(wrapper, dedupePath(hugePath)) {
+		t.Error("wrapper should carry the invoking PATH")
+	}
+	if !strings.Contains(wrapper, "exec ") || !strings.Contains(wrapper, " run 'scout'") {
+		t.Errorf("wrapper should exec ty run:\n%s", wrapper)
+	}
+}
+
+func TestCronLineGuardRejectsOverlongLine(t *testing.T) {
+	setupScheduleTest(t)
+	t.Setenv("TY_ROUTINES_STATE_DIR", "/"+strings.Repeat("d", 1000))
+	if _, _, err := RenderSchedule("scout", ScheduleOptions{Cron: "0 8 * * 1-5"}); err == nil {
+		t.Fatal("expected an error for a crontab line over the limit")
+	}
+}
+
+func TestInstallCronCreatesStateDirAndWrapper(t *testing.T) {
+	setupScheduleTest(t)
+	if _, err := os.Stat(StateDir("scout")); !os.IsNotExist(err) {
+		t.Fatalf("precondition: state dir should not exist yet (%v)", err)
+	}
+	if _, err := InstallSchedule("scout", ScheduleOptions{Cron: "0 8 * * 1-5"}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	info, err := os.Stat(cronWrapperPath("scout"))
+	if err != nil {
+		t.Fatalf("wrapper not written: %v", err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("wrapper should be executable, mode %v", info.Mode())
+	}
+	if info, err := os.Stat(StateDir("scout")); err != nil || !info.IsDir() {
+		t.Fatalf("log dir not created: %v", err)
+	}
+}
+
+// The wrapper must actually run under sh: PATH set, exec of ty with the routine.
+func TestCronWrapperExecutes(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	fakeTy := filepath.Join(dir, "fake ty")
+	if err := os.WriteFile(fakeTy, []byte("#!/bin/sh\necho \"$PATH|$*\" > '"+out+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/usr/bin:/bin:/usr/bin:/it's/here")
+	wrapper := strings.Replace(RenderCronWrapper("scout"), shQuote(executablePath()), shQuote(fakeTy), 1)
+	script := filepath.Join(dir, "cron-run.sh")
+	if err := os.WriteFile(script, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", script)
+	cmd.Env = []string{"PATH=/nothing"}
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wrapper failed: %v\n%s", err, b)
+	}
+	got, _ := os.ReadFile(out)
+	if want := "/usr/bin:/bin:/it's/here|run scout\n"; string(got) != want {
+		t.Errorf("wrapper ran ty with %q, want %q", got, want)
 	}
 }
