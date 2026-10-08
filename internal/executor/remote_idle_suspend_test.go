@@ -122,9 +122,9 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 		"idle task's watcher, found by its ID": fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-no-record", idleNoPath.ID))),
 	}
 	kept := map[string]func() bool{
-		"recently blocked task's server": fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-recent", recent.ID))),
-		"running task's server":          fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-running", running.ID))),
-		"another coordinator's same ID":  fake.sideProcess(t, "mona", filepath.Join("other", ".task-worktrees", fmt.Sprintf("%d-theirs", idle.ID), "log")),
+		"recently blocked task's server":  fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-recent", recent.ID))),
+		"running task's server":           fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-running", running.ID))),
+		"another coordinator's same ID":   fake.sideProcess(t, "mona", filepath.Join("other", ".task-worktrees", fmt.Sprintf("%d-theirs", idle.ID), "log")),
 		"a task whose ID starts the same": fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d3-longer-id", idle.ID))),
 		"its puma, by title":              fake.sideProcess(t, "mona", fmt.Sprintf("puma [%d3-longer-id]", idleNoPath.ID)),
 		"unreachable host's server":       fake.sideProcess(t, "asleep", wt(fmt.Sprintf("%d-asleep", asleep.ID))),
