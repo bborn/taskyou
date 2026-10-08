@@ -60,6 +60,10 @@ type remoteSessionEnder struct {
 	// quiet holds blocked tasks found in use on their host, until they could
 	// next be idle, so a pane someone is typing in costs no ssh call per sweep.
 	quiet map[int64]time.Time
+	// older holds runs whose task-<id> window turned out to name another run
+	// while the database still says this one is current: that window is from
+	// an older run, and the next sweep ends it (see olderRunWindow).
+	older map[int64]string
 }
 
 type hostRetry struct {
@@ -101,6 +105,30 @@ func (s *remoteSessionEnder) sleep(taskID int64, at time.Time) {
 	s.quiet[taskID] = at
 }
 
+// markOlder records that task's run is still current although its window names
+// another run, so the window is an older run's.
+func (s *remoteSessionEnder) markOlder(taskID int64, runID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.older == nil {
+		s.older = make(map[int64]string)
+	}
+	s.older[taskID] = runID
+}
+
+// isOlder reports whether task's window was found to be older than runID.
+func (s *remoteSessionEnder) isOlder(taskID int64, runID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.older[taskID] == runID
+}
+
+func (s *remoteSessionEnder) forgetOlder(taskID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.older, taskID)
+}
+
 func (s *remoteSessionEnder) succeeded(host string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,6 +161,9 @@ func (e *Executor) startSweepingRemoteSessions(ctx context.Context) {
 type hostWork struct {
 	finished []db.RemoteRun // done or archived: end the windows, forget the run
 	idle     []idleRemoteRun
+	// older: tasks whose window naming another run is known to be an older
+	// run's (see olderRunWindow), so it is ended rather than spared.
+	older map[int64]bool
 }
 
 func (w hostWork) empty() bool { return len(w.finished) == 0 && len(w.idle) == 0 }
@@ -179,6 +210,10 @@ func (e *Executor) sweepRemoteSessions(ctx context.Context, now time.Time) {
 		}
 		e.sessionEnd.succeeded(host)
 		for _, run := range pending.finished {
+			if ended.otherRun[run.TaskID] && e.olderRunWindow(host, run) {
+				continue // kept, so the next sweep ends the older window
+			}
+			e.sessionEnd.forgetOlder(run.TaskID)
 			if err := e.db.EndRemoteRun(run.TaskID, run.RunID); err != nil {
 				e.logger.Warn("Failed to forget ended remote run", "task", run.TaskID, "error", err)
 			}
@@ -194,6 +229,22 @@ func (e *Executor) sweepRemoteSessions(ctx context.Context, now time.Time) {
 	}
 }
 
+// olderRunWindow decides what a task-<id> window naming another run is. The
+// sweep's run is re-read: if it is still the task's current run, the window
+// can only be left over from an older one, and the next sweep ends it — the
+// host was asked to spare it only in case it was a newer run's. Otherwise a
+// newer run has started since the sweep read the database, and the window is
+// that run's.
+func (e *Executor) olderRunWindow(host string, run db.RemoteRun) bool {
+	current, err := e.db.IsCurrentRemoteRun(run.TaskID, run.RunID, host)
+	if err != nil || !current {
+		return false
+	}
+	e.sessionEnd.markOlder(run.TaskID, run.RunID)
+	e.logger.Info("Remote task's window is left from an older run; ending it next sweep", "task", run.TaskID, "host", host)
+	return true
+}
+
 // remoteSessionWork is the sweep's to-do list, by host.
 func (e *Executor) remoteSessionWork(now time.Time) map[string]hostWork {
 	work := make(map[string]hostWork)
@@ -201,17 +252,33 @@ func (e *Executor) remoteSessionWork(now time.Time) map[string]hostWork {
 	if err != nil {
 		e.logger.Debug("Failed to list finished remote runs", "error", err)
 	}
+	older := func(w hostWork, run db.RemoteRun) hostWork {
+		if e.sessionEnd.isOlder(run.TaskID, run.RunID) {
+			if w.older == nil {
+				w.older = make(map[int64]bool)
+			}
+			w.older[run.TaskID] = true
+		}
+		return w
+	}
 	for _, run := range finished {
-		w := work[run.Host]
+		w := older(work[run.Host], run)
 		w.finished = append(w.finished, run)
 		work[run.Host] = w
 	}
 	for _, run := range e.idleRemoteRuns(now) {
-		w := work[run.Host]
+		w := older(work[run.Host], run.RemoteRun)
 		w.idle = append(w.idle, run)
 		work[run.Host] = w
 	}
 	return work
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // remoteEnded is what a host reports having done.
@@ -238,12 +305,12 @@ func endRemoteTaskSessions(ctx context.Context, host, session string, work hostW
 	for _, run := range work.finished {
 		names[TmuxWindowName(run.TaskID)] = run.TaskID
 		names[TmuxWindowName(run.TaskID)+"-shell"] = run.TaskID
-		windowSpecs = append(windowSpecs, fmt.Sprintf("%d:%s:0", run.TaskID, run.RunID))
+		windowSpecs = append(windowSpecs, fmt.Sprintf("%d:%s:0:%d", run.TaskID, run.RunID, boolInt(work.older[run.TaskID])))
 	}
 	for _, run := range work.idle {
 		names[TmuxWindowName(run.TaskID)] = run.TaskID
 		names[TmuxWindowName(run.TaskID)+"-shell"] = run.TaskID
-		windowSpecs = append(windowSpecs, fmt.Sprintf("%d:%s:%d", run.TaskID, run.RunID, max(int64(run.Timeout/time.Second), 1)))
+		windowSpecs = append(windowSpecs, fmt.Sprintf("%d:%s:%d:%d", run.TaskID, run.RunID, max(int64(run.Timeout/time.Second), 1), boolInt(work.older[run.TaskID])))
 		if run.sideProcesses() {
 			procSpecs = append(procSpecs, fmt.Sprintf("%d:%s", run.TaskID, run.Worktree))
 		}

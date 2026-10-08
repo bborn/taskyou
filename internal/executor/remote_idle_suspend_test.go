@@ -119,7 +119,7 @@ func hasRun(t *testing.T, database *db.DB, taskID int64) bool {
 //
 // The host is shared — on ik-agents ty logs in as the user that runs the host's
 // own TaskYou — so everything else must survive: a recently blocked or running
-// task; a task someone is typing in; a task whose window is a newer run's; the
+// task; a task someone is typing in; the
 // same task ID in another session or another coordinator's worktree; a task
 // whose ID only starts the same; another task's agent whose prompt names the
 // worktree; a tmux server whose command names it; anything under a live pane;
@@ -159,7 +159,6 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 	recent := placed("mona", db.StatusBlocked, time.Hour, "recent")
 	running := placed("mona", db.StatusProcessing, 0, "running")
 	typing := placed("mona", db.StatusBlocked, 30*time.Hour, "typing")
-	resumed := placed("mona", db.StatusBlocked, 30*time.Hour, "resumed")
 	asleep := placed("asleep", db.StatusBlocked, 30*time.Hour, "asleep")
 	wt := func(task *db.Task) string {
 		p, _, _ := database.GetTaskRemoteWorktree(task.ID)
@@ -179,7 +178,6 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 		w("mona", session, "@6", running.ID, "", old, agentCmd(running)),
 		w("mona", session, "@7", typing.ID, "", old, agentCmd(typing)),
 		w("mona", session, "@8", typing.ID, "-shell", now.Add(-time.Minute).Unix(), ""), // someone is typing here
-		w("mona", session, "@9", resumed.ID, "", old, "sh -lc export WORKTREE_RUN_ID='a-newer-run'; claude --resume x"),
 		w("mona", "task-daemon-remote-someoneelse", "@10", idle.ID, "", old, ""),
 		w("mona", "task-daemon-4242", "@11", idle.ID, "-shell", old, ""),
 		w("mona", session, "@12", 10*idle.ID+3, "", old, ""), // task-13 when idle is task-1
@@ -224,7 +222,6 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 		"recently blocked task's server":                        tailIn(t, wt(recent), filepath.Join(wt(recent), "dev.log")),
 		"running task's server":                                 tailIn(t, wt(running), filepath.Join(wt(running), "dev.log")),
 		"server of a task someone is typing in":                 tailIn(t, wt(typing), filepath.Join(wt(typing), "dev.log")),
-		"server of a task that was resumed":                     tailIn(t, wt(resumed), filepath.Join(wt(resumed), "dev.log")),
 		"unreachable host's server":                             tailIn(t, filepath.Join(fake.procs, "asleep"), filepath.Join(fake.procs, "asleep", "dev.log")),
 	}
 	if runtime.GOOS != "linux" {
@@ -292,7 +289,7 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 	if l := logOf(noRecord); !strings.Contains(l, "side processes on mona were left running") {
 		t.Errorf("the task with no recorded worktree does not say its side processes were skipped:\n%s", l)
 	}
-	for _, task := range []*db.Task{recent, running, typing, resumed, asleep} {
+	for _, task := range []*db.Task{recent, running, typing, asleep} {
 		if got, _ := database.GetTask(task.ID); got.DaemonSession != session {
 			t.Errorf("task #%d lost its session %q", task.ID, got.DaemonSession)
 		}
@@ -302,8 +299,7 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 	}
 
 	// Nothing left to ask mona: the task in use is not asked about again until
-	// it could be idle, nor the resumed one for a while; the unreachable host
-	// backs off...
+	// it could be idle; the unreachable host backs off...
 	before := len(fake.calls(t))
 	e.sweepRemoteSessions(context.Background(), now.Add(time.Second))
 	if after := fake.calls(t); len(after) != before {
@@ -477,5 +473,109 @@ func TestRetryOfRemoteTaskBlocksWhenTheSessionCannotBeLookedUp(t *testing.T) {
 		if strings.Contains(call, "new-window") || strings.Contains(call, "claude ") {
 			t.Errorf("a fresh agent was started: %s", call)
 		}
+	}
+}
+
+// `ty retry --replace` forgets a placement so the resolver is asked again. A
+// remote run recorded its Claude session ID, and that session is on the old
+// host: left in the row, HasLocalState read it as a local first attempt and
+// pinned the task to this machine, so a remote Claude task "replaced" onto the
+// Mac. A local placement's session is here, and is kept.
+func TestReplacingARemoteTaskForgetsItsRemoteSession(t *testing.T) {
+	database := hostsTestDB(t)
+	sid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	remote := newTask(t, database, "claude")
+	local := newTask(t, database, "claude")
+	for _, c := range []struct {
+		task   *db.Task
+		target string
+	}{{remote, "mona"}, {local, ""}} {
+		if err := database.SetTaskPlacementDecision(c.task.ID, c.target, "test", "/srv/repo"); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpdateTaskClaudeSessionID(c.task.ID, sid); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.ClearTaskPlacement(c.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := database.GetTask(remote.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClaudeSessionID != "" {
+		t.Errorf("remote task kept its host's session %q after --replace", got.ClaudeSessionID)
+	}
+	if why, pinned := HasLocalState(got); pinned {
+		t.Errorf("remote task is pinned to this machine after --replace (%s); the resolver would never be asked", why)
+	}
+	if got, _ := database.GetTask(local.ID); got.ClaudeSessionID != sid {
+		t.Errorf("local task's session = %q after --replace, want %q kept", got.ClaudeSessionID, sid)
+	}
+}
+
+// The agent window's start command names its run. One naming a different run
+// is spared only while that could be a newer run's — one a reply started after
+// the sweep read the database. Re-read afterwards: if the database still has
+// the sweep's run, the window can only be left from an older one, and the next
+// sweep ends it and suspends the task. If the run has moved on, the window is
+// the new run's, and is left alone.
+func TestRemoteIdleSuspendIsScopedToTheRun(t *testing.T) {
+	e, database := placementExecutor(t, t.TempDir())
+	coordinator, err := database.CoordinatorID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := remoteDaemonSessionName(coordinator)
+	idleTask := func() *db.Task {
+		task := placedTask(t, database, "mona", db.StatusBlocked)
+		if err := database.UpdateTaskDaemonSession(task.ID, session); err != nil {
+			t.Fatal(err)
+		}
+		parkedFor(t, database, task.ID, 30*time.Hour)
+		return task
+	}
+
+	// The window names a run the database does not have, and the database
+	// still has the sweep's run: an older run's window.
+	task := idleTask()
+	window := fmt.Sprintf("mona %s @1 task-%d 0 sh -lc export WORKTREE_RUN_ID='an-older-run'; claude", session, task.ID)
+	fake := newFakeRemoteTmux(t, window)
+	now := time.Now()
+
+	e.sweepRemoteSessions(context.Background(), now)
+	if got := fake.windows(t); len(got) != 1 {
+		t.Fatalf("first sweep ended %v; the window could have been a newer run's", got)
+	}
+	if !e.sessionEnd.awake(task.ID, now.Add(time.Second)) {
+		t.Fatal("an older run's window put the task to sleep instead of being ended next sweep")
+	}
+	e.sweepRemoteSessions(context.Background(), now.Add(time.Second))
+	if got := fake.windows(t); len(got) != 0 {
+		t.Fatalf("windows after the second sweep = %v; the older run's window should be ended", got)
+	}
+	if got, _ := database.GetTask(task.ID); got.DaemonSession != "" {
+		t.Errorf("task #%d was not suspended after its older window was ended", task.ID)
+	}
+
+	// The run moved on between the sweep's read and the host's answer: the
+	// window is the new run's, and is not ended, now or later.
+	resumed := idleTask()
+	stale := idleRemoteRun{RemoteRun: db.RemoteRun{TaskID: resumed.ID, RunID: runOf(t, database, resumed.ID), Host: "mona"}, HadSession: true}
+	if _, err := database.BeginRemoteRun(resumed.ID, "mona"); err != nil {
+		t.Fatal(err)
+	}
+	e.recordRemoteSuspend("mona", stale, remoteEnded{otherRun: map[int64]bool{resumed.ID: true}}, now)
+	if e.sessionEnd.isOlder(resumed.ID, stale.RunID) {
+		t.Error("a newer run's window was taken for an older run's, and would be ended")
+	}
+	if e.sessionEnd.awake(resumed.ID, now.Add(time.Second)) {
+		t.Error("a task whose window is a newer run's is asked about again at once")
+	}
+	if got, _ := database.GetTask(resumed.ID); got.DaemonSession != session {
+		t.Errorf("task #%d lost its session %q to a sweep that left its window alone", resumed.ID, got.DaemonSession)
 	}
 }

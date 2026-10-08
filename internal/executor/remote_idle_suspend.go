@@ -137,8 +137,9 @@ func recordedWorktree(taskID int64, worktree string) string {
 // hostSweepWindows is the awk program that plans the window half of a sweep. It
 // reads `tmux list-windows -F '#{window_id} #{window_name} #{window_activity}
 // #{pane_start_command}'` for this coordinator's session and, for each task in
-// specs ("<task>:<run>:<timeout seconds>", a timeout of 0 for a finished task),
-// prints:
+// specs ("<task>:<run>:<timeout seconds>:<older>", a timeout of 0 for a
+// finished task; older 1 when its window naming another run is known to be an
+// older run's, see olderRunWindow), prints:
 //
 //	K <window id> <window name>  end this window
 //	A <task> <seconds>           in use: a window saw activity within the
@@ -153,13 +154,13 @@ const hostSweepWindows = `
 BEGIN {
   n = split(specs, a, " ")
   for (i = 1; i <= n; i++) {
-    split(a[i], f, ":"); t = f[1]; run[t] = f[2]; to[t] = f[3] + 0
+    split(a[i], f, ":"); t = f[1]; run[t] = f[2]; to[t] = f[3] + 0; older[t] = f[4] + 0
     want["task-" t] = t; want["task-" t "-shell"] = t
   }
 }
 NF >= 2 && ($2 in want) {
   t = want[$2]; k++; wid[k] = $1; wname[k] = $2; wtask[k] = t
-  if ($2 == "task-" t && index($0, "WORKTREE_RUN_ID") && !index($0, run[t])) foreign[t] = 1
+  if ($2 == "task-" t && index($0, "WORKTREE_RUN_ID") && !index($0, run[t]) && !older[t]) foreign[t] = 1
   act = $3 + 0
   if (to[t] > 0 && act + to[t] > now) { left = act + to[t] - now; if (left > wait[t]) wait[t] = left }
 }
@@ -283,10 +284,14 @@ func (e *Executor) recordRemoteSuspend(host string, run idleRemoteRun, ended rem
 		return
 	}
 	if ended.otherRun[run.TaskID] {
+		if e.olderRunWindow(host, run.RemoteRun) {
+			return // the next sweep ends it, and suspends the task
+		}
 		e.sessionEnd.sleep(run.TaskID, now.Add(remoteSessionEndMaxBackoff))
 		e.logger.Info("Blocked remote task's window belongs to a newer run; not suspending", "task", run.TaskID, "host", host)
 		return
 	}
+	e.sessionEnd.forgetOlder(run.TaskID)
 	agent, procs := ended.windows[run.TaskID], ended.procs[run.TaskID]
 	if run.HadSession || agent {
 		if err := e.db.SuspendRemoteRun(run.TaskID, run.RunID); err != nil {
