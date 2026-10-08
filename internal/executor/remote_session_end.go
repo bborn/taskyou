@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,13 @@ import (
 // status change itself never waits for a host. The remote_runs row is the
 // to-do list — it is removed only once the host has answered, so a sleeping
 // laptop or a deleted server is retried, with backoff, instead of forgotten.
+//
+// The same sweep suspends blocked tasks that have sat idle on their host past
+// idle_suspend_timeout, which is what suspendIdleBlockedTasks does for local
+// ones: that sweep finds an agent by its local tmux pane, and a placed task has
+// none here, so placed agents and the dev servers they started were never
+// suspended (forty of them filled a staging host's memory and swap for twenty
+// days). See remote_idle_suspend.go.
 
 // remoteSessionEndTimeout bounds one host's ssh round trip.
 const remoteSessionEndTimeout = 30 * time.Second
@@ -43,7 +52,7 @@ const (
 	remoteSessionEndMaxBackoff = 15 * time.Minute
 )
 
-// remoteSessionEnder is the daemon's state for ending finished remote sessions.
+// remoteSessionEnder is the daemon's state for ending remote sessions.
 type remoteSessionEnder struct {
 	mu      sync.Mutex
 	running bool
@@ -78,10 +87,10 @@ func (s *remoteSessionEnder) succeeded(host string) {
 	delete(s.retry, host)
 }
 
-// startEndingFinishedRemoteSessions runs one sweep in the background, unless
-// one is still running: an unreachable host costs a connect timeout, and the
-// worker loop must not wait on it.
-func (e *Executor) startEndingFinishedRemoteSessions(ctx context.Context) {
+// startSweepingRemoteSessions runs one sweep in the background, unless one is
+// still running: an unreachable host costs a connect timeout, and the worker
+// loop must not wait on it.
+func (e *Executor) startSweepingRemoteSessions(ctx context.Context) {
 	e.sessionEnd.mu.Lock()
 	if e.sessionEnd.running {
 		e.sessionEnd.mu.Unlock()
@@ -96,19 +105,23 @@ func (e *Executor) startEndingFinishedRemoteSessions(ctx context.Context) {
 			e.sessionEnd.running = false
 			e.sessionEnd.mu.Unlock()
 		}()
-		e.endFinishedRemoteSessions(ctx, time.Now())
+		e.sweepRemoteSessions(ctx, time.Now())
 	}()
 }
 
-// endFinishedRemoteSessions ends the remote tmux windows of done and archived
-// tasks, one ssh call per host.
-func (e *Executor) endFinishedRemoteSessions(ctx context.Context, now time.Time) {
-	runs, err := e.db.FinishedRemoteRuns()
-	if err != nil {
-		e.logger.Debug("Failed to list finished remote runs", "error", err)
-		return
-	}
-	if len(runs) == 0 {
+// hostWork is what one sweep asks of one host.
+type hostWork struct {
+	finished []db.RemoteRun // done or archived: end the windows, forget the run
+	idle     []idleRemoteRun
+}
+
+func (w hostWork) empty() bool { return len(w.finished) == 0 && len(w.idle) == 0 }
+
+// sweepRemoteSessions ends the remote sessions of done and archived tasks, and
+// suspends blocked tasks that have been idle too long, one ssh call per host.
+func (e *Executor) sweepRemoteSessions(ctx context.Context, now time.Time) {
+	work := e.remoteSessionWork(now)
+	if len(work) == 0 {
 		return
 	}
 	coordinator, err := e.db.CoordinatorID()
@@ -118,12 +131,11 @@ func (e *Executor) endFinishedRemoteSessions(ctx context.Context, now time.Time)
 	}
 	session := remoteDaemonSessionName(coordinator)
 
-	var hosts []string
-	for _, run := range runs {
-		if len(hosts) == 0 || hosts[len(hosts)-1] != run.Host {
-			hosts = append(hosts, run.Host) // runs are ordered by host
-		}
+	hosts := make([]string, 0, len(work))
+	for host := range work {
+		hosts = append(hosts, host)
 	}
+	sort.Strings(hosts)
 	for _, host := range hosts {
 		if ctx.Err() != nil {
 			return
@@ -134,77 +146,124 @@ func (e *Executor) endFinishedRemoteSessions(ctx context.Context, now time.Time)
 		// Re-read just before acting: an earlier host may have taken a connect
 		// timeout, and a task reopened and placed again since the first read
 		// must not lose its new window.
-		pending := finishedRunsOn(e.db, host)
-		if len(pending) == 0 {
+		pending := e.remoteSessionWork(now)[host]
+		if pending.empty() {
 			continue
 		}
-		ended, err := endRemoteTaskWindows(ctx, host, session, pending)
+		ended, err := endRemoteTaskSessions(ctx, host, session, pending)
 		if err != nil {
 			wait := e.sessionEnd.failed(host, now)
-			e.logger.Warn("Could not end finished tasks' sessions on host; will retry",
-				"host", host, "tasks", len(pending), "retry_in", wait, "error", err)
+			e.logger.Warn("Could not end tasks' sessions on host; will retry",
+				"host", host, "finished", len(pending.finished), "idle", len(pending.idle), "retry_in", wait, "error", err)
 			continue
 		}
 		e.sessionEnd.succeeded(host)
-		for _, run := range pending {
+		for _, run := range pending.finished {
 			if err := e.db.EndRemoteRun(run.TaskID, run.RunID); err != nil {
 				e.logger.Warn("Failed to forget ended remote run", "task", run.TaskID, "error", err)
 			}
-			if ended[run.TaskID] {
+			if ended.windows[run.TaskID] {
 				e.logger.Info("Ended finished task's remote session", "task", run.TaskID, "host", host, "status", run.Status)
 				e.logLine(run.TaskID, "system", fmt.Sprintf(
 					"Task is %s, so its agent session on %s was ended. The worktree there was left as it is.", run.Status, host))
 			}
 		}
-	}
-}
-
-// finishedRunsOn is FinishedRemoteRuns for one host.
-func finishedRunsOn(database *db.DB, host string) []db.RemoteRun {
-	runs, err := database.FinishedRemoteRuns()
-	if err != nil {
-		return nil
-	}
-	var onHost []db.RemoteRun
-	for _, run := range runs {
-		if run.Host == host {
-			onHost = append(onHost, run)
+		for _, run := range pending.idle {
+			e.recordRemoteSuspend(host, run, ended)
 		}
 	}
-	return onHost
 }
 
-// endRemoteTaskWindows kills the task-<id> and task-<id>-shell windows of runs
-// in this coordinator's session on host, and reports which tasks had one.
+// remoteSessionWork is the sweep's to-do list, by host.
+func (e *Executor) remoteSessionWork(now time.Time) map[string]hostWork {
+	work := make(map[string]hostWork)
+	finished, err := e.db.FinishedRemoteRuns()
+	if err != nil {
+		e.logger.Debug("Failed to list finished remote runs", "error", err)
+	}
+	for _, run := range finished {
+		w := work[run.Host]
+		w.finished = append(w.finished, run)
+		work[run.Host] = w
+	}
+	for _, run := range e.idleRemoteRuns(now) {
+		w := work[run.Host]
+		w.idle = append(w.idle, run)
+		work[run.Host] = w
+	}
+	return work
+}
+
+// remoteEnded is what a host reports having ended.
+type remoteEnded struct {
+	windows map[int64]bool // tasks that had a window ended
+	procs   map[int64]int  // side processes signalled, by task
+}
+
+// endRemoteTaskSessions kills the task-<id> and task-<id>-shell windows of the
+// finished and idle runs in this coordinator's session on host, then ends the
+// side processes of the idle runs that are due for it, and reports what it
+// ended.
 //
 // Windows are matched by exact name inside the one session, and killed by ID,
 // so another coordinator's task with the same ID — or the host's own ty — is
 // never reached. A host with no such session or no tmux server has nothing to
 // end, which is success; only failing to reach the host is an error.
-func endRemoteTaskWindows(ctx context.Context, host, session string, runs []db.RemoteRun) (map[int64]bool, error) {
-	names := make(map[string]int64, 2*len(runs))
-	for _, run := range runs {
-		names[TmuxWindowName(run.TaskID)] = run.TaskID
-		names[TmuxWindowName(run.TaskID)+"-shell"] = run.TaskID
+//
+// Side processes are found by sideProcessScript. Nothing here touches a file.
+func endRemoteTaskSessions(ctx context.Context, host, session string, work hostWork) (remoteEnded, error) {
+	names := make(map[string]int64)
+	addWindows := func(taskID int64) {
+		names[TmuxWindowName(taskID)] = taskID
+		names[TmuxWindowName(taskID)+"-shell"] = taskID
 	}
-	list := make([]string, 0, len(names))
-	for name := range names {
-		list = append(list, name)
+	for _, run := range work.finished {
+		addWindows(run.TaskID)
 	}
-	script := "tmux list-windows -t " + shellQuote("="+session) + " -F '#{window_id} #{window_name}' 2>/dev/null |" +
-		" while read -r id name; do case " + shellQuote(" "+strings.Join(list, " ")+" ") + ` in *" $name "*)` +
-		` tmux kill-window -t "$id" && echo "$name";; esac; done; exit 0`
+	var procs []idleRemoteRun
+	for _, run := range work.idle {
+		if run.Windows {
+			addWindows(run.TaskID)
+		}
+		if run.SideProcesses {
+			procs = append(procs, run)
+		}
+	}
+
+	var script []string
+	if len(names) > 0 {
+		list := make([]string, 0, len(names))
+		for name := range names {
+			list = append(list, name)
+		}
+		sort.Strings(list)
+		script = append(script, "tmux list-windows -t "+shellQuote("="+session)+" -F '#{window_id} #{window_name}' 2>/dev/null |"+
+			" while read -r id name; do case "+shellQuote(" "+strings.Join(list, " ")+" ")+` in *" $name "*)`+
+			` tmux kill-window -t "$id" && echo "W $name";; esac; done`)
+	}
+	if len(procs) > 0 {
+		script = append(script, sideProcessScript(procs))
+	}
+	script = append(script, "exit 0")
 
 	ctx, cancel := context.WithTimeout(WithRunner(ctx, RemoteRunner{Host: host}), remoteSessionEndTimeout)
 	defer cancel()
-	out, err := command(ctx, "", "sh", "-c", script).Output()
+	out, err := command(ctx, "", "sh", "-c", strings.Join(script, "; ")).Output()
 	if err != nil {
-		return nil, err
+		return remoteEnded{}, err
 	}
-	ended := make(map[int64]bool)
-	for _, name := range strings.Fields(string(out)) {
-		if id, ok := names[name]; ok {
-			ended[id] = true
+	ended := remoteEnded{windows: make(map[int64]bool), procs: make(map[int64]int)}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 2 && f[0] == "W":
+			if id, ok := names[f[1]]; ok {
+				ended.windows[id] = true
+			}
+		case len(f) == 3 && f[0] == "P":
+			if id, err := strconv.ParseInt(f[1], 10, 64); err == nil {
+				ended.procs[id]++
+			}
 		}
 	}
 	return ended, nil

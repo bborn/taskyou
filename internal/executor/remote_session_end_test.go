@@ -18,15 +18,19 @@ import (
 // tmux keeps its windows in a file, one "host session window_id window_name"
 // line per window, so a test can see exactly which windows a sweep ended. The
 // host "asleep" is unreachable: ssh exits 255 before running anything.
+//
+// Its ps lists only the processes a test started under procs/<host>/ (see
+// sideProcess), so a sweep can never reach a real process on this machine.
 type fakeRemoteTmux struct {
 	state string // the windows file
 	log   string // one line per ssh call: host, then the remote command
+	procs string // the root under which each host's side processes run
 }
 
 func newFakeRemoteTmux(t *testing.T, windows ...string) *fakeRemoteTmux {
 	t.Helper()
 	dir := t.TempDir()
-	f := &fakeRemoteTmux{state: filepath.Join(dir, "windows"), log: filepath.Join(dir, "ssh.log")}
+	f := &fakeRemoteTmux{state: filepath.Join(dir, "windows"), log: filepath.Join(dir, "ssh.log"), procs: filepath.Join(dir, "procs")}
 	if err := os.WriteFile(f.state, []byte(strings.Join(windows, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +60,12 @@ esac
 	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(tmux), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	ps := "#!/bin/sh\n/bin/ps \"$@\" | grep -F \"$FAKE_PROC_ROOT/$FAKE_HOST/\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "ps"), []byte(ps), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("FAKE_TMUX_STATE", f.state)
+	t.Setenv("FAKE_PROC_ROOT", f.procs)
 	stubSSH(t, `#!/bin/sh
 while [ "$1" != "--" ]; do shift; done
 host=$2
@@ -158,7 +167,7 @@ func TestFinishedRemoteTaskSessionsAreEnded(t *testing.T) {
 	}, keep...)...)
 
 	now := time.Now()
-	e.endFinishedRemoteSessions(context.Background(), now)
+	e.sweepRemoteSessions(context.Background(), now)
 
 	sort.Strings(keep)
 	if got := fake.windows(t); strings.Join(got, "\n") != strings.Join(keep, "\n") {
@@ -189,13 +198,13 @@ func TestFinishedRemoteTaskSessionsAreEnded(t *testing.T) {
 
 	// The next sweep asks nothing of mona, and backs off the unreachable host...
 	before := len(fake.calls(t))
-	e.endFinishedRemoteSessions(context.Background(), now.Add(time.Second))
+	e.sweepRemoteSessions(context.Background(), now.Add(time.Second))
 	if after := fake.calls(t); len(after) != before {
 		t.Fatalf("second sweep made ssh calls: %v", after[before:])
 	}
 
 	// ...until its backoff has passed, when it is tried again.
-	e.endFinishedRemoteSessions(context.Background(), now.Add(remoteSessionEndMaxBackoff))
+	e.sweepRemoteSessions(context.Background(), now.Add(remoteSessionEndMaxBackoff))
 	after := fake.calls(t)
 	if len(after) != before+1 || !strings.HasPrefix(after[len(after)-1], "asleep ") {
 		t.Fatalf("unreachable host was not retried after its backoff: %v", after[before:])

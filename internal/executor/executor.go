@@ -1609,11 +1609,12 @@ func (e *Executor) worker(ctx context.Context) {
 				e.reconcileFinishedWorkflowSteps()
 			}
 
-			// End the remote agents of tasks that were closed or archived. A
-			// placed task's window is on another host, where none of the local
-			// cleanup reaches.
+			// End the remote agents of tasks that were closed or archived, and
+			// suspend placed tasks that have sat blocked too long. A placed
+			// task's window is on another host, where none of the local cleanup
+			// (cleanupInactiveDoneTasks, suspendIdleBlockedTasks) reaches.
 			if tickCount%remoteSessionEndInterval == 0 {
-				e.startEndingFinishedRemoteSessions(ctx)
+				e.startSweepingRemoteSessions(ctx)
 			}
 
 			// Periodically cleanup Claude processes for inactive done tasks
