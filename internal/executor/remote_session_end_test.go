@@ -2,8 +2,10 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -87,6 +89,7 @@ while [ "$1" != "--" ]; do shift; done
 host=$2
 printf '%s %s\n' "$host" "$(printf '%s' "$3" | tr '\n' ' ')" >> `+shellQuote(f.log)+`
 [ "$host" = asleep ] && exit 255
+[ "$host" = refusing ] && { printf 'Warning: noise\nmux_client_request_session: session request failed: Session open refused by peer\n' >&2; exit 255; }
 inner=${3#sh -lc }
 # Exported, not prefixed to eval: dash (Ubuntu's sh) keeps assignments before a
 # special builtin in this shell, so the fake tmux would never see FAKE_HOST.
@@ -242,5 +245,54 @@ func TestClosingRemoteTaskDoesNotNeedItsHost(t *testing.T) {
 	}
 	if calls := fake.calls(t); len(calls) != 0 {
 		t.Fatalf("closing a task contacted its host: %v", calls)
+	}
+}
+
+// ssh exits 255 for every failure of its own, so "exit status 255" says nothing
+// about why a host could not be swept. What ssh printed on stderr goes into the
+// warning and, once per run of failures, into each task's log.
+func TestRemoteSweepFailureSaysWhatSSHSaid(t *testing.T) {
+	e, database := placementExecutor(t, t.TempDir())
+	fake := newFakeRemoteTmux(t)
+	task := placedTask(t, database, "refusing", db.StatusDone)
+
+	_, err := endRemoteTaskSessions(context.Background(), "refusing", "task-daemon-remote-x",
+		hostWork{finished: []db.RemoteRun{{TaskID: task.ID, RunID: "r", Host: "refusing"}}})
+	if err == nil || !strings.Contains(err.Error(), "exit status 255") ||
+		!strings.Contains(err.Error(), "Session open refused by peer") {
+		t.Fatalf("error = %v, want the exit status and what ssh said", err)
+	}
+
+	now := time.Now()
+	e.sweepRemoteSessions(context.Background(), now)
+	e.sweepRemoteSessions(context.Background(), now.Add(remoteSessionEndMaxBackoff)) // retried, fails again
+	if calls := fake.calls(t); len(calls) != 3 {
+		t.Fatalf("ssh calls = %d, want 3 (one direct, two sweeps)", len(calls))
+	}
+	logs, _ := database.GetTaskLogs(task.ID, 50)
+	var said int
+	for _, l := range logs {
+		if strings.Contains(l.Content, "Could not reach refusing") && strings.Contains(l.Content, "Session open refused by peer") {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Errorf("task log says why the host could not be reached %d times over two failed sweeps, want once", said)
+	}
+}
+
+// Only the end of a long stderr is kept, on one line.
+func TestWithStderrKeepsTheEnd(t *testing.T) {
+	long := strings.Repeat("x", 1000) + "\nthe reason"
+	_, err := exec.Command("sh", "-c", "printf '%s' \"$0\" >&2; exit 255", long).Output()
+	got := withStderr(err).Error()
+	if !strings.HasPrefix(got, "exit status 255: …") || !strings.HasSuffix(got, "the reason") {
+		t.Errorf("error = %q, want the exit status, then the end of stderr", got)
+	}
+	if strings.Contains(got, "\n") || len(got) > len("exit status 255: …")+stderrTail {
+		t.Errorf("error is %d bytes or spans lines: %q", len(got), got)
+	}
+	if plain := errors.New("boom"); withStderr(plain) != plain {
+		t.Error("an error that is not a command's exit changed")
 	}
 }
