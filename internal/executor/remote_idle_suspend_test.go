@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,33 +17,72 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-// sideProcess starts a real, harmless process on "host" whose command line
-// names path, the way a dev server started in a task's worktree names it. It
-// reports whether the process is still running.
-func (f *fakeRemoteTmux) sideProcess(t *testing.T, host, path string) func() bool {
+// fakeProc is a real, harmless process started for a test (tail -f on a file),
+// standing in for a dev server, an agent, a tmux server.
+type fakeProc struct {
+	pid    int
+	exited chan struct{}
+}
+
+func (p fakeProc) alive() bool {
+	select {
+	case <-p.exited:
+		return false
+	case <-time.After(100 * time.Millisecond):
+		return true
+	}
+}
+
+// startProc runs argv in dir and stops it when the test ends. Every path a test
+// gives it is under f.procs/<host>/, which is all the fake ps lists.
+func startProc(t *testing.T, dir string, argv ...string) fakeProc {
 	t.Helper()
-	path = filepath.Join(f.procs, host, path)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("tail", "-f", path)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited) }()
-	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
-	return func() bool {
-		select {
-		case <-exited:
-			return false
-		case <-time.After(100 * time.Millisecond):
-			return true
-		}
+	p := fakeProc{pid: cmd.Process.Pid, exited: make(chan struct{})}
+	go func() { _ = cmd.Wait(); close(p.exited) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-p.exited })
+	return p
+}
+
+// tailIn starts `tail -f <file>` (its command line naming file) with dir as
+// its working directory.
+func tailIn(t *testing.T, dir, file string) fakeProc {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return startProc(t, dir, "tail", "-f", file)
+}
+
+// tailAs is tailIn run under another name: a symlink to tail called name, the
+// way an agent or tmux shows up in ps.
+func tailAs(t *testing.T, name, dir, file string) fakeProc {
+	t.Helper()
+	bin := filepath.Join(filepath.Dir(dir), "bin-"+name)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tail, err := exec.LookPath("tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(tail, filepath.Join(bin, name)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return startProc(t, dir, filepath.Join(bin, name), "-f", file)
 }
 
 // parkedFor makes a blocked task look parked since d ago.
@@ -53,14 +94,37 @@ func parkedFor(t *testing.T, database *db.DB, taskID int64, d time.Duration) {
 	}
 }
 
+func runOf(t *testing.T, database *db.DB, taskID int64) string {
+	t.Helper()
+	var run string
+	if err := database.QueryRow(`SELECT run_id FROM remote_runs WHERE task_id = ?`, taskID).Scan(&run); err != nil {
+		t.Fatalf("run of #%d: %v", taskID, err)
+	}
+	return run
+}
+
+func hasRun(t *testing.T, database *db.DB, taskID int64) bool {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM remote_runs WHERE task_id = ?`, taskID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
 // A blocked task placed on another host that has sat idle past the idle-suspend
 // timeout is suspended there just as a local one is here: its agent windows are
-// ended, and so are the dev servers and watchers it left running out of its
+// ended, and so are the dev servers and watchers it left running in its
 // worktree. That is what kept a staging host's memory full for twenty days.
-// Everything that is not this coordinator's idle task — a recently blocked one,
-// a running one, the same task ID in another session or another coordinator's
-// worktree, a task whose ID merely starts with the same digits — is left alone,
-// no file is touched, and an unreachable host backs off.
+//
+// The host is shared — on ik-agents ty logs in as the user that runs the host's
+// own TaskYou — so everything else must survive: a recently blocked or running
+// task; a task someone is typing in; a task whose window is a newer run's; the
+// same task ID in another session or another coordinator's worktree; a task
+// whose ID only starts the same; another task's agent whose prompt names the
+// worktree; a tmux server whose command names it; anything under a live pane;
+// text like "[1-Oct-2026"; and, without a recorded worktree, every side process.
+// No file is touched, and an unreachable host backs off.
 func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 	e, database := placementExecutor(t, t.TempDir())
 	if err := database.SetSetting(config.SettingIdleSuspendTimeout, "24h"); err != nil {
@@ -72,8 +136,10 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 	}
 	session := remoteDaemonSessionName(coordinator)
 	fake := newFakeRemoteTmux(t)
+	mona := filepath.Join(fake.procs, "mona")
+	worktree := func(dir string) string { return filepath.Join(mona, "repo", ".task-worktrees", dir) }
 
-	placed := func(host, status string, idle time.Duration) *db.Task {
+	placed := func(host, status string, idle time.Duration, dir string) *db.Task {
 		task := placedTask(t, database, host, status)
 		if err := database.UpdateTaskDaemonSession(task.ID, session); err != nil {
 			t.Fatal(err)
@@ -81,53 +147,88 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 		if status == db.StatusBlocked {
 			parkedFor(t, database, task.ID, idle)
 		}
+		if dir != "" {
+			if err := database.SetTaskRemoteWorktree(task.ID, worktree(fmt.Sprintf("%d-%s", task.ID, dir)), "b"); err != nil {
+				t.Fatal(err)
+			}
+		}
 		return task
 	}
-	idle := placed("mona", db.StatusBlocked, 30*time.Hour)       // worktree recorded
-	idleNoPath := placed("mona", db.StatusBlocked, 48*time.Hour) // no worktree recorded
-	recent := placed("mona", db.StatusBlocked, time.Hour)
-	running := placed("mona", db.StatusProcessing, 0)
-	asleep := placed("asleep", db.StatusBlocked, 30*time.Hour)
-
-	idleDir := fmt.Sprintf("%d-idle-task", idle.ID)
-	if err := database.SetTaskRemoteWorktree(idle.ID,
-		filepath.Join(fake.procs, "mona", "repo", ".task-worktrees", idleDir), "task/"+idleDir); err != nil {
-		t.Fatal(err)
+	idle := placed("mona", db.StatusBlocked, 30*time.Hour, "fix-login")
+	noRecord := placed("mona", db.StatusBlocked, 48*time.Hour, "")
+	recent := placed("mona", db.StatusBlocked, time.Hour, "recent")
+	running := placed("mona", db.StatusProcessing, 0, "running")
+	typing := placed("mona", db.StatusBlocked, 30*time.Hour, "typing")
+	resumed := placed("mona", db.StatusBlocked, 30*time.Hour, "resumed")
+	asleep := placed("asleep", db.StatusBlocked, 30*time.Hour, "asleep")
+	wt := func(task *db.Task) string {
+		p, _, _ := database.GetTaskRemoteWorktree(task.ID)
+		return p
 	}
 
-	w := func(host, sess, id string, taskID int64, suffix string) string {
-		return fmt.Sprintf("%s %s %s task-%d%s", host, sess, id, taskID, suffix)
+	agentCmd := func(task *db.Task) string {
+		return fmt.Sprintf("sh -lc export WORKTREE_COORDINATOR_ID='%s' WORKTREE_RUN_ID='%s'; claude", coordinator, runOf(t, database, task.ID))
 	}
+	now := time.Now()
+	w := func(host, sess, id string, taskID int64, suffix string, activity int64, cmd string) string {
+		return strings.TrimSpace(fmt.Sprintf("%s %s %s task-%d%s %d %s", host, sess, id, taskID, suffix, activity, cmd))
+	}
+	old := now.Add(-30 * time.Hour).Unix()
 	keep := []string{
-		w("mona", session, "@5", recent.ID, ""),
-		w("mona", session, "@6", running.ID, ""),
-		w("mona", "task-daemon-remote-someoneelse", "@7", idle.ID, ""),
-		w("mona", "task-daemon-4242", "@8", idle.ID, "-shell"),
-		w("mona", session, "@9", 10*idle.ID+3, ""), // task-13 when idle is task-1
-		w("asleep", session, "@1", asleep.ID, ""),
+		w("mona", session, "@5", recent.ID, "", old, agentCmd(recent)),
+		w("mona", session, "@6", running.ID, "", old, agentCmd(running)),
+		w("mona", session, "@7", typing.ID, "", old, agentCmd(typing)),
+		w("mona", session, "@8", typing.ID, "-shell", now.Add(-time.Minute).Unix(), ""), // someone is typing here
+		w("mona", session, "@9", resumed.ID, "", old, "sh -lc export WORKTREE_RUN_ID='a-newer-run'; claude --resume x"),
+		w("mona", "task-daemon-remote-someoneelse", "@10", idle.ID, "", old, ""),
+		w("mona", "task-daemon-4242", "@11", idle.ID, "-shell", old, ""),
+		w("mona", session, "@12", 10*idle.ID+3, "", old, ""), // task-13 when idle is task-1
+		w("asleep", session, "@1", asleep.ID, "", old, ""),
 	}
 	sort.Strings(keep)
 	if err := os.WriteFile(fake.state, []byte(strings.Join(append([]string{
-		w("mona", session, "@1", idle.ID, ""),
-		w("mona", session, "@2", idle.ID, "-shell"),
-		w("mona", session, "@3", idleNoPath.ID, ""),
+		w("mona", session, "@1", idle.ID, "", old, agentCmd(idle)),
+		w("mona", session, "@2", idle.ID, "-shell", old, ""),
+		w("mona", session, "@3", noRecord.ID, "", old, "sh -lc claude"), // from before run IDs
 	}, keep...), "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	wt := func(dir string) string { return filepath.Join("repo", ".task-worktrees", dir, "log") }
-	ended := map[string]func() bool{
-		"idle task's dev server":               fake.sideProcess(t, "mona", wt(idleDir)),
-		"idle task's puma, by title":           fake.sideProcess(t, "mona", "puma 6.4.2 ["+idleDir+"]"),
-		"idle task's watcher, found by its ID": fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-no-record", idleNoPath.ID))),
+	run := filepath.Join(mona, "run")
+	ended := map[string]fakeProc{
+		"idle task's dev server": tailIn(t, wt(idle), filepath.Join(wt(idle), "log", "dev.log")),
+		"idle task's puma":       tailIn(t, wt(idle), filepath.Join(run, fmt.Sprintf("puma 6.4.2 [%d-fix-login]", idle.ID))),
 	}
-	kept := map[string]func() bool{
-		"recently blocked task's server":  fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-recent", recent.ID))),
-		"running task's server":           fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d-running", running.ID))),
-		"another coordinator's same ID":   fake.sideProcess(t, "mona", filepath.Join("other", ".task-worktrees", fmt.Sprintf("%d-theirs", idle.ID), "log")),
-		"a task whose ID starts the same": fake.sideProcess(t, "mona", wt(fmt.Sprintf("%d3-longer-id", idle.ID))),
-		"its puma, by title":              fake.sideProcess(t, "mona", fmt.Sprintf("puma [%d3-longer-id]", idleNoPath.ID)),
-		"unreachable host's server":       fake.sideProcess(t, "asleep", wt(fmt.Sprintf("%d-asleep", asleep.ID))),
+	// sidekiq, foreman, bin/dev: run in the worktree without naming it. Linux
+	// finds them by working directory; elsewhere there is no /proc to ask.
+	sidekiq := tailIn(t, wt(idle), filepath.Join(run, "sidekiq 7.2.0 app [0 of 5 busy]"))
+	if runtime.GOOS == "linux" {
+		ended["idle task's sidekiq"] = sidekiq
+	}
+	if err := os.WriteFile(filepath.Join(wt(idle), "pane.log"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paneShell := startProc(t, wt(idle), "sh", "-c", "tail -f "+shellQuote(filepath.Join(wt(idle), "pane.log"))+" & wait")
+	if err := os.WriteFile(fake.panes, []byte(strconv.Itoa(paneShell.pid)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	theirs := filepath.Join(mona, "other", ".task-worktrees", fmt.Sprintf("%d-theirs", idle.ID))
+	kept := map[string]fakeProc{
+		"another task's claude, its prompt naming the worktree": tailAs(t, "claude", run, filepath.Join(wt(idle), "prompt.txt")),
+		"a tmux server whose command names the worktree":        tailAs(t, "tmux", wt(idle), filepath.Join(wt(idle), "tmux.conf")),
+		"a process under a live tmux pane":                      paneShell,
+		"another coordinator's task with the same ID":           tailIn(t, theirs, filepath.Join(theirs, "dev.log")),
+		"a task whose ID only starts the same":                  tailIn(t, worktree(fmt.Sprintf("%d3-longer", idle.ID)), filepath.Join(worktree(fmt.Sprintf("%d3-longer", idle.ID)), "dev.log")),
+		"[1-Oct-2026 text":                                      tailIn(t, run, filepath.Join(run, fmt.Sprintf("log [%d-Oct-2026] started", idle.ID))),
+		"a task with no recorded worktree":                      tailIn(t, worktree(fmt.Sprintf("%d-no-record", noRecord.ID)), filepath.Join(worktree(fmt.Sprintf("%d-no-record", noRecord.ID)), "dev.log")),
+		"recently blocked task's server":                        tailIn(t, wt(recent), filepath.Join(wt(recent), "dev.log")),
+		"running task's server":                                 tailIn(t, wt(running), filepath.Join(wt(running), "dev.log")),
+		"server of a task someone is typing in":                 tailIn(t, wt(typing), filepath.Join(wt(typing), "dev.log")),
+		"server of a task that was resumed":                     tailIn(t, wt(resumed), filepath.Join(wt(resumed), "dev.log")),
+		"unreachable host's server":                             tailIn(t, filepath.Join(fake.procs, "asleep"), filepath.Join(fake.procs, "asleep", "dev.log")),
+	}
+	if runtime.GOOS != "linux" {
+		kept["sidekiq, which names nothing"] = sidekiq
 	}
 	files := func() []string {
 		var all []string
@@ -139,19 +240,18 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 	}
 	filesBefore := files()
 
-	now := time.Now()
 	e.sweepRemoteSessions(context.Background(), now)
 
 	if got := fake.windows(t); strings.Join(got, "\n") != strings.Join(keep, "\n") {
 		t.Fatalf("windows after sweep:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(keep, "\n"))
 	}
-	for name, alive := range ended {
-		if alive() {
+	for name, p := range ended {
+		if p.alive() {
 			t.Errorf("%s is still running", name)
 		}
 	}
-	for name, alive := range kept {
-		if !alive() {
+	for name, p := range kept {
+		if !p.alive() {
 			t.Errorf("%s was killed", name)
 		}
 	}
@@ -166,7 +266,15 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 
 	// The suspended tasks read as suspended, as a local one does: no session,
 	// a log line saying so, and still blocked, waiting for their reply.
-	for _, task := range []*db.Task{idle, idleNoPath} {
+	logOf := func(task *db.Task) string {
+		logs, _ := database.GetTaskLogs(task.ID, 50)
+		var all []string
+		for _, l := range logs {
+			all = append(all, l.Content)
+		}
+		return strings.Join(all, "\n")
+	}
+	for _, task := range []*db.Task{idle, noRecord} {
 		got, err := database.GetTask(task.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -174,22 +282,28 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 		if got.Status != db.StatusBlocked || got.DaemonSession != "" {
 			t.Errorf("task #%d: status %q, daemon session %q; want blocked with no session", task.ID, got.Status, got.DaemonSession)
 		}
-		logs, _ := database.GetTaskLogs(task.ID, 50)
-		var logged bool
-		for _, l := range logs {
-			logged = logged || (strings.Contains(l.Content, "suspended") && strings.Contains(l.Content, "mona"))
+		if l := logOf(task); !strings.Contains(l, "suspended on mona") {
+			t.Errorf("task #%d's log does not say it was suspended on mona:\n%s", task.ID, l)
 		}
-		if !logged {
-			t.Errorf("task #%d's log does not say it was suspended on mona", task.ID)
+		if hasRun(t, database, task.ID) {
+			t.Errorf("task #%d's run was kept after its suspend was finished", task.ID)
 		}
 	}
-	for _, task := range []*db.Task{recent, running, asleep} {
+	if l := logOf(noRecord); !strings.Contains(l, "side processes on mona were left running") {
+		t.Errorf("the task with no recorded worktree does not say its side processes were skipped:\n%s", l)
+	}
+	for _, task := range []*db.Task{recent, running, typing, resumed, asleep} {
 		if got, _ := database.GetTask(task.ID); got.DaemonSession != session {
 			t.Errorf("task #%d lost its session %q", task.ID, got.DaemonSession)
 		}
+		if strings.Contains(logOf(task), "suspended") {
+			t.Errorf("task #%d's log says it was suspended", task.ID)
+		}
 	}
 
-	// A suspended task is not asked about again; the unreachable host backs off...
+	// Nothing left to ask mona: the task in use is not asked about again until
+	// it could be idle, nor the resumed one for a while; the unreachable host
+	// backs off...
 	before := len(fake.calls(t))
 	e.sweepRemoteSessions(context.Background(), now.Add(time.Second))
 	if after := fake.calls(t); len(after) != before {
@@ -198,9 +312,12 @@ func TestIdleBlockedRemoteTasksAreSuspended(t *testing.T) {
 
 	// ...until its backoff has passed, when it is tried again.
 	e.sweepRemoteSessions(context.Background(), now.Add(remoteSessionEndMaxBackoff))
-	after := fake.calls(t)
-	if len(after) != before+1 || !strings.HasPrefix(after[len(after)-1], "asleep ") {
-		t.Fatalf("unreachable host was not retried after its backoff: %v", after[before:])
+	var retried bool
+	for _, call := range fake.calls(t)[before:] {
+		retried = retried || strings.HasPrefix(call, "asleep ")
+	}
+	if !retried {
+		t.Fatalf("unreachable host was not retried after its backoff: %v", fake.calls(t)[before:])
 	}
 }
 
@@ -222,22 +339,50 @@ func TestIdleRemoteSuspendHonoursReapBlockedIdle(t *testing.T) {
 	}
 	parkedFor(t, database, task.ID, 30*time.Hour)
 	fake := newFakeRemoteTmux(t, fmt.Sprintf("mona %s @1 task-%d", session, task.ID))
-	server := fake.sideProcess(t, "mona", filepath.Join("repo", ".task-worktrees", fmt.Sprintf("%d-x", task.ID), "log"))
+	wt := filepath.Join(fake.procs, "mona", "repo", ".task-worktrees", fmt.Sprintf("%d-x", task.ID))
+	if err := database.SetTaskRemoteWorktree(task.ID, wt, "b"); err != nil {
+		t.Fatal(err)
+	}
+	server := tailIn(t, wt, filepath.Join(wt, "dev.log"))
 
 	e.sweepRemoteSessions(context.Background(), time.Now())
 
 	if got := fake.windows(t); len(got) != 0 {
 		t.Errorf("windows after sweep = %v, want none", got)
 	}
-	if !server() {
+	if !server.alive() {
 		t.Error("side process was killed with reap_blocked_idle disabled")
 	}
 }
 
+// A host where the sweep cannot look at processes must not be reported as one
+// with nothing to end: the runs are kept, and retried.
+func TestHostSweepFailsWithoutPs(t *testing.T) {
+	bin := t.TempDir()
+	for _, tool := range []string{"awk", "date", "id", "tr"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skip(tool + " not found")
+		}
+		if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := hostSweepScript("task-daemon-remote-x", []string{"1:run:60"}, []string{"1:/srv/repo/.task-worktrees/1-x"})
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Env = []string{"PATH=" + bin}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("sweep without ps succeeded:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ps is not installed") {
+		t.Errorf("output = %q, want it to say ps is missing", out)
+	}
+}
+
 // Replying to a task the idle sweep suspended on its host resumes the Claude
-// conversation it had there, as a local retry does, rather than starting a new
-// one that has forgotten everything: the session is found on the host, in the
-// task's own worktree, and the agent is launched with --resume.
+// conversation it had there, as a local retry does: the session ty recorded at
+// launch when the host still has it, else the newest in the task's worktree.
 func TestRetryOfSuspendedRemoteTaskResumesItsSession(t *testing.T) {
 	newFakeRemoteTmux(t) // ssh runs the command here
 	home := t.TempDir()
@@ -253,8 +398,8 @@ func TestRetryOfSuspendedRemoteTaskResumesItsSession(t *testing.T) {
 	}
 	ctx := WithRunner(context.Background(), RemoteRunner{Host: "mona"})
 
-	if id := remoteClaudeSession(ctx, worktree); id != "" {
-		t.Fatalf("session = %q with none on the host, want none", id)
+	if id, err := remoteClaudeSession(ctx, worktree, ""); id != "" || err != nil {
+		t.Fatalf("session = %q, %v with none on the host, want none", id, err)
 	}
 
 	projects := filepath.Join(home, ".claude", "projects")
@@ -281,16 +426,56 @@ func TestRetryOfSuspendedRemoteTaskResumesItsSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if id := remoteClaudeSession(ctx, worktree); id != newer {
-		t.Fatalf("session = %q, want the newest, %q", id, newer)
+	for _, c := range []struct{ stored, want string }{
+		{"", newer},
+		{older, older}, // the recorded one, though not the newest
+		{"99999999-2222-3333-4444-555555555555", newer}, // recorded, but gone
+	} {
+		if id, err := remoteClaudeSession(ctx, worktree, c.stored); id != c.want || err != nil {
+			t.Errorf("stored %q: session = %q, %v; want %q", c.stored, id, err, c.want)
+		}
 	}
 
 	task := &db.Task{ID: 7, Title: "fix login"}
-	script, err := remoteLaunchScriptWith(task, "claude", worktree, "the reply", "", newer, "run1")
+	script, err := remoteLaunchScriptWith(task, "claude", worktree, "the reply", "", claudeSession{ID: newer, Resume: true}, "run1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(script, "--resume '"+newer+"' \"$(cat ") {
 		t.Errorf("launch line does not resume the session with the reply:\n%s", script)
+	}
+	script, err = remoteLaunchScriptWith(task, "claude", worktree, "the task", "", claudeSession{ID: older}, "run1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "--session-id '"+older+"' ") || strings.Contains(script, "--resume") {
+		t.Errorf("fresh launch line does not start the recorded session:\n%s", script)
+	}
+	if id, err := newSessionUUID(); err != nil || !remoteSessionIDRe.MatchString(id) {
+		t.Errorf("newSessionUUID = %q, %v", id, err)
+	}
+}
+
+// If ty cannot find out whether the host has the session — the host is not
+// answering — a retry must fail and say so, not start a new conversation that
+// has forgotten what the reply was about.
+func TestRetryOfRemoteTaskBlocksWhenTheSessionCannotBeLookedUp(t *testing.T) {
+	e, database := placementExecutor(t, t.TempDir())
+	fake := newFakeRemoteTmux(t)
+	task := placedTask(t, database, "asleep", db.StatusBlocked)
+
+	for _, c := range []struct{ host, workDir string }{
+		{"asleep", "/srv/repo/.task-worktrees/1-x"},     // unreachable
+		{"mona", filepath.Join(t.TempDir(), "missing")}, // no worktree there
+	} {
+		res := e.runRemoteSession(context.Background(), task, RemoteRunner{Host: c.host, WorkDir: c.workDir}, "claude", "the task", "the reply")
+		if res.Success || !strings.Contains(res.Message, "Could not reach "+c.host+" to resume") {
+			t.Errorf("%s: result = %+v, want a failure saying the session could not be looked up", c.host, res)
+		}
+	}
+	for _, call := range fake.calls(t) {
+		if strings.Contains(call, "new-window") || strings.Contains(call, "claude ") {
+			t.Errorf("a fresh agent was started: %s", call)
+		}
 	}
 }

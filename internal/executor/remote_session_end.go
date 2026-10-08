@@ -57,6 +57,9 @@ type remoteSessionEnder struct {
 	mu      sync.Mutex
 	running bool
 	retry   map[string]hostRetry
+	// quiet holds blocked tasks found in use on their host, until they could
+	// next be idle, so a pane someone is typing in costs no ssh call per sweep.
+	quiet map[int64]time.Time
 }
 
 type hostRetry struct {
@@ -79,6 +82,23 @@ func (s *remoteSessionEnder) failed(host string, now time.Time) time.Duration {
 	wait := min(max(s.retry[host].wait*2, remoteSessionEndMinBackoff), remoteSessionEndMaxBackoff)
 	s.retry[host] = hostRetry{at: now.Add(wait), wait: wait}
 	return wait
+}
+
+// awake reports whether a blocked task may be asked about again.
+func (s *remoteSessionEnder) awake(taskID int64, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !now.Before(s.quiet[taskID])
+}
+
+// sleep leaves a blocked task alone until at.
+func (s *remoteSessionEnder) sleep(taskID int64, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.quiet == nil {
+		s.quiet = make(map[int64]time.Time)
+	}
+	s.quiet[taskID] = at
 }
 
 func (s *remoteSessionEnder) succeeded(host string) {
@@ -169,7 +189,7 @@ func (e *Executor) sweepRemoteSessions(ctx context.Context, now time.Time) {
 			}
 		}
 		for _, run := range pending.idle {
-			e.recordRemoteSuspend(host, run, ended)
+			e.recordRemoteSuspend(host, run, ended, now)
 		}
 	}
 }
@@ -194,76 +214,77 @@ func (e *Executor) remoteSessionWork(now time.Time) map[string]hostWork {
 	return work
 }
 
-// remoteEnded is what a host reports having ended.
+// remoteEnded is what a host reports having done.
 type remoteEnded struct {
-	windows map[int64]bool // tasks that had a window ended
-	procs   map[int64]int  // side processes signalled, by task
+	windows  map[int64]bool          // tasks that had a window ended
+	procs    map[int64]int           // side processes signalled, by task
+	inUse    map[int64]time.Duration // idle tasks left alone: in use, idle again after this
+	otherRun map[int64]bool          // idle tasks left alone: window of another run
 }
 
-// endRemoteTaskSessions kills the task-<id> and task-<id>-shell windows of the
-// finished and idle runs in this coordinator's session on host, then ends the
-// side processes of the idle runs that are due for it, and reports what it
-// ended.
+// endRemoteTaskSessions runs one sweep's work on host in a single ssh call (see
+// hostSweepScript): it ends the task-<id> and task-<id>-shell windows of the
+// finished runs, and of the idle runs nobody is using, in this coordinator's
+// session; then the side processes of the idle runs due for it.
 //
 // Windows are matched by exact name inside the one session, and killed by ID,
 // so another coordinator's task with the same ID — or the host's own ty — is
 // never reached. A host with no such session or no tmux server has nothing to
-// end, which is success; only failing to reach the host is an error.
-//
-// Side processes are found by sideProcessScript. Nothing here touches a file.
+// end, which is success; failing to reach the host, or a host without the
+// tools to look, is an error. Nothing here touches a file.
 func endRemoteTaskSessions(ctx context.Context, host, session string, work hostWork) (remoteEnded, error) {
 	names := make(map[string]int64)
-	addWindows := func(taskID int64) {
-		names[TmuxWindowName(taskID)] = taskID
-		names[TmuxWindowName(taskID)+"-shell"] = taskID
-	}
+	var windowSpecs, procSpecs []string
 	for _, run := range work.finished {
-		addWindows(run.TaskID)
+		names[TmuxWindowName(run.TaskID)] = run.TaskID
+		names[TmuxWindowName(run.TaskID)+"-shell"] = run.TaskID
+		windowSpecs = append(windowSpecs, fmt.Sprintf("%d:%s:0", run.TaskID, run.RunID))
 	}
-	var procs []idleRemoteRun
 	for _, run := range work.idle {
-		if run.Windows {
-			addWindows(run.TaskID)
-		}
-		if run.SideProcesses {
-			procs = append(procs, run)
+		names[TmuxWindowName(run.TaskID)] = run.TaskID
+		names[TmuxWindowName(run.TaskID)+"-shell"] = run.TaskID
+		windowSpecs = append(windowSpecs, fmt.Sprintf("%d:%s:%d", run.TaskID, run.RunID, max(int64(run.Timeout/time.Second), 1)))
+		if run.sideProcesses() {
+			procSpecs = append(procSpecs, fmt.Sprintf("%d:%s", run.TaskID, run.Worktree))
 		}
 	}
-
-	var script []string
-	if len(names) > 0 {
-		list := make([]string, 0, len(names))
-		for name := range names {
-			list = append(list, name)
-		}
-		sort.Strings(list)
-		script = append(script, "tmux list-windows -t "+shellQuote("="+session)+" -F '#{window_id} #{window_name}' 2>/dev/null |"+
-			" while read -r id name; do case "+shellQuote(" "+strings.Join(list, " ")+" ")+` in *" $name "*)`+
-			` tmux kill-window -t "$id" && echo "W $name";; esac; done`)
-	}
-	if len(procs) > 0 {
-		script = append(script, sideProcessScript(procs))
-	}
-	script = append(script, "exit 0")
 
 	ctx, cancel := context.WithTimeout(WithRunner(ctx, RemoteRunner{Host: host}), remoteSessionEndTimeout)
 	defer cancel()
-	out, err := command(ctx, "", "sh", "-c", strings.Join(script, "; ")).Output()
+	out, err := command(ctx, "", "sh", "-c", hostSweepScript(session, windowSpecs, procSpecs)).Output()
 	if err != nil {
 		return remoteEnded{}, err
 	}
-	ended := remoteEnded{windows: make(map[int64]bool), procs: make(map[int64]int)}
+	ended := remoteEnded{
+		windows:  make(map[int64]bool),
+		procs:    make(map[int64]int),
+		inUse:    make(map[int64]time.Duration),
+		otherRun: make(map[int64]bool),
+	}
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
-		switch {
-		case len(f) == 2 && f[0] == "W":
+		if len(f) < 2 {
+			continue
+		}
+		if f[0] == "W" {
 			if id, ok := names[f[1]]; ok {
 				ended.windows[id] = true
 			}
-		case len(f) == 3 && f[0] == "P":
-			if id, err := strconv.ParseInt(f[1], 10, 64); err == nil {
-				ended.procs[id]++
+			continue
+		}
+		id, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch {
+		case f[0] == "P" && len(f) == 3:
+			ended.procs[id]++
+		case f[0] == "A" && len(f) == 3:
+			if secs, err := strconv.Atoi(f[2]); err == nil {
+				ended.inUse[id] = time.Duration(secs) * time.Second
 			}
+		case f[0] == "F":
+			ended.otherRun[id] = true
 		}
 	}
 	return ended, nil

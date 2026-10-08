@@ -2,8 +2,12 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -33,16 +37,38 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 	if stageErr != nil {
 		return execResult{Message: "Could not stage attachments: " + stageErr.Error()}
 	}
-	resumeID := ""
-	if feedback != "" && executorName == "claude" {
-		resumeID = remoteClaudeSession(WithRunner(ctx, r), r.WorkDir)
-		if resumeID != "" {
-			e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s on %s", resumeID, r.Host))
-		} else {
-			e.logLine(task.ID, "system", fmt.Sprintf("No previous session found on %s, starting fresh", r.Host))
+	// Claude gets a session ID ty chooses and records, so a resume names the
+	// exact conversation rather than whichever is newest in the directory.
+	var session claudeSession
+	if executorName == "claude" {
+		if feedback != "" {
+			id, err := remoteClaudeSession(WithRunner(ctx, r), r.WorkDir, task.ClaudeSessionID)
+			if err != nil {
+				// Never fall back to a fresh start here: that would quietly throw
+				// away the conversation the reply was written for.
+				msg := fmt.Sprintf("Could not reach %s to resume this task's session: %v", r.Host, err)
+				e.logLine(task.ID, "error", msg)
+				return execResult{Message: msg}
+			}
+			if id != "" {
+				session = claudeSession{ID: id, Resume: true}
+				e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s on %s", id, r.Host))
+			} else {
+				e.logLine(task.ID, "system", fmt.Sprintf("No previous session found on %s, starting fresh", r.Host))
+			}
+		}
+		if !session.Resume {
+			id, err := newSessionUUID()
+			if err != nil {
+				return execResult{Message: "Could not choose a session ID: " + err.Error()}
+			}
+			session = claudeSession{ID: id}
+		}
+		if err := e.db.UpdateTaskClaudeSessionID(task.ID, session.ID); err != nil {
+			e.logger.Warn("failed to record remote session ID", "task", task.ID, "error", err)
 		}
 	}
-	if resumeID != "" {
+	if session.Resume {
 		// The resumed conversation already has the task; it gets only the reply,
 		// as a local resume does.
 		prompt = feedback
@@ -103,7 +129,7 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 		}
 	}
 	switch {
-	case resumeID != "":
+	case session.Resume:
 		// Told at its first run.
 	case mcpConfig != "":
 		prompt += proxyInstructions(controllerName())
@@ -113,7 +139,7 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 		prompt += fallbackFinishInstructions()
 	}
 
-	script, err := remoteLaunchScriptWith(task, executorName, r.WorkDir, prompt, mcpConfig, resumeID, runID)
+	script, err := remoteLaunchScriptWith(task, executorName, r.WorkDir, prompt, mcpConfig, session, runID)
 	script = "export WORKTREE_COORDINATOR_ID=" + shellQuote(coordinator) + " WORKTREE_RUN_ID=" + shellQuote(runID) + "; " + script
 	if err != nil {
 		e.logLine(task.ID, "error", err.Error())
@@ -211,16 +237,17 @@ func (e *Executor) writeRemotePrompt(ctx context.Context, taskID int64, prompt s
 // Claude and Codex have remote launch adapters. Another executor is not silently
 // downgraded to a local run: it fails, visibly, with a message saying why.
 func remoteLaunchScript(task *db.Task, executorName, workDir, prompt string, runs ...string) (string, error) {
-	return remoteLaunchScriptWith(task, executorName, workDir, prompt, "", "", runs...)
+	return remoteLaunchScriptWith(task, executorName, workDir, prompt, "", claudeSession{}, runs...)
 }
 
 // remoteLaunchScriptWith is remoteLaunchScript plus the --mcp-config file that
 // installMCPProxy staged ON THE HOST, when there is one. Unlike the local
 // config, that file and everything it names exist where the agent runs.
 //
-// resumeID, for Claude, is a session on the host to resume (see
-// remoteClaudeSession); the prompt is then the next message in it.
-func remoteLaunchScriptWith(task *db.Task, executorName, workDir, prompt, mcpConfig, resumeID string, runs ...string) (string, error) {
+// session, for Claude, is the conversation to start (--session-id) or to resume
+// on the host (--resume, see remoteClaudeSession); a resume's prompt is the next
+// message in it.
+func remoteLaunchScriptWith(task *db.Task, executorName, workDir, prompt, mcpConfig string, session claudeSession, runs ...string) (string, error) {
 	if !SupportsRemoteExecutor(executorName) {
 		return "", fmt.Errorf(
 			"placement chose a remote host, but ty can launch Claude and Codex remotely, not %q (this task uses %q); "+
@@ -243,8 +270,11 @@ func remoteLaunchScriptWith(task *db.Task, executorName, workDir, prompt, mcpCon
 	if mcpConfig != "" {
 		flags = "--mcp-config=" + shellQuote(mcpConfig) + " " + flags // `=` form: see claudeMCPConfigFlag
 	}
-	if resumeID != "" {
-		flags += "--resume " + shellQuote(resumeID) + " "
+	switch {
+	case session.Resume:
+		flags += "--resume " + shellQuote(session.ID) + " "
+	case session.ID != "":
+		flags += "--session-id " + shellQuote(session.ID) + " "
 	}
 	if executorName == "codex" {
 		flags = ""
@@ -310,32 +340,65 @@ func findOrCreateRemoteDaemonSession(ctx context.Context, coordinator string) (s
 // remoteSessionIDRe is a Claude session ID: the name of its transcript file.
 var remoteSessionIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$`)
 
+// claudeSession is the Claude conversation a remote launch starts or resumes.
+type claudeSession struct {
+	ID     string
+	Resume bool
+}
+
+// newSessionUUID returns a random (version 4) UUID for claude --session-id.
+func newSessionUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
+}
+
 // remoteClaudeSession returns the Claude session to resume in a placed task's
-// worktree on its host, or "" when there is none. ctx must carry the host's
-// runner.
+// worktree on its host, or "" when the host has none. ctx must carry the host's
+// runner. Failing to find out — the host cannot be reached, the worktree is not
+// there — is an error, not "none": the caller must not start over in its place.
 //
 // The session is on the host, never here: Claude keeps a conversation under
 // <config dir>/projects/<the directory, escaped>/<id>.jsonl on the machine that
-// ran it. A placed task's worktree is its own (setupRemoteWorktree), so the
-// newest conversation there is this task's. Both escapings Claude has used are
-// tried: every non-alphanumeric character to "-", and only "/" and ".".
-func remoteClaudeSession(ctx context.Context, workDir string) string {
+// ran it. The session ty recorded (stored) is preferred when the host still has
+// it. Otherwise, as for runs launched before ty chose their session IDs, the
+// newest conversation in the worktree is taken: a placed task's worktree is its
+// own (setupRemoteWorktree), so that is this task's. Both escapings Claude has
+// used are tried: every non-alphanumeric character to "-", and only "/" and ".".
+func remoteClaudeSession(ctx context.Context, workDir, stored string) (string, error) {
 	if workDir == "" {
-		return ""
+		return "", fmt.Errorf("the task's worktree on the host is not recorded")
+	}
+	if !remoteSessionIDRe.MatchString(stored) {
+		stored = ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	script := "cd " + shellQuoteRemotePath(workDir) + " 2>/dev/null || exit 0; " +
-		`base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; wd=$(pwd -P); ` +
+	script := "cd " + shellQuoteRemotePath(workDir) + ` || { echo "the worktree is not there" >&2; exit 3; }; ` +
+		`base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; wd=$(pwd -P); stored=` + shellQuote(stored) + `; ` +
+		`for esc in "$(printf %s "$wd" | tr -c 'A-Za-z0-9' '-')" "$(printf %s "$wd" | tr '/.' '--')"; do ` +
+		`[ -n "$stored" ] && [ -f "$base/$esc/$stored.jsonl" ] && { echo "$stored"; exit 0; }; done; ` +
 		`for esc in "$(printf %s "$wd" | tr -c 'A-Za-z0-9' '-')" "$(printf %s "$wd" | tr '/.' '--')"; do ` +
 		`id=$(ls -t "$base/$esc" 2>/dev/null | grep -E '^[0-9a-fA-F-]+[.]jsonl$' | head -n 1); ` +
 		`[ -n "$id" ] && { echo "${id%.jsonl}"; exit 0; }; done; exit 0`
 	out, err := command(ctx, "", "sh", "-c", script).Output()
 	if err != nil {
-		return ""
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("timed out: %w", ctx.Err())
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return "", fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return "", err
 	}
 	if id := strings.TrimSpace(string(out)); remoteSessionIDRe.MatchString(id) {
-		return id
+		return id, nil
 	}
-	return ""
+	return "", nil
 }
