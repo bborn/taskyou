@@ -15,19 +15,34 @@ import (
 
 // fakeRemoteTmux stands in for ssh plus the tmux server on each placed host.
 // The ssh stub runs the command it is given with a fake tmux first on PATH; that
-// tmux keeps its windows in a file, one "host session window_id window_name"
-// line per window, so a test can see exactly which windows a sweep ended. The
-// host "asleep" is unreachable: ssh exits 255 before running anything.
+// tmux keeps its windows in a file, one "host session window_id window_name
+// [activity [start command...]]" line per window, so a test can see exactly
+// which windows a sweep ended. Its list-panes answers with the pane PIDs in the
+// panes file. The host "asleep" is unreachable: ssh exits 255 before running
+// anything.
+//
+// Its ps lists only the processes a test started under procs/<host>/ (see
+// sideProcess), so a sweep can never reach a real process on this machine.
 type fakeRemoteTmux struct {
 	state string // the windows file
+	panes string // live pane PIDs, one per line
 	log   string // one line per ssh call: host, then the remote command
+	procs string // the root under which each host's side processes run
 }
 
 func newFakeRemoteTmux(t *testing.T, windows ...string) *fakeRemoteTmux {
 	t.Helper()
 	dir := t.TempDir()
-	f := &fakeRemoteTmux{state: filepath.Join(dir, "windows"), log: filepath.Join(dir, "ssh.log")}
+	f := &fakeRemoteTmux{
+		state: filepath.Join(dir, "windows"),
+		panes: filepath.Join(dir, "panes"),
+		log:   filepath.Join(dir, "ssh.log"),
+		procs: filepath.Join(dir, "procs"),
+	}
 	if err := os.WriteFile(f.state, []byte(strings.Join(windows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.panes, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(dir, "bin")
@@ -35,6 +50,7 @@ func newFakeRemoteTmux(t *testing.T, windows ...string) *fakeRemoteTmux {
 		t.Fatal(err)
 	}
 	tmux := `#!/bin/sh
+[ "$1" = -S ] && shift 2
 cmd=$1; shift
 target=
 while [ $# -gt 0 ]; do
@@ -43,9 +59,11 @@ while [ $# -gt 0 ]; do
 done
 case "$cmd" in
 list-windows)
-  out=$(awk -v h="$FAKE_HOST" -v s="${target#=}" '$1==h && $2==s {print $3, $4}' "$FAKE_TMUX_STATE")
+  out=$(awk -v h="$FAKE_HOST" -v s="${target#=}" '$1==h && $2==s {a=$5; if (a=="") a=0; c=""; for (i=6; i<=NF; i++) c=c (i>6?" ":"") $i; print $3, $4, a, c}' "$FAKE_TMUX_STATE")
   [ -n "$out" ] || { echo "can't find session: ${target#=}" >&2; exit 1; }
   printf '%s\n' "$out" ;;
+list-panes)
+  cat "$FAKE_TMUX_PANES" ;;
 kill-window)
   awk -v h="$FAKE_HOST" -v i="$target" '$1==h && $3==i {found=1} END {exit !found}' "$FAKE_TMUX_STATE" || exit 1
   awk -v h="$FAKE_HOST" -v i="$target" '!($1==h && $3==i)' "$FAKE_TMUX_STATE" > "$FAKE_TMUX_STATE.new"
@@ -56,11 +74,18 @@ esac
 	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(tmux), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	ps := "#!/bin/sh\n/bin/ps \"$@\" | grep -F \"$FAKE_PROC_ROOT/$FAKE_HOST/\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "ps"), []byte(ps), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("FAKE_TMUX_STATE", f.state)
+	t.Setenv("FAKE_TMUX_PANES", f.panes)
+	t.Setenv("FAKE_PROC_ROOT", f.procs)
+	t.Setenv("TMUX_TMPDIR", t.TempDir()) // no real tmux sockets to walk
 	stubSSH(t, `#!/bin/sh
 while [ "$1" != "--" ]; do shift; done
 host=$2
-printf '%s %s\n' "$host" "$3" >> `+shellQuote(f.log)+`
+printf '%s %s\n' "$host" "$(printf '%s' "$3" | tr '\n' ' ')" >> `+shellQuote(f.log)+`
 [ "$host" = asleep ] && exit 255
 inner=${3#sh -lc }
 # Exported, not prefixed to eval: dash (Ubuntu's sh) keeps assignments before a
@@ -161,7 +186,7 @@ func TestFinishedRemoteTaskSessionsAreEnded(t *testing.T) {
 	}, keep...)...)
 
 	now := time.Now()
-	e.endFinishedRemoteSessions(context.Background(), now)
+	e.sweepRemoteSessions(context.Background(), now)
 
 	sort.Strings(keep)
 	if got := fake.windows(t); strings.Join(got, "\n") != strings.Join(keep, "\n") {
@@ -192,13 +217,13 @@ func TestFinishedRemoteTaskSessionsAreEnded(t *testing.T) {
 
 	// The next sweep asks nothing of mona, and backs off the unreachable host...
 	before := len(fake.calls(t))
-	e.endFinishedRemoteSessions(context.Background(), now.Add(time.Second))
+	e.sweepRemoteSessions(context.Background(), now.Add(time.Second))
 	if after := fake.calls(t); len(after) != before {
 		t.Fatalf("second sweep made ssh calls: %v", after[before:])
 	}
 
 	// ...until its backoff has passed, when it is tried again.
-	e.endFinishedRemoteSessions(context.Background(), now.Add(remoteSessionEndMaxBackoff))
+	e.sweepRemoteSessions(context.Background(), now.Add(remoteSessionEndMaxBackoff))
 	after := fake.calls(t)
 	if len(after) != before+1 || !strings.HasPrefix(after[len(after)-1], "asleep ") {
 		t.Fatalf("unreachable host was not retried after its backoff: %v", after[before:])

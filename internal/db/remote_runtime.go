@@ -189,3 +189,35 @@ func (db *DB) EndRemoteRun(taskID int64, runID string) error {
 	_, err := db.Exec(`DELETE FROM remote_runs WHERE task_id=? AND run_id=?`, taskID, runID)
 	return err
 }
+
+// BlockedRemoteRuns lists the remote runs of tasks that are blocked: parked,
+// waiting for a reply, with their agent possibly still running on the host. The
+// daemon's idle sweep picks the ones parked too long from these.
+func (db *DB) BlockedRemoteRuns() ([]RemoteRun, error) {
+	rows, err := db.Query(`SELECT r.task_id,r.run_id,r.host,t.status FROM remote_runs r JOIN tasks t ON t.id=r.task_id
+ WHERE t.status=? AND t.deleted_at IS NULL ORDER BY r.host, r.task_id`, StatusBlocked)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []RemoteRun
+	for rows.Next() {
+		var r RemoteRun
+		if err := rows.Scan(&r.TaskID, &r.RunID, &r.Host, &r.Status); err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+// SuspendRemoteRun records that a blocked task's agent session on its host was
+// ended, the way ClearTaskSessionPlacement does for a local one: the task keeps
+// its status and its worktree, and loses only its tmux placement. It applies
+// only while the task is still blocked on that run, so a task that was replied
+// to and placed again in the meantime keeps its new session.
+func (db *DB) SuspendRemoteRun(taskID int64, runID string) error {
+	_, err := db.Exec(`UPDATE tasks SET tmux_window_id='', claude_pane_id='', shell_pane_id='', daemon_session='', updated_at=CURRENT_TIMESTAMP
+ WHERE id=? AND status=? AND EXISTS (SELECT 1 FROM remote_runs WHERE task_id=? AND run_id=?)`, taskID, StatusBlocked, taskID, runID)
+	return err
+}

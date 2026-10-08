@@ -448,7 +448,7 @@ func TestValidateRemoteMCPProxy(t *testing.T) {
 // staged; nothing about this machine's own MCP config travels.
 func TestRemoteLaunchPassesTheStagedMCPConfig(t *testing.T) {
 	task := &db.Task{ID: 42, Port: 3042}
-	script, err := remoteLaunchScriptWith(task, "claude", "/srv/x/.task-worktrees/42-x", "go", "/srv/x/.task-worktrees/42-x/.ty/mcp/config.json", "abc123")
+	script, err := remoteLaunchScriptWith(task, "claude", "/srv/x/.task-worktrees/42-x", "go", "/srv/x/.task-worktrees/42-x/.ty/mcp/config.json", claudeSession{}, "abc123")
 	if err != nil {
 		t.Fatal(err)
 	}

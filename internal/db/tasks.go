@@ -1591,9 +1591,16 @@ func (db *DB) GetTaskPlacementDecision(taskID int64) (TaskPlacement, error) {
 // way a placed task moves hosts: a host that has gone away fails the task
 // visibly rather than silently re-placing it, because a silent move orphans the
 // worktree, branch and executor session the first attempt left behind.
+//
+// A run on another host recorded its Claude session ID, and that session lives
+// on that host, so it is forgotten with the placement: left behind, it reads as
+// "the first attempt's executor session" to HasLocalState, which then pins the
+// task to this machine and never asks the resolver at all. A local placement's
+// session is kept; it is here, and a re-resolve may well keep the task here.
 func (db *DB) ClearTaskPlacement(taskID int64) error {
 	_, err := db.Exec(`UPDATE tasks
-		SET placement_target = '', placement_reason = '', placement_workdir = '',
+		SET claude_session_id = CASE WHEN COALESCE(placement_target, '') NOT IN ('', 'local') THEN '' ELSE claude_session_id END,
+		    placement_target = '', placement_reason = '', placement_workdir = '',
 		    placement_decided_at = NULL, remote_worktree_path = '', remote_branch = ''
 		WHERE id = ?`, taskID)
 	return err

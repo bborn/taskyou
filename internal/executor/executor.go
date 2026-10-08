@@ -1609,11 +1609,12 @@ func (e *Executor) worker(ctx context.Context) {
 				e.reconcileFinishedWorkflowSteps()
 			}
 
-			// End the remote agents of tasks that were closed or archived. A
-			// placed task's window is on another host, where none of the local
-			// cleanup reaches.
+			// End the remote agents of tasks that were closed or archived, and
+			// suspend placed tasks that have sat blocked too long. A placed
+			// task's window is on another host, where none of the local cleanup
+			// (cleanupInactiveDoneTasks, suspendIdleBlockedTasks) reaches.
 			if tickCount%remoteSessionEndInterval == 0 {
-				e.startEndingFinishedRemoteSessions(ctx)
+				e.startSweepingRemoteSessions(ctx)
 			}
 
 			// Periodically cleanup Claude processes for inactive done tasks
@@ -2430,13 +2431,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if placedRemote {
 		e.logLine(task.ID, "system", fmt.Sprintf("Placed on %s by the %s plugin: %s",
 			remotePlacement.Host, placement.Handler, placement.Reason))
-		remotePrompt := prompt
-		if isRetry {
-			// A remote session has no stored executor session to resume, so the
-			// feedback has to travel in the prompt or it is simply lost.
-			remotePrompt = prompt + "\n\n" + retryFeedback
-		}
-		result = e.runRemoteSession(taskCtx, task, remotePlacement, executorName, remotePrompt)
+		// A retry resumes the agent's conversation on the host when it can;
+		// runRemoteSession decides, because the session is over there.
+		result = e.runRemoteSession(taskCtx, task, remotePlacement, executorName, prompt, retryFeedback)
 	} else if isRetry {
 		// Include attachments info in retry feedback so Claude knows about them
 		// This is important when attachments are added after the initial run or when resuming
