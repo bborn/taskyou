@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -168,6 +170,18 @@ type hostWork struct {
 
 func (w hostWork) empty() bool { return len(w.finished) == 0 && len(w.idle) == 0 }
 
+// taskIDs lists the tasks w acts on.
+func (w hostWork) taskIDs() []int64 {
+	ids := make([]int64, 0, len(w.finished)+len(w.idle))
+	for _, run := range w.finished {
+		ids = append(ids, run.TaskID)
+	}
+	for _, run := range w.idle {
+		ids = append(ids, run.TaskID)
+	}
+	return ids
+}
+
 // sweepRemoteSessions ends the remote sessions of done and archived tasks, and
 // suspends blocked tasks that have been idle too long, one ssh call per host.
 func (e *Executor) sweepRemoteSessions(ctx context.Context, now time.Time) {
@@ -206,6 +220,14 @@ func (e *Executor) sweepRemoteSessions(ctx context.Context, now time.Time) {
 			wait := e.sessionEnd.failed(host, now)
 			e.logger.Warn("Could not end tasks' sessions on host; will retry",
 				"host", host, "finished", len(pending.finished), "idle", len(pending.idle), "retry_in", wait, "error", err)
+			// Each task's log says so once per run of failures, not on every
+			// retry: the first failure is the one backed off the least.
+			if wait == remoteSessionEndMinBackoff {
+				for _, id := range pending.taskIDs() {
+					e.logLine(id, "system", fmt.Sprintf(
+						"Could not reach %s to end this task's agent session; will retry: %v", host, err))
+				}
+			}
 			continue
 		}
 		e.sessionEnd.succeeded(host)
@@ -281,6 +303,29 @@ func boolInt(b bool) int {
 	return 0
 }
 
+// stderrTail is how much of a failed remote command's stderr an error keeps:
+// the end, where ssh and the shell put the reason.
+const stderrTail = 300
+
+// withStderr adds what a failed command said on stderr to its error. ssh exits
+// 255 for every failure of its own — refused, unreachable, the session lost,
+// the remote command killed by a signal — and "exit status 255" alone cannot
+// tell those apart.
+func withStderr(err error) error {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+	msg := strings.TrimSpace(string(exitErr.Stderr))
+	if msg == "" {
+		return err
+	}
+	if len(msg) > stderrTail {
+		msg = "…" + strings.TrimSpace(strings.ToValidUTF8(msg[len(msg)-stderrTail:], ""))
+	}
+	return fmt.Errorf("%w: %s", err, strings.Join(strings.Fields(msg), " "))
+}
+
 // remoteEnded is what a host reports having done.
 type remoteEnded struct {
 	windows  map[int64]bool          // tasks that had a window ended
@@ -320,7 +365,7 @@ func endRemoteTaskSessions(ctx context.Context, host, session string, work hostW
 	defer cancel()
 	out, err := command(ctx, "", "sh", "-c", hostSweepScript(session, windowSpecs, procSpecs)).Output()
 	if err != nil {
-		return remoteEnded{}, err
+		return remoteEnded{}, withStderr(err)
 	}
 	ended := remoteEnded{
 		windows:  make(map[int64]bool),
