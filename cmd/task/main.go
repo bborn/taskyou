@@ -587,6 +587,10 @@ only reaped after a long stretch of no activity at all (default 24h, settable
 via the reap_blocked_idle setting), and their agent process is never reaped on
 staleness.
 
+This reaches this machine only. Blocked tasks placed on another host are
+suspended there by the daemon once idle_suspend_timeout passes, and their side
+processes are ended once reap_blocked_idle passes as well.
+
 Use --dry-run to see exactly what would be killed, and why, before it is.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			force, _ := cmd.Flags().GetBool("force")

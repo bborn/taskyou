@@ -2431,13 +2431,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if placedRemote {
 		e.logLine(task.ID, "system", fmt.Sprintf("Placed on %s by the %s plugin: %s",
 			remotePlacement.Host, placement.Handler, placement.Reason))
-		remotePrompt := prompt
-		if isRetry {
-			// A remote session has no stored executor session to resume, so the
-			// feedback has to travel in the prompt or it is simply lost.
-			remotePrompt = prompt + "\n\n" + retryFeedback
-		}
-		result = e.runRemoteSession(taskCtx, task, remotePlacement, executorName, remotePrompt)
+		// A retry resumes the agent's conversation on the host when it can;
+		// runRemoteSession decides, because the session is over there.
+		result = e.runRemoteSession(taskCtx, task, remotePlacement, executorName, prompt, retryFeedback)
 	} else if isRetry {
 		// Include attachments info in retry feedback so Claude knows about them
 		// This is important when attachments are added after the initial run or when resuming

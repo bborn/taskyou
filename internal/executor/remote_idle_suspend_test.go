@@ -233,3 +233,64 @@ func TestIdleRemoteSuspendHonoursReapBlockedIdle(t *testing.T) {
 		t.Error("side process was killed with reap_blocked_idle disabled")
 	}
 }
+
+// Replying to a task the idle sweep suspended on its host resumes the Claude
+// conversation it had there, as a local retry does, rather than starting a new
+// one that has forgotten everything: the session is found on the host, in the
+// task's own worktree, and the agent is launched with --resume.
+func TestRetryOfSuspendedRemoteTaskResumesItsSession(t *testing.T) {
+	newFakeRemoteTmux(t) // ssh runs the command here
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	worktree := filepath.Join(t.TempDir(), "repo", ".task-worktrees", "7-fix_login")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithRunner(context.Background(), RemoteRunner{Host: "mona"})
+
+	if id := remoteClaudeSession(ctx, worktree); id != "" {
+		t.Fatalf("session = %q with none on the host, want none", id)
+	}
+
+	projects := filepath.Join(home, ".claude", "projects")
+	escaped := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, real)
+	older, newer := "11111111-2222-3333-4444-555555555555", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	for i, name := range []string{older + ".jsonl", "agent-x.jsonl", newer + ".jsonl"} {
+		file := filepath.Join(projects, escaped, name)
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().Add(time.Duration(i-3) * time.Hour)
+		if name == "agent-x.jsonl" {
+			at = time.Now() // newest, but a subagent's transcript, not a session
+		}
+		if err := os.Chtimes(file, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id := remoteClaudeSession(ctx, worktree); id != newer {
+		t.Fatalf("session = %q, want the newest, %q", id, newer)
+	}
+
+	task := &db.Task{ID: 7, Title: "fix login"}
+	script, err := remoteLaunchScriptWith(task, "claude", worktree, "the reply", "", newer, "run1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "--resume '"+newer+"' \"$(cat ") {
+		t.Errorf("launch line does not resume the session with the reply:\n%s", script)
+	}
+}
