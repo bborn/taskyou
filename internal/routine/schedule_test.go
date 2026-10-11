@@ -120,6 +120,7 @@ func TestCleanDuration(t *testing.T) {
 
 func TestRenderPlistContent(t *testing.T) {
 	setupScheduleTest(t)
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin::/usr/local/bin:/bin")
 	content := renderPlist("scout", ScheduleOptions{Every: 30 * time.Minute})
 
 	for _, want := range []string{
@@ -133,8 +134,8 @@ func TestRenderPlistContent(t *testing.T) {
 			t.Errorf("plist missing %q:\n%s", want, content)
 		}
 	}
-	if !strings.Contains(content, os.Getenv("PATH")) {
-		t.Error("plist should capture the invoking shell's PATH")
+	if !strings.Contains(content, "<string>/usr/local/bin:/usr/bin:/bin</string>") {
+		t.Errorf("plist should capture the invoking shell's PATH, deduplicated:\n%s", content)
 	}
 }
 
