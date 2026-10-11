@@ -416,6 +416,10 @@ func scheduleRoutine(name string, opts routine.ScheduleOptions, printOnly bool) 
 		}
 		fmt.Println(dimStyle.Render("# backend: " + backend))
 		fmt.Println(content)
+		if backend == "cron" {
+			fmt.Println(dimStyle.Render("# the line above runs this wrapper, written at install time:"))
+			fmt.Print(routine.RenderCronWrapper(name))
+		}
 		return
 	}
 
