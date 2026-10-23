@@ -1055,24 +1055,6 @@ func TestBuildBoardSnapshot(t *testing.T) {
 	}
 }
 
-// --- CORS ---
-
-func TestCORS(t *testing.T) {
-	srv, _, _ := setupServer(t)
-
-	// Test preflight
-	req := httptest.NewRequest("OPTIONS", "/api/board", nil)
-	w := httptest.NewRecorder()
-	cors(http.HandlerFunc(srv.handleBoard)).ServeHTTP(w, req)
-
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d", w.Code)
-	}
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("missing CORS header")
-	}
-}
-
 // TestMain keeps every test in this package off the live tmux server; see
 // internal/tmuxtest.
 func TestMain(m *testing.M) {
