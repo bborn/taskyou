@@ -18,7 +18,7 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: checkRequestOrigin,
 }
 
 // handleTerminal provides a WebSocket that bridges xterm.js to a tmux pane.

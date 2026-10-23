@@ -83,20 +83,6 @@ func (s *Server) agentSender() *agentsend.Sender {
 	return agentsend.New(s.runner, s.db)
 }
 
-// cors wraps a handler with permissive CORS headers for local development.
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // New creates a new API server.
 func New(cfg Config) *Server {
 	s := &Server{
@@ -217,7 +203,7 @@ func New(cfg Config) *Server {
 
 	s.srv = &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      cors(mux),
+		Handler:      originGuard(mux),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 60 * time.Second, // long for SSE
 		IdleTimeout:  120 * time.Second,
